@@ -150,12 +150,53 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         setupMenuBar()
     }
 
-    /// Draws the menu-bar remote glyph. When `paused` is true, a small pause badge is
-    /// notched into the bottom-right corner to signal that the microphone bridge is
-    /// enabled but not currently running. The image stays a template so macOS keeps
-    /// tinting it for light/dark menu bars; the badge is rendered as tinted disc with the
-    /// two pause bars punched out as transparent negative space.
+    /// The menu-bar glyph: the Apple TV remote SF Symbol, with a pause badge notched into
+    /// the bottom-right corner when `paused` (remote disconnected or bridge stopped). Falls
+    /// back to a hand-drawn remote if the symbol is unavailable (older macOS). The image
+    /// stays a template so macOS keeps tinting it for light/dark menu bars.
     private static func makeRemoteIcon(paused: Bool = false) -> NSImage {
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        guard let symbol = NSImage(systemSymbolName: "appletvremote.gen4", accessibilityDescription: "VibeRemote")?
+            .withSymbolConfiguration(config) else {
+            return makeFallbackRemoteIcon(paused: paused)
+        }
+        guard paused else {
+            symbol.isTemplate = true
+            return symbol
+        }
+        let size = symbol.size
+        let badged = NSImage(size: size, flipped: false) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            symbol.draw(in: rect)
+            let r = size.width * 0.34
+            let cx = size.width - r * 0.85
+            let cy = r * 0.85
+
+            // Notch a transparent moat so the badge reads as a separate element.
+            ctx.setBlendMode(.clear)
+            ctx.fillEllipse(in: CGRect(x: cx - r * 1.2, y: cy - r * 1.2, width: r * 2.4, height: r * 2.4))
+
+            // Solid (tinted) badge disc.
+            ctx.setBlendMode(.normal)
+            ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+            ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+
+            // Two pause bars punched out of the disc.
+            ctx.setBlendMode(.clear)
+            let barW = r * 0.30
+            let barH = r * 0.92
+            let gap = r * 0.24
+            ctx.fill(CGRect(x: cx - gap / 2 - barW, y: cy - barH / 2, width: barW, height: barH))
+            ctx.fill(CGRect(x: cx + gap / 2, y: cy - barH / 2, width: barW, height: barH))
+            ctx.setBlendMode(.normal)
+            return true
+        }
+        badged.isTemplate = true
+        return badged
+    }
+
+    /// Hand-drawn remote used only when the SF Symbol is unavailable.
+    private static func makeFallbackRemoteIcon(paused: Bool = false) -> NSImage {
         let pt: CGFloat = 18
         let image = NSImage(size: NSSize(width: pt, height: pt), flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
