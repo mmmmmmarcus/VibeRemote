@@ -100,16 +100,27 @@ final class ModelTests: XCTestCase {
         ))
     }
 
-    func testMuteButtonDrivesPunctuationWithoutHold() {
+    func testMuteButtonTypesSlashAndActsAsModifier() {
         let mute = remoteButtonDescriptors.first { $0.key == "mute" }
-        XCTAssertEqual(mute?.defaultAction, .punctuation)
-        // Punctuation is a tap/double-tap/long-press gesture, not a held-key action.
-        XCTAssertFalse(ButtonAction.punctuation.requiresHold)
+        XCTAssertEqual(mute?.defaultAction, .slashOrModifier)
+        // The tap/modifier split is timed on release, not a held-key action.
+        XCTAssertFalse(ButtonAction.slashOrModifier.requiresHold)
         XCTAssertEqual(mute?.supportsHold, false)
         // The 2nd-gen remote reports mute as Consumer 0xE2 (the standard usage). Without
         // this mapping the HID marker is never set, the media-key interceptor lets the
-        // event through, and the button mutes the system instead of typing punctuation.
+        // event through, and the button mutes the system instead of acting as our key.
         XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0xE2), "mute")
+    }
+
+    func testModifierChordTableCoversBackAndPlayPauseOnly() {
+        // The physical Back button reports as "back" or "menu" depending on the remote;
+        // both must clear the input or the chord silently degrades to plain Backspace.
+        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "back"), .clearInput)
+        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "menu"), .clearInput)
+        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "playPause"), .escape)
+        for descriptor in remoteButtonDescriptors where !["back", "menu", "playPause"].contains(descriptor.key) {
+            XCTAssertNil(RemoteInputHandler.modifierChord(for: descriptor.key), descriptor.key)
+        }
     }
 
     func testEveryRemoteButtonDescriptorHasAUniqueKeyAndValidHoldDefault() {

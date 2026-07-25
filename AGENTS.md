@@ -102,8 +102,9 @@ single source of truth. Only the **Siri button** is user-customizable (persisted
 Current intent: clickpad arrows → arrow keys, clickpad center → Enter, Back/Menu →
 Backspace, TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
 the Codex/Claude desktop client to the front, Power → Enter, volume keys → bullet-list
-control, Siri → held Space, Mute → punctuation (tap comma, double-tap period, long-press
-question mark; raw key codes, so the active input method picks half- or full-width forms).
+control, Siri → held Space, Mute → tap types "/" (the skill/command-picker trigger in
+agent apps); held, it is a modifier: Mute+Back clears all input (Cmd+A, Backspace) and
+Mute+Play/Pause sends Esc (stop the current task).
 
 **The remote reports one press and one release with no repeats in between.** Key repeat and
 tap/long-press are therefore synthesized in `RemoteInputHandler`:
@@ -112,9 +113,11 @@ tap/long-press are therefore synthesized in `RemoteInputHandler`:
   release event is ever dropped.
 - `beginTapOrLongPress` distinguishes a tap from a hold (volume-up: tap indents, long-press
   starts a bullet). Timers are torn down on release and on disconnect.
-- `beginTapDoubleTapOrLongPress` adds a three-way split for the mute/punctuation button. A
-  single tap can only be confirmed after the ~0.3s double-tap window passes, so the comma
-  intentionally lands with that delay — don't "fix" it by firing on first release.
+- `beginModifierHold` / `resolveModifierRelease` make the mute button a tap-or-modifier
+  key: a quick release types "/", a hold arms the chords in `modifierChord(for:)` (chorded
+  buttons skip their normal action entirely, including auto-repeat). Concurrent presses are
+  safe: the firmware reports buttons as independent HID events, verified with overlapping
+  press intervals in real logs (mute held + playPause both delivered).
 - An earlier attempt tracked bullet-list "context" to decide between `- ` and Tab. It was
   unreliable (any manual typing or focus change desynced it) and was replaced by this
   deterministic tap/hold model. Don't reintroduce blind state tracking of editor content.

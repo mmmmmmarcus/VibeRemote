@@ -520,12 +520,20 @@ final class RemoteInputHandler {
 
     private func executeAction(_ action: ButtonAction, button: String, pressed: Bool) {
         guard pressed else {
-            // Release: stop any auto-repeat, resolve a pending tap/long-press, and release
-            // any physically held key captured for this button.
+            // Release: stop any auto-repeat, resolve a pending tap/long-press or modifier,
+            // and release any physically held key captured for this button.
             stopRepeat(for: button)
             resolveRelease(for: button)
-            resolveMultiTapRelease(for: button)
+            resolveModifierRelease(for: button)
             releaseHeldKey(for: button)
+            return
+        }
+
+        // A held modifier (mute) reroutes chorded buttons to their advanced action and
+        // suppresses their normal one entirely — including hold behaviors like auto-repeat.
+        if !heldModifierButtons.isEmpty, let chord = Self.modifierChord(for: button) {
+            modifierChordFired.formUnion(heldModifierButtons)
+            performChord(chord)
             return
         }
 
@@ -566,16 +574,10 @@ final class RemoteInputHandler {
             )
         case .bulletOutdent:
             sendKey(kVK_Tab, flags: .maskShift)
-        case .punctuation:
-            // Tap = comma, double-tap = period, long-press = question mark. The physical
-            // keys are sent unmodified (Shift+/ for "?"), so the active input method
-            // decides between half- and full-width forms (, vs ,).
-            beginTapDoubleTapOrLongPress(
-                button: button,
-                tap: { [weak self] in self?.sendKey(kVK_ANSI_Comma) },
-                doubleTap: { [weak self] in self?.sendKey(kVK_ANSI_Period) },
-                longPress: { [weak self] in self?.sendKey(kVK_ANSI_Slash, flags: .maskShift) }
-            )
+        case .slashOrModifier:
+            // Quick tap types "/" (the skill/command-picker trigger in agent apps); holding
+            // arms the button as a modifier for the chords in `modifierChord(for:)`.
+            beginModifierHold(button: button)
         case .spaceKey, .rightCmd, .rightOpt:
             break // handled above
         }
@@ -651,77 +653,62 @@ final class RemoteInputHandler {
         pendingTapActions[button] = nil
     }
 
-    // MARK: Tap / double-tap / long-press
+    // MARK: Tap-or-modifier (mute button)
 
-    // Three-way recognizer (punctuation button). A single tap can only be confirmed after
-    // the double-tap window passes, so the tap action fires ~0.3s after release — the
-    // unavoidable cost of sharing one button between three gestures.
-    private var multiTapHoldTimers: [String: Timer] = [:]      // press → long-press threshold
-    private var multiTapConfirmTimers: [String: Timer] = [:]   // release → double-tap window
-    private var multiTapPendingSingle: [String: () -> Void] = [:]
-    private var multiTapPendingDouble: [String: () -> Void] = [:]
-    private var multiTapAwaitingSecondRelease: Set<String> = []
-
-    private let doubleTapWindow: TimeInterval = 0.3
-
-    private func beginTapDoubleTapOrLongPress(
-        button: String,
-        tap: @escaping () -> Void,
-        doubleTap: @escaping () -> Void,
-        longPress: @escaping () -> Void
-    ) {
-        if let confirm = multiTapConfirmTimers[button] {
-            // Second press inside the window: the pending single tap is off, and the
-            // double-tap action fires on this press's release.
-            confirm.invalidate()
-            multiTapConfirmTimers[button] = nil
-            multiTapPendingSingle[button] = nil
-            multiTapPendingDouble[button] = doubleTap
-            multiTapAwaitingSecondRelease.insert(button)
-            return
-        }
-        cancelMultiTap(for: button)
-        multiTapPendingSingle[button] = tap
-        let timer = Timer.scheduledTimer(withTimeInterval: longPressThreshold, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.multiTapHoldTimers[button] = nil
-            self.multiTapPendingSingle[button] = nil
-            longPress()
-        }
-        multiTapHoldTimers[button] = timer
+    /// Chord actions available while the mute modifier is held. The firmware reports
+    /// concurrent presses as independent HID events (verified: mute held + playPause both
+    /// delivered), so a chord is just "a mapped button arriving while the modifier is down".
+    enum ModifierChord: Equatable {
+        /// Select everything and delete it (Cmd+A, Backspace).
+        case clearInput
+        /// Esc — the "stop the current task" convention in agent apps.
+        case escape
     }
 
-    private func resolveMultiTapRelease(for button: String) {
-        if multiTapAwaitingSecondRelease.contains(button) {
-            multiTapAwaitingSecondRelease.remove(button)
-            let action = multiTapPendingDouble[button]
-            multiTapPendingDouble[button] = nil
-            action?()
-            return
+    /// Pure mapping so tests can pin the chord table. Both "back" and "menu" are listed
+    /// because the physical Back button reports as either depending on the remote.
+    nonisolated static func modifierChord(for button: String) -> ModifierChord? {
+        switch button {
+        case "back", "menu": return .clearInput
+        case "playPause": return .escape
+        default: return nil
         }
-        // No hold timer means either the long press already fired or this button never
-        // started a multi-tap gesture; both mean the release resolves nothing.
-        guard let hold = multiTapHoldTimers[button] else { return }
-        hold.invalidate()
-        multiTapHoldTimers[button] = nil
-        guard let tap = multiTapPendingSingle[button] else { return }
-        multiTapPendingSingle[button] = nil
-        let timer = Timer.scheduledTimer(withTimeInterval: doubleTapWindow, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.multiTapConfirmTimers[button] = nil
-            tap()
-        }
-        multiTapConfirmTimers[button] = timer
     }
 
-    private func cancelMultiTap(for button: String) {
-        multiTapHoldTimers[button]?.invalidate()
-        multiTapHoldTimers[button] = nil
-        multiTapConfirmTimers[button]?.invalidate()
-        multiTapConfirmTimers[button] = nil
-        multiTapPendingSingle[button] = nil
-        multiTapPendingDouble[button] = nil
-        multiTapAwaitingSecondRelease.remove(button)
+    private var heldModifierButtons: Set<String> = []
+    private var modifierChordFired: Set<String> = []
+    private var modifierPressStart: [String: Date] = [:]
+
+    /// A release quicker than this is a tap (types "/"); anything longer was a modifier
+    /// hold — used or abandoned — and produces nothing on its own.
+    private let modifierTapMaxDuration: TimeInterval = 0.4
+
+    private func beginModifierHold(button: String) {
+        heldModifierButtons.insert(button)
+        modifierChordFired.remove(button)
+        modifierPressStart[button] = Date()
+    }
+
+    private func resolveModifierRelease(for button: String) {
+        guard heldModifierButtons.remove(button) != nil else { return }
+        let pressedAt = modifierPressStart.removeValue(forKey: button)
+        let chorded = modifierChordFired.remove(button) != nil
+        guard !chorded,
+              let pressedAt,
+              Date().timeIntervalSince(pressedAt) < modifierTapMaxDuration else {
+            return
+        }
+        sendKey(kVK_ANSI_Slash)
+    }
+
+    private func performChord(_ chord: ModifierChord) {
+        switch chord {
+        case .clearInput:
+            sendKey(kVK_ANSI_A, flags: .maskCommand)
+            sendKey(kVK_Delete)
+        case .escape:
+            sendKey(kVK_Escape)
+        }
     }
 
     private func stopAllHoldTimers() {
@@ -730,13 +717,9 @@ final class RemoteInputHandler {
         longPressTimers.values.forEach { $0.invalidate() }
         longPressTimers.removeAll()
         pendingTapActions.removeAll()
-        multiTapHoldTimers.values.forEach { $0.invalidate() }
-        multiTapHoldTimers.removeAll()
-        multiTapConfirmTimers.values.forEach { $0.invalidate() }
-        multiTapConfirmTimers.removeAll()
-        multiTapPendingSingle.removeAll()
-        multiTapPendingDouble.removeAll()
-        multiTapAwaitingSecondRelease.removeAll()
+        heldModifierButtons.removeAll()
+        modifierChordFired.removeAll()
+        modifierPressStart.removeAll()
     }
 
     /// "- " + space is the markdown input rule that turns the current line into a bullet.

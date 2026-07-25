@@ -23,7 +23,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case launchAgentClient = "Toggle Codex / Claude Desktop"
     case bulletIndent = "Bullet: New / Indent"
     case bulletOutdent = "Bullet: Outdent / Remove"
-    case punctuation = "Punctuation: Comma / Period / Question"
+    case slashOrModifier = "Slash: Skill Picker / Hold: Modifier"
     case none = "None"
 
     var requiresHold: Bool {
@@ -53,7 +53,8 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
 // - TV              → Shift+Enter (newline; the convention most agent apps use)
 // - Play/Pause      → toggle the Codex / Claude desktop client to the front
 // - Power           → Enter
-// - Mute            → punctuation (tap comma, double-tap period, long-press question mark)
+// - Mute            → tap types "/" (skill/command pickers); held it becomes a modifier:
+//                     Mute+Back clears all input, Mute+Play/Pause sends Esc
 // - Siri            → Space (held; drives voice dictation and the mic bridge)
 let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
     RemoteButtonDescriptor(key: "menu", label: "Menu Button", defaultAction: .backspace, supportsHold: false),
@@ -68,7 +69,7 @@ let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
     RemoteButtonDescriptor(key: "navRight", label: "Clickpad Right", defaultAction: .rightKey, supportsHold: false),
     RemoteButtonDescriptor(key: "volumeUp", label: "Volume Up", defaultAction: .bulletIndent, supportsHold: false),
     RemoteButtonDescriptor(key: "volumeDown", label: "Volume Down", defaultAction: .bulletOutdent, supportsHold: false),
-    RemoteButtonDescriptor(key: "mute", label: "Mute Button", defaultAction: .punctuation, supportsHold: false),
+    RemoteButtonDescriptor(key: "mute", label: "Mute Button", defaultAction: .slashOrModifier, supportsHold: false),
     RemoteButtonDescriptor(key: "power", label: "Power Button", defaultAction: .enterKey, supportsHold: false),
     RemoteButtonDescriptor(key: "nextTrack", label: "Next Track", defaultAction: .rightKey, supportsHold: false),
     RemoteButtonDescriptor(key: "prevTrack", label: "Previous Track", defaultAction: .leftKey, supportsHold: false),
