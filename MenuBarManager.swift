@@ -10,7 +10,7 @@ import AppKit
 enum ButtonAction: String, CaseIterable, Sendable {
     case enterKey = "Enter: Submit prompt"
     case shiftEnter = "Shift + Enter: Newline"
-    case backspace = "Backspace: Delete"
+    case backspace = "Backspace: Delete Word"
     case upKey = "Up: Navigate Up"
     case downKey = "Down: Navigate Down"
     case leftKey = "Left: Navigate Left"
@@ -49,7 +49,8 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
 // Fixed Siri Remote mapping (not user-editable except the Siri button):
 // - Clickpad Up/Down/Left/Right → arrow keys; center press → Enter
 // - Volume Up/Down  → bullet-list control in AI prompt editors (new/indent, outdent/remove)
-// - Back / Menu     → Backspace
+// - Back / Menu     → word-wise Backspace (Option+Delete; the system tokenizer segments
+//                     Chinese, so 我爱北京天安门 deletes 天安门, then 北京, …)
 // - TV              → Shift+Enter (newline; the convention most agent apps use)
 // - Play/Pause      → toggle the Codex / Claude desktop client to the front
 // - Power           → Enter

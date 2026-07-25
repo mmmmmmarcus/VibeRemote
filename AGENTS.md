@@ -197,10 +197,30 @@ few seconds).
 ### No mode toggles
 
 There is no microphone mode and no input mode. With the app open the bridge is always
-meant to be running, and the output stream stays warm for the bridge's lifetime (one
-`Start`/`Restart` action, no `Stop`). Earlier builds had `MicrophoneMode` and
-`MicrophoneInputMode` enums; both were removed because the firmware gates the mic to
-physical Siri-button holds, so a "continuous" mode could not do what its name implied.
+meant to be running, and the output stream stays warm for the bridge's lifetime (no
+`Stop` action). Earlier builds had `MicrophoneMode` and `MicrophoneInputMode` enums;
+both were removed because the firmware gates the mic to physical Siri-button holds, so
+a "continuous" mode could not do what its name implied.
+
+The bridge auto-starts at launch via `startAtLaunchIfPromptFree()`, but only when the
+start is guaranteed silent (Direct HID engine, or PacketLogger engine with the approved
+helper daemon current). Anything that would raise an administrator prompt stays behind
+the explicit `Start`/`Restart` menu action — app launch must never surprise the user
+with a password dialog.
+
+### The HID watchdog (silent re-enumeration)
+
+Starting screen mirroring (and likely other Bluetooth-stack reconfigurations) can make
+macOS silently re-enumerate the remote's HID services. The app's open `IOHIDDevice`
+objects then stop firing callbacks **without any removal notification**: buttons die,
+the firmware's `0xAF` voice enable resets, voice frames stop — and nothing anywhere
+reports an error (capture keeps flowing, the helper idles in `readLine`, battery reads
+keep succeeding). `RemoteInputHandler` records each interface's IOKit registry entry ID
+at open; the 15-second health timer asks `hasStaleInterfaces()` — registry IDs are never
+reused, so a held ID that no longer resolves is definitive — and re-arms the whole
+detection path, which re-seizes the fresh interfaces and re-writes `0xAF`. Do not
+replace this polling probe with IOKit removal notifications alone; the entire reason it
+exists is that the removal callback provably does not arrive in this scenario.
 
 ## The virtual audio device
 

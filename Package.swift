@@ -43,6 +43,7 @@ let package = Package(
                 "VibeRemote",
                 "VibeRemote.app",
                 "VibeRemoteVoiceBridge",
+                "VibeRemoteHelper",
                 "VibeRemoteAppIcon.png",
                 "VibeRemote.entitlements",
                 "VibeRemote.icon",

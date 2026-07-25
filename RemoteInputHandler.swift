@@ -62,6 +62,10 @@ final class RemoteInputHandler {
     private weak var menuBarManager: MenuBarManager?
     private weak var microphoneBridgeManager: MicrophoneBridgeManager?
     private var devices: [ObjectIdentifier: IOHIDDevice] = [:]
+    /// IOKit registry entry IDs of the interfaces we hold open, captured at open time.
+    /// Registry IDs are never reused, so "our ID no longer resolves" is definitive proof the
+    /// service was re-enumerated behind our back (see `hasStaleInterfaces`).
+    private var deviceRegistryIDs: [ObjectIdentifier: UInt64] = [:]
     private var inputReportRegistrations: [ObjectIdentifier: InputReportRegistration] = [:]
     private var audioReportCounts: [ObjectIdentifier: UInt64] = [:]
     private var lastAudioReports: [ObjectIdentifier: (data: Data, time: TimeInterval)] = [:]
@@ -169,8 +173,42 @@ final class RemoteInputHandler {
             CFRunLoopMode.commonModes.rawValue
         )
         devices[interfaceID] = device
+        let service = IOHIDDeviceGetService(device)
+        if service != IO_OBJECT_NULL {
+            var registryID: UInt64 = 0
+            if IORegistryEntryGetRegistryEntryID(service, &registryID) == KERN_SUCCESS {
+                deviceRegistryIDs[interfaceID] = registryID
+            }
+        }
         enableRemoteInputStreaming(on: device)
         return true
+    }
+
+    // MARK: - Stale-interface watchdog
+
+    /// True when at least one interface we hold open no longer exists in the IOKit registry.
+    ///
+    /// macOS can silently re-enumerate the remote's HID services — observed when starting
+    /// screen mirroring reconfigures the Bluetooth stack. The old device objects never fire
+    /// another callback and never report removal, so buttons die and the firmware's voice
+    /// enable resets with no error anywhere. Registry-ID resolution is the reliable probe:
+    /// a terminated service's ID stops resolving and IDs are never reused.
+    func hasStaleInterfaces() -> Bool {
+        guard !deviceRegistryIDs.isEmpty else { return false }
+        for registryID in deviceRegistryIDs.values {
+            // Port 0 is the documented default lookup port (kIOMasterPortDefault /
+            // kIOMainPortDefault across SDK renames).
+            let service = IOServiceGetMatchingService(0, IORegistryEntryIDMatching(registryID))
+            guard service != IO_OBJECT_NULL else { return true }
+            IOObjectRelease(service)
+        }
+        return false
+    }
+
+    /// Closes every held interface but keeps accepting input, so a fresh detection pass can
+    /// re-open the re-enumerated services (unlike `stop()`, which is terminal).
+    func resetForRediscovery() {
+        disconnectAll()
     }
 
     /// Third-generation Siri Remotes keep all HID input reports, including microphone audio,
@@ -340,6 +378,7 @@ final class RemoteInputHandler {
             audioReportCounts.removeValue(forKey: interfaceID)
             lastAudioReports.removeValue(forKey: interfaceID)
         }
+        deviceRegistryIDs.removeValue(forKey: interfaceID)
         IOHIDDeviceUnscheduleFromRunLoop(
             device,
             CFRunLoopGetMain(),

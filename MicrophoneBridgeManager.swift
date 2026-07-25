@@ -213,19 +213,41 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    /// Launch-time housekeeping. The bridge itself is never auto-started: starting swaps the
-    /// system default input device (and can still raise an admin prompt when the privileged
-    /// helper is unavailable), so it stays an explicit, user-initiated menu action.
+    /// Launch-time housekeeping; run before `startAtLaunchIfPromptFree`.
     func prepareAtLaunch(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
             guard let self else { return }
             if self.prepareRuntimeDirectory() {
                 self.restoreDefaultInputDevice()
             }
-            self.appendAppLog("Microphone bridge requires an explicit Start/Restart action after app launch")
             DispatchQueue.main.async {
                 completion?()
             }
+        }
+    }
+
+    /// Starts the bridge at launch when — and only when — it can do so silently. The bridge is
+    /// meant to run for the app's whole lifetime; a manual Start used to be required purely
+    /// because the PacketLogger engine raised a password prompt. The Direct HID engine never
+    /// needs privileges, and the PacketLogger engine is silent when the approved helper daemon
+    /// is current, so those cases auto-start. Anything else stays a menu action: app launch
+    /// must never surprise the user with an administrator prompt.
+    func startAtLaunchIfPromptFree() {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" {
+                guard PrivilegedHelperClient.shared.state == .ready else {
+                    self.appendAppLog("Microphone bridge auto-start skipped: the privileged helper is not approved, so starting would prompt for a password")
+                    return
+                }
+                guard let version = self.fetchPrivilegedHelperVersion(timeout: 10),
+                      version >= HelperConstants.packetLoggerCaptureMinimumVersion else {
+                    self.appendAppLog("Microphone bridge auto-start skipped: the helper daemon is unreachable or outdated, so starting would prompt for a password")
+                    return
+                }
+            }
+            self.appendAppLog("Microphone bridge auto-starting at launch")
+            self.startLocked()
         }
     }
 

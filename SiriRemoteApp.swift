@@ -118,14 +118,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshAccessibilityAccess()
         VolumeRevertGuard.shared.prewarm()
         logPrivilegedHelperState()
-        microphoneBridgeManager.prepareAtLaunch()
+        let bridgeManager = microphoneBridgeManager
+        bridgeManager?.prepareAtLaunch {
+            bridgeManager?.startAtLaunchIfPromptFree()
+        }
         microphoneHealthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
+                self?.recoverFromStaleHIDInterfacesIfNeeded()
                 self?.microphoneBridgeManager.maintainBridgeHealth()
                 self?.refreshPermissionStates()
                 self?.menuBarManager.refresh()
             }
         }
+    }
+
+    /// HID watchdog. macOS can silently re-enumerate the remote's HID services (observed when
+    /// screen mirroring reconfigures the Bluetooth stack): our open device objects stop firing
+    /// callbacks without any removal notification, killing buttons and the firmware's voice
+    /// enable with no error anywhere. Detect the vanished services and re-arm the whole HID
+    /// path — rediscovery re-seizes the fresh interfaces and re-writes the 0xAF enable.
+    private func recoverFromStaleHIDInterfacesIfNeeded() {
+        guard let remoteInputHandler, remoteInputHandler.hasStaleInterfaces() else { return }
+        rmDebug("🛰 HID watchdog: held interfaces vanished from the IOKit registry; re-arming detection")
+        remoteInputHandler.resetForRediscovery()
+        remoteDetector?.stopDetection()
+        hidDetectionStarted = false
+        startHIDDetectionIfNeeded()
     }
 
     /// Records the helper's state at launch, and when it is approved verifies the XPC round
