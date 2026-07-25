@@ -399,8 +399,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             defaultInputDeviceName: defaultInputName,
             helperLogSize: fileSize(path: helperLogPath),
             helperLogAge: fileAgeDescription(path: helperLogPath),
-            helperSelectedOutput: helperText.contains("Output device set to: BlackHole 2ch")
-                || helperText.contains("Output device set to: Soundflower (2ch)"),
+            helperSelectedOutput: Self.supportedOutputDeviceNames.contains {
+                helperText.contains("Output device set to: \($0)")
+            },
             helperVoiceStartedCount: helperLines.filter { $0.contains("Voice started") }.count,
             helperVoiceEndedCount: helperLines.filter { $0.contains("Voice ended") }.count,
             helperErrorCount: helperLines.filter { $0.localizedCaseInsensitiveContains("error") }.count,
@@ -485,7 +486,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 clearLastError()
                 appendAppLog("Direct HID microphone bridge already running")
             } else {
-                setLastError("BlackHole 2ch is not installed.")
+                setLastError("The VibeRemote audio device is not installed.")
             }
             return
         }
@@ -505,7 +506,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             .resolvingSymlinksInPath()
             .path
         guard let outputDeviceName = preferredOutputDeviceName() else {
-            setLastError("BlackHole 2ch is not installed.")
+            setLastError("The VibeRemote audio device is not installed.")
             return
         }
 
@@ -575,7 +576,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 clearLastError()
                 appendAppLog("Microphone bridge already running")
             } else {
-                setLastError("BlackHole 2ch is not installed.")
+                setLastError("The VibeRemote audio device is not installed.")
             }
             return
         }
@@ -619,7 +620,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             .path
         appendAppLog("Microphone bridge voice helper: \(helper)")
         guard let outputDeviceName = preferredOutputDeviceName() else {
-            setLastError("BlackHole 2ch is not installed.")
+            setLastError("The VibeRemote audio device is not installed.")
             return
         }
         appendAppLog("Microphone bridge output device: \(outputDeviceName)")
@@ -789,9 +790,79 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    func openVirtualAudioDriverPage() {
-        guard let url = blackHoleDownloadURL() else { return }
-        NSWorkspace.shared.open(url)
+    /// True when the bundled audio driver is present in the app bundle and can be installed.
+    var bundledAudioDriverAvailable: Bool {
+        bundledAudioDriverPath() != nil
+    }
+
+    private func bundledAudioDriverPath() -> String? {
+        guard let resourcePath = appBundle.resourcePath else { return nil }
+        let path = "\(resourcePath)/\(Self.audioDriverBundleName)"
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    /// Installs the bundled VibeRemote audio driver into the system HAL plug-in directory and
+    /// restarts coreaudiod so the device appears immediately. Requires one administrator
+    /// authorization; the driver then persists across launches.
+    func installAudioDriver(completion: (@Sendable (Bool, String?) -> Void)? = nil) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            guard let source = self.bundledAudioDriverPath() else {
+                let message = "The bundled VibeRemote audio driver is missing from this build."
+                self.setLastError(message)
+                DispatchQueue.main.async { completion?(false, message) }
+                return
+            }
+
+            let destination = "\(Self.halPlugInDirectory)/\(Self.audioDriverBundleName)"
+            let command = """
+            set -eu
+            /bin/rm -rf \(self.shellEscape(destination))
+            /usr/bin/install -d -o root -g wheel -m 755 \(self.shellEscape(Self.halPlugInDirectory))
+            /bin/cp -R \(self.shellEscape(source)) \(self.shellEscape(Self.halPlugInDirectory))/
+            /usr/sbin/chown -R root:wheel \(self.shellEscape(destination))
+            /bin/launchctl kickstart -k system/com.apple.audio.coreaudiod
+            """
+
+            let osa = Process()
+            osa.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            osa.arguments = [
+                "-e",
+                "do shell script \(self.appleScriptString(command)) with administrator privileges",
+            ]
+            let errorPipe = Pipe()
+            osa.standardError = errorPipe
+            osa.standardOutput = FileHandle.nullDevice
+
+            do {
+                try osa.run()
+                let errorText = String(
+                    data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                osa.waitUntilExit()
+                guard osa.terminationStatus == 0 else {
+                    let message = errorText.isEmpty
+                        ? "Installing the VibeRemote audio driver was cancelled or failed."
+                        : errorText
+                    self.setLastError(message)
+                    DispatchQueue.main.async { completion?(false, message) }
+                    return
+                }
+                self.appendAppLog("Installed the VibeRemote audio driver")
+                // coreaudiod needs a moment to publish the new device.
+                Thread.sleep(forTimeInterval: 2.0)
+                let installed = self.preferredOutputDeviceName() != nil
+                if installed {
+                    self.clearLastError()
+                }
+                DispatchQueue.main.async { completion?(installed, installed ? nil : "The driver was installed but no virtual audio device appeared yet.") }
+            } catch {
+                let message = "Could not install the VibeRemote audio driver: \(error.localizedDescription)"
+                self.setLastError(message)
+                DispatchQueue.main.async { completion?(false, message) }
+            }
+        }
     }
 
     func openPacketCaptureLog() {
@@ -1586,9 +1657,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     ) -> [String] {
         var issues: [String] = []
         if outputDeviceName == nil {
-            issues.append("BlackHole 2ch is missing.")
+            issues.append("The VibeRemote audio device is missing.")
         } else if defaultInputDeviceName != outputDeviceName {
-            issues.append("System default input is \(defaultInputDeviceName ?? "unknown"), not \(outputDeviceName ?? "BlackHole 2ch").")
+            issues.append("System default input is \(defaultInputDeviceName ?? "unknown"), not \(outputDeviceName ?? "VibeRemote").")
         }
         if !helperAlive {
             issues.append("Voice helper is not running.")
@@ -1894,12 +1965,16 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private func preferredOutputDeviceName() -> String? {
-        ["BlackHole 2ch", "Soundflower (2ch)"].first { audioDeviceID(named: $0) != nil }
-    }
+    /// Virtual audio devices the bridge can play into, most preferred first. "VibeRemote" is
+    /// the driver we bundle and install ourselves; the others are honored so an existing
+    /// BlackHole/Soundflower setup keeps working.
+    static let supportedOutputDeviceNames = ["VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"]
 
-    private func blackHoleDownloadURL() -> URL? {
-        URL(string: "https://github.com/ExistentialAudio/BlackHole")
+    static let audioDriverBundleName = "VibeRemoteAudio.driver"
+    static let halPlugInDirectory = "/Library/Audio/Plug-Ins/HAL"
+
+    private func preferredOutputDeviceName() -> String? {
+        Self.supportedOutputDeviceNames.first { audioDeviceID(named: $0) != nil }
     }
 
     private func audioDeviceID(named expectedName: String) -> AudioDeviceID? {

@@ -95,6 +95,17 @@ else
     echo "Voice helper excluded from this bundle."
 fi
 
+# Bundle the VibeRemote virtual audio driver so the app can install it itself. Build it
+# with ./build_audio_driver.sh; bundles without it fall back to an existing BlackHole or
+# Soundflower device and hide the in-app install action.
+audio_driver="AudioDriver/VibeRemoteAudio.driver"
+if [ "${INCLUDE_AUDIO_DRIVER:-1}" = "1" ] && [ -d "$audio_driver" ]; then
+    cp -R "$audio_driver" "${APP_BUNDLE}/Contents/Resources/"
+    echo "Bundled audio driver: $audio_driver"
+elif [ "${INCLUDE_AUDIO_DRIVER:-1}" = "1" ]; then
+    echo "Note: $audio_driver not found; run ./build_audio_driver.sh to bundle it."
+fi
+
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -147,6 +158,12 @@ if [ -f "$helper" ]; then
     else
         codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$helper"
     fi
+fi
+
+# Nested code must be signed before the enclosing app, or the outer signature is invalid.
+bundled_driver="${APP_BUNDLE}/Contents/Resources/VibeRemoteAudio.driver"
+if [ -d "$bundled_driver" ]; then
+    codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$bundled_driver"
 fi
 
 codesign --force --options runtime \

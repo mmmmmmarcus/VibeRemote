@@ -359,9 +359,19 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             return
         }
 
-        // A prominent double-height banner pinned to the top while the bridge is stopped.
-        // It disappears the moment the bridge is running.
-        if !microphoneStatus.running {
+        // A prominent double-height banner pinned to the top when the bridge cannot run.
+        // Setting up the audio device comes first: the bridge needs it to play into.
+        if microphoneStatus.outputDeviceName == nil {
+            menu.addItem(makeBanner(
+                symbolName: "speaker.badge.exclamationmark.fill",
+                text: "Audio setup required",
+                buttonTitle: microphoneBridgeManager.bundledAudioDriverAvailable ? "Install" : nil,
+                buttonAction: microphoneBridgeManager.bundledAudioDriverAvailable
+                    ? #selector(installAudioDriver)
+                    : nil
+            ))
+            menu.addItem(NSMenuItem.separator())
+        } else if !microphoneStatus.running {
             menu.addItem(makeBanner(
                 symbolName: "pause.circle.fill",
                 text: "Bridge is stopped",
@@ -507,8 +517,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         bridgeActionItem.target = self
         submenu.addItem(bridgeActionItem)
 
-        if microphoneStatus.outputDeviceName == nil {
-            let installItem = NSMenuItem(title: "Install BlackHole...", action: #selector(openVirtualAudioDriverPage), keyEquivalent: "")
+        if microphoneStatus.outputDeviceName == nil, microphoneBridgeManager.bundledAudioDriverAvailable {
+            let installItem = NSMenuItem(
+                title: "Install Audio Device...",
+                action: #selector(installAudioDriver),
+                keyEquivalent: ""
+            )
             installItem.target = self
             submenu.addItem(installItem)
         }
@@ -602,9 +616,20 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func openVirtualAudioDriverPage() {
-        microphoneBridgeManager.openVirtualAudioDriverPage()
-        rebuildMenu()
+    @objc private func installAudioDriver() {
+        cachedDiagnostics = nil
+        microphoneBridgeManager.installAudioDriver { [weak self] succeeded, message in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.rebuildMenu()
+                guard !succeeded, let message else { return }
+                let alert = NSAlert()
+                alert.messageText = "Audio Setup Failed"
+                alert.informativeText = message
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
     }
 
     @objc private func refreshMenu() {
