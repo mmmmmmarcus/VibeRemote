@@ -439,7 +439,7 @@ final class RemoteInputHandler {
             format: "🎮 HID event: page=0x%X usage=0x%X value=%d → %@",
             usagePage, usage, intValue, identified ?? "<unmapped>"
         ))
-        guard let buttonName = identified, buttonName != "select" else { return }
+        guard let buttonName = identified else { return }
 
         // Collapse mirrored-interface duplicates: only proceed on a real state transition.
         let isPressed = intValue != 0
@@ -518,9 +518,11 @@ final class RemoteInputHandler {
     // MARK: - Action Execution
 
     private func executeAction(_ action: ButtonAction, button: String, pressed: Bool) {
-        // Always release the key captured for this physical button before consulting its current
-        // mapping. This covers a mapping change from a hold action to a tap/no-op mid-press.
         guard pressed else {
+            // Release: stop any auto-repeat, resolve a pending tap/long-press, and release
+            // any physically held key captured for this button.
+            stopRepeat(for: button)
+            resolveRelease(for: button)
             releaseHeldKey(for: button)
             return
         }
@@ -538,24 +540,117 @@ final class RemoteInputHandler {
         case .shiftEnter:
             sendKey(kVK_Return, flags: .maskShift)
         case .backspace:
-            sendKey(kVK_Delete)
+            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_Delete) }
         case .upKey:
-            sendKey(kVK_UpArrow)
+            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_UpArrow) }
         case .downKey:
-            sendKey(kVK_DownArrow)
+            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_DownArrow) }
         case .leftKey:
-            sendKey(kVK_LeftArrow)
+            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_LeftArrow) }
         case .rightKey:
-            sendKey(kVK_RightArrow)
+            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_RightArrow) }
         case .escKey:
             sendKey(kVK_Escape)
         case .ctrlC:
             sendKey(kVK_ANSI_C, flags: .maskControl)
         case .launchAgentClient:
             toggleAgentClient()
+        case .bulletIndent:
+            // Tap = indent (Tab); long-press = turn the current line into a bullet ("- ").
+            beginTapOrLongPress(
+                button: button,
+                tap: { [weak self] in self?.sendKey(kVK_Tab) },
+                longPress: { [weak self] in self?.sendBulletMarker() }
+            )
+        case .bulletOutdent:
+            sendKey(kVK_Tab, flags: .maskShift)
         case .spaceKey, .rightCmd, .rightOpt:
             break // handled above
         }
+    }
+
+    // MARK: - Hold behavior (auto-repeat & tap/long-press)
+
+    // The remote reports one press and one release with no repeats in between, so we
+    // synthesize key repeat ourselves and time the press to tell a tap from a long-press.
+    private var repeatTimers: [String: Timer] = [:]
+    private var longPressTimers: [String: Timer] = [:]
+    private var pendingTapActions: [String: () -> Void] = [:]
+
+    private let repeatInitialDelay: TimeInterval = 0.4
+    private let repeatInterval: TimeInterval = 0.05
+    private let repeatMaxTicks = 400   // ~20s safety cap in case a release is ever dropped
+    private let longPressThreshold: TimeInterval = 0.4
+
+    /// Fire immediately, then auto-repeat while the button stays held (Backspace, arrows).
+    private func beginRepeating(button: String, fire: @escaping () -> Void) {
+        stopRepeat(for: button)
+        fire()
+        let starter = Timer.scheduledTimer(withTimeInterval: repeatInitialDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            var ticks = 0
+            let repeater = Timer.scheduledTimer(withTimeInterval: self.repeatInterval, repeats: true) { [weak self] timer in
+                guard let self else { timer.invalidate(); return }
+                ticks += 1
+                if ticks > self.repeatMaxTicks {
+                    timer.invalidate()
+                    self.repeatTimers[button] = nil
+                    return
+                }
+                fire()
+            }
+            self.repeatTimers[button] = repeater
+        }
+        repeatTimers[button] = starter
+    }
+
+    private func stopRepeat(for button: String) {
+        repeatTimers[button]?.invalidate()
+        repeatTimers[button] = nil
+    }
+
+    /// Distinguish a short tap from a hold: the long-press action fires once the threshold
+    /// elapses; a release before then runs the tap action instead.
+    private func beginTapOrLongPress(button: String, tap: @escaping () -> Void, longPress: @escaping () -> Void) {
+        cancelLongPress(for: button)
+        pendingTapActions[button] = tap
+        let timer = Timer.scheduledTimer(withTimeInterval: longPressThreshold, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.longPressTimers[button] = nil
+            self.pendingTapActions[button] = nil
+            longPress()
+        }
+        longPressTimers[button] = timer
+    }
+
+    /// On release, if a long-press timer is still pending it was a tap — run the tap action.
+    private func resolveRelease(for button: String) {
+        guard let timer = longPressTimers[button] else { return }
+        timer.invalidate()
+        longPressTimers[button] = nil
+        let tap = pendingTapActions[button]
+        pendingTapActions[button] = nil
+        tap?()
+    }
+
+    private func cancelLongPress(for button: String) {
+        longPressTimers[button]?.invalidate()
+        longPressTimers[button] = nil
+        pendingTapActions[button] = nil
+    }
+
+    private func stopAllHoldTimers() {
+        repeatTimers.values.forEach { $0.invalidate() }
+        repeatTimers.removeAll()
+        longPressTimers.values.forEach { $0.invalidate() }
+        longPressTimers.removeAll()
+        pendingTapActions.removeAll()
+    }
+
+    /// "- " + space is the markdown input rule that turns the current line into a bullet.
+    private func sendBulletMarker() {
+        sendKey(kVK_ANSI_Minus)
+        sendKey(kVK_Space)
     }
 
     /// Bundle identifiers of the agent desktop clients this remote can summon.
@@ -618,6 +713,7 @@ final class RemoteInputHandler {
     }
 
     private func releaseAllHeldKeys() {
+        stopAllHoldTimers()
         for held in heldKeys.values {
             postKey(keyCode: held.keyCode, flags: [], keyDown: false)
         }
