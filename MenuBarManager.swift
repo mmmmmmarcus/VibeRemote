@@ -20,6 +20,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case spaceKey = "Space: Voice Dictation"
     case rightCmd = "Right Command: 3rd-party Voice Dictation"
     case rightOpt = "Right Option: 3rd-party Voice Dictation"
+    case launchAgentClient = "Toggle Codex / Claude Desktop"
     case none = "None"
 
     var requiresHold: Bool {
@@ -42,22 +43,29 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
     let supportsHold: Bool
 }
 
-// Fixed Siri Remote mapping (not user-editable):
+// Fixed Siri Remote mapping (not user-editable except the Siri button):
+// - Clickpad Up/Down/Left/Right → arrow keys; center press → Enter
 // - Volume Up/Down  → arrow Up/Down (navigation)
 // - Back / Menu     → Backspace
 // - TV              → Shift+Enter (newline; the convention most agent apps use)
-// - Play/Pause      → Enter (submit)
+// - Play/Pause      → toggle the Codex / Claude desktop client to the front
+// - Power           → Enter
 // - Siri            → Space (held; drives voice dictation and the mic bridge)
 let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
     RemoteButtonDescriptor(key: "menu", label: "Menu Button", defaultAction: .backspace, supportsHold: false),
     RemoteButtonDescriptor(key: "back", label: "Back Button", defaultAction: .backspace, supportsHold: false),
     RemoteButtonDescriptor(key: "tv", label: "TV Button", defaultAction: .shiftEnter, supportsHold: false),
     RemoteButtonDescriptor(key: "siri", label: "Siri Button", defaultAction: .spaceKey, supportsHold: true),
-    RemoteButtonDescriptor(key: "playPause", label: "Play/Pause Button", defaultAction: .enterKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "playPause", label: "Play/Pause Button", defaultAction: .launchAgentClient, supportsHold: false),
+    RemoteButtonDescriptor(key: "select", label: "Clickpad Center", defaultAction: .enterKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "navUp", label: "Clickpad Up", defaultAction: .upKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "navDown", label: "Clickpad Down", defaultAction: .downKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "navLeft", label: "Clickpad Left", defaultAction: .leftKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "navRight", label: "Clickpad Right", defaultAction: .rightKey, supportsHold: false),
     RemoteButtonDescriptor(key: "volumeUp", label: "Volume Up", defaultAction: .upKey, supportsHold: false),
     RemoteButtonDescriptor(key: "volumeDown", label: "Volume Down", defaultAction: .downKey, supportsHold: false),
     RemoteButtonDescriptor(key: "mute", label: "Mute Button", defaultAction: .none, supportsHold: false),
-    RemoteButtonDescriptor(key: "power", label: "Power Button", defaultAction: .none, supportsHold: false),
+    RemoteButtonDescriptor(key: "power", label: "Power Button", defaultAction: .enterKey, supportsHold: false),
     RemoteButtonDescriptor(key: "nextTrack", label: "Next Track", defaultAction: .rightKey, supportsHold: false),
     RemoteButtonDescriptor(key: "prevTrack", label: "Previous Track", defaultAction: .leftKey, supportsHold: false),
 ]
@@ -98,7 +106,6 @@ enum RemoteControlState: Equatable, Sendable {
 final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
-    private let statusMenuItem: NSMenuItem
     private var diagnosticsMenu = NSMenu()
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
@@ -135,7 +142,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         self.statusItem = statusItem
         self.microphoneBridgeManager = microphoneBridgeManager
         self.menu = NSMenu()
-        self.statusMenuItem = NSMenuItem(title: "Status: Disconnected", action: nil, keyEquivalent: "")
         super.init()
 
         diagnosticsMenu.delegate = self
@@ -212,11 +218,65 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         statusItem.button?.image = Self.makeRemoteIcon(paused: !microphoneStatus.running)
     }
 
+    /// A double-height menu row shown while the bridge is stopped: a pause glyph, a
+    /// "Bridge is stopped" label, and a Start button on the trailing edge.
+    private func makeBridgeStoppedBanner() -> NSMenuItem {
+        let item = NSMenuItem()
+        let rowHeight: CGFloat = 44
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight))
+        container.autoresizingMask = [.width]
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        icon.image = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "Bridge stopped")?
+            .withSymbolConfiguration(symbolConfig)
+        icon.contentTintColor = .systemOrange
+
+        let label = NSTextField(labelWithString: "Bridge is stopped")
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.textColor = .labelColor
+
+        let button = NSButton(title: "Start", target: self, action: #selector(startMicrophoneBridge))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+
+        container.addSubview(icon)
+        container.addSubview(label)
+        container.addSubview(button)
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            icon.heightAnchor.constraint(equalToConstant: 18),
+
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+
+            button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 12),
+        ])
+
+        item.view = container
+        return item
+    }
+
     private func rebuildMenu() {
         menu.removeAllItems()
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
         updateStatusIcon(microphoneStatus: microphoneStatus)
+
+        // A prominent double-height banner pinned to the very top while the bridge is
+        // stopped. It disappears the moment the bridge is running.
+        if !microphoneStatus.running {
+            menu.addItem(makeBridgeStoppedBanner())
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // Permissions appear only while something still needs granting, pinned to the top.
         let bluetoothNeeded = bluetoothAccessState != .allowed
@@ -237,14 +297,27 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        statusMenuItem.title = remoteSummaryTitle()
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
+        // At-a-glance lines rendered directly in the top level. Bridge run state is already
+        // conveyed by the menu-bar icon and the stopped banner, so this row is a fixed
+        // "Status" entry that opens the detailed diagnostics submenu.
+        addInfoItem("Bluetooth: \(remoteConnected ? "Connected" : "Not Connected")", to: menu)
+        addInfoItem("Battery: \(remoteBatteryPercent.map { "\($0)%" } ?? "Unknown")", to: menu)
+
+        let bridgeItem = NSMenuItem(title: "Status", action: nil, keyEquivalent: "")
+        // A submenu may still be retained by the menu item AppKit just removed.
+        // Reusing that NSMenu immediately raises "already a submenu" during rapid
+        // device/status refreshes, so each rebuild gets a fresh menu instance.
+        diagnosticsMenu.delegate = nil
+        diagnosticsMenu = NSMenu()
+        diagnosticsMenu.delegate = self
+        renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
+        bridgeItem.submenu = diagnosticsMenu
+        menu.addItem(bridgeItem)
         menu.addItem(NSMenuItem.separator())
 
         // Only the Siri button remains user-customizable; all other buttons are fixed.
         if let siriDescriptor = remoteButtonDescriptors.first(where: { $0.key == Self.siriButtonKey }) {
-            let siriItem = NSMenuItem(title: "Siri Button Action", action: nil, keyEquivalent: "")
+            let siriItem = NSMenuItem(title: "Siri Button Mapping", action: nil, keyEquivalent: "")
             let siriSubmenu = NSMenu()
             for action in ButtonAction.allCases {
                 if action.requiresHold && !siriDescriptor.supportsHold { continue }
@@ -260,28 +333,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             }
             siriItem.submenu = siriSubmenu
             menu.addItem(siriItem)
-            menu.addItem(NSMenuItem.separator())
         }
-
-        // Microphone controls live directly in the top-level menu.
-        addMicrophoneSection(status: microphoneStatus, to: menu)
         menu.addItem(NSMenuItem.separator())
-
-        let diagnosticsItem = NSMenuItem(title: "Diagnostics", action: nil, keyEquivalent: "")
-        // A submenu may still be retained by the menu item AppKit just removed.
-        // Reusing that NSMenu immediately raises "already a submenu" during rapid
-        // device/status refreshes, so each rebuild gets a fresh menu instance.
-        diagnosticsMenu.delegate = nil
-        diagnosticsMenu = NSMenu()
-        diagnosticsMenu.delegate = self
-        showDiagnosticsPlaceholder("Open to Load Diagnostics")
-        diagnosticsItem.submenu = diagnosticsMenu
-        menu.addItem(diagnosticsItem)
-        menu.addItem(NSMenuItem.separator())
-
-        let refreshItem = NSMenuItem(title: "Refresh Status", action: #selector(refreshMenu), keyEquivalent: "")
-        refreshItem.target = self
-        menu.addItem(refreshItem)
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
@@ -299,27 +352,27 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             switch bluetoothAccessState {
             case .allowed:
                 if !onlyRequired {
-                    addDisabledItem("Bluetooth Audio: Ready", to: submenu)
+                    addInfoItem("Bluetooth Audio: Ready", to: submenu)
                 }
             case .notDetermined:
                 addActionItem("Allow Bluetooth Audio...", action: #selector(requestBluetoothAccess), to: submenu)
             case .denied:
                 addActionItem("Bluetooth Audio: Open Settings...", action: #selector(requestBluetoothAccess), to: submenu)
             case .restricted:
-                addDisabledItem("Bluetooth Audio: Restricted", to: submenu)
+                addInfoItem("Bluetooth Audio: Restricted", to: submenu)
             }
         }
 
         if inputAccessIsReady {
             if !onlyRequired {
-                addDisabledItem("Button Input: Ready", to: submenu)
+                addInfoItem("Button Input: Ready", to: submenu)
             }
         } else {
             switch remoteInputState {
             case .starting:
-                addDisabledItem("Button Input: Checking...", to: submenu)
+                addInfoItem("Button Input: Checking...", to: submenu)
             case .unavailable:
-                addDisabledItem("Button Input: Unavailable", to: submenu)
+                addInfoItem("Button Input: Unavailable", to: submenu)
             case .permissionRequired:
                 addActionItem("Allow Button Input...", action: #selector(requestInputAccess), to: submenu)
             case .waitingForRemote, .ready:
@@ -329,10 +382,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         if remoteControlState == .ready {
             if !onlyRequired {
-                addDisabledItem("Keyboard Control: Ready", to: submenu)
+                addInfoItem("Keyboard Control: Ready", to: submenu)
             }
         } else if remoteControlState == .starting {
-            addDisabledItem("Keyboard Control: Checking...", to: submenu)
+            addInfoItem("Keyboard Control: Checking...", to: submenu)
         } else {
             addActionItem("Allow Keyboard Control...", action: #selector(requestControlAccess), to: submenu)
         }
@@ -340,65 +393,51 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return submenu
     }
 
-    /// Microphone controls rendered directly into the top-level menu: one status line and
-    /// one Start/Restart action. There is no mode toggle or stop action — with the app
-    /// open, the bridge is always meant to be running.
-    private func addMicrophoneSection(status: MicrophoneBridgeStatus, to menu: NSMenu) {
-        addDisabledItem("Microphone: \(status.running ? "Running" : "Stopped")", to: menu)
-        if let error = status.lastError {
-            let item = NSMenuItem(title: "Needs Attention: \(truncate(error, max: 72))", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            item.indentationLevel = 1
-            menu.addItem(item)
-        }
-
-        let startItemTitle = status.running ? "Restart Bridge" : "Start Bridge"
-        let startItem = NSMenuItem(title: startItemTitle, action: #selector(startMicrophoneBridge), keyEquivalent: "")
-        startItem.target = self
-        startItem.indentationLevel = 1
-        menu.addItem(startItem)
-
-        // Only surface the install link while the virtual audio device is actually missing.
-        if status.outputDeviceName == nil {
-            let installItem = NSMenuItem(
-                title: "Install BlackHole...",
-                action: #selector(openVirtualAudioDriverPage),
-                keyEquivalent: ""
-            )
-            installItem.target = self
-            installItem.indentationLevel = 1
-            menu.addItem(installItem)
-        }
-    }
-
-    /// Compact diagnostics: the handful of facts that answer "is it working, and if not, why".
-    /// Copy Diagnostics still exports the full detailed report for debugging.
-    private func renderDiagnosticsMenu(_ diagnostics: MicrophoneBridgeDiagnostics) {
+    /// The Bridge line's submenu: detailed diagnostics plus bridge/diagnostic actions.
+    /// The at-a-glance status (Bluetooth / Battery / Bridge) lives in the top-level menu.
+    /// Detail lines lazy-load once the async diagnostics snapshot arrives; Copy Diagnostics
+    /// still exports the full detailed report for debugging.
+    private func renderBridgeDetailMenu(diagnostics: MicrophoneBridgeDiagnostics?) {
         let submenu = diagnosticsMenu
         submenu.removeAllItems()
+        let microphoneStatus = microphoneBridgeManager.menuStatus()
 
-        addDisabledItem("Bridge: \(diagnostics.bridgeRunning ? "Running" : "Stopped")", to: submenu)
-        addDisabledItem("Remote: \(diagnostics.remoteAddress ?? "Not detected")", to: submenu)
-        addDisabledItem("Output Device: \(diagnostics.outputDeviceName ?? "Missing")", to: submenu)
-        addDisabledItem("Default Input: \(diagnostics.defaultInputDeviceName ?? "Unknown")", to: submenu)
-        addDisabledItem(
-            "Voice Sessions: \(diagnostics.helperVoiceStartedCount) started, \(diagnostics.helperVoiceEndedCount) ended",
-            to: submenu
-        )
-
-        if !diagnostics.blockingIssues.isEmpty {
+        if let error = microphoneStatus.lastError {
+            addInfoItem("Needs Attention: \(truncate(error, max: 72))", to: submenu)
             submenu.addItem(NSMenuItem.separator())
-            addDisabledItem("Blocking Issues:", to: submenu)
-            for issue in diagnostics.blockingIssues.prefix(4) {
-                addDisabledItem("- \(truncate(issue, max: 82))", to: submenu)
-            }
         }
-        if let error = diagnostics.lastError {
-            submenu.addItem(NSMenuItem.separator())
-            addDisabledItem("Last Error: \(truncate(error, max: 82))", to: submenu)
+
+        if let diagnostics {
+            addInfoItem("Remote: \(diagnostics.remoteAddress ?? "Not detected")", to: submenu)
+            addInfoItem("Output Device: \(diagnostics.outputDeviceName ?? "Missing")", to: submenu)
+            addInfoItem("Default Input: \(diagnostics.defaultInputDeviceName ?? "Unknown")", to: submenu)
+            addInfoItem(
+                "Voice Sessions: \(diagnostics.helperVoiceStartedCount) started, \(diagnostics.helperVoiceEndedCount) ended",
+                to: submenu
+            )
+            if !diagnostics.blockingIssues.isEmpty {
+                submenu.addItem(NSMenuItem.separator())
+                addInfoItem("Blocking Issues:", to: submenu)
+                for issue in diagnostics.blockingIssues.prefix(4) {
+                    addInfoItem("- \(truncate(issue, max: 82))", to: submenu)
+                }
+            }
+        } else {
+            addInfoItem("Loading Diagnostics...", to: submenu)
         }
 
         submenu.addItem(NSMenuItem.separator())
+
+        let bridgeActionTitle = microphoneStatus.running ? "Restart Bridge" : "Start Bridge"
+        let bridgeActionItem = NSMenuItem(title: bridgeActionTitle, action: #selector(startMicrophoneBridge), keyEquivalent: "")
+        bridgeActionItem.target = self
+        submenu.addItem(bridgeActionItem)
+
+        if microphoneStatus.outputDeviceName == nil {
+            let installItem = NSMenuItem(title: "Install BlackHole...", action: #selector(openVirtualAudioDriverPage), keyEquivalent: "")
+            installItem.target = self
+            submenu.addItem(installItem)
+        }
 
         let copyItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
         copyItem.target = self
@@ -406,26 +445,17 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         let appLogItem = NSMenuItem(title: "Open App Log", action: #selector(openAppLog), keyEquivalent: "")
         appLogItem.target = self
-        appLogItem.isEnabled = diagnostics.appLogAge != "missing"
+        appLogItem.isEnabled = diagnostics.map { $0.appLogAge != "missing" } ?? true
         submenu.addItem(appLogItem)
 
-        let refreshItem = NSMenuItem(title: "Refresh Diagnostics", action: #selector(refreshDiagnosticsMenu), keyEquivalent: "")
+        let refreshItem = NSMenuItem(title: "Refresh Status", action: #selector(refreshMenu), keyEquivalent: "")
         refreshItem.target = self
         submenu.addItem(refreshItem)
     }
 
-    private func showDiagnosticsPlaceholder(_ title: String) {
-        diagnosticsMenu.removeAllItems()
-        addDisabledItem(title, to: diagnosticsMenu)
-    }
-
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === diagnosticsMenu else { return }
-        if let cachedDiagnostics {
-            renderDiagnosticsMenu(cachedDiagnostics)
-        } else {
-            showDiagnosticsPlaceholder("Loading Diagnostics...")
-        }
+        renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
         requestDiagnostics(force: false)
     }
 
@@ -447,16 +477,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         guard !diagnosticsRefreshInFlight else { return }
 
         diagnosticsRefreshInFlight = true
-        if cachedDiagnostics == nil {
-            showDiagnosticsPlaceholder("Loading Diagnostics...")
-        }
 
         microphoneBridgeManager.diagnosticsAsync { [weak self] diagnostics in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.cachedDiagnostics = diagnostics
                 self.diagnosticsRefreshInFlight = false
-                self.renderDiagnosticsMenu(diagnostics)
+                self.renderBridgeDetailMenu(diagnostics: diagnostics)
                 let callbacks = self.pendingDiagnosticsCallbacks
                 self.pendingDiagnosticsCallbacks.removeAll()
                 callbacks.forEach { $0(diagnostics) }
@@ -464,15 +491,16 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func refreshDiagnosticsMenu() {
-        requestDiagnostics(force: true)
-    }
-
-    private func addDisabledItem(_ title: String, to menu: NSMenu) {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
+    /// A non-actionable information row shown in full label color rather than dimmed.
+    /// A disabled NSMenuItem is greyed out by AppKit, so these rows carry a harmless
+    /// no-op action instead, which keeps them legible while doing nothing when clicked.
+    private func addInfoItem(_ title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: #selector(noop), keyEquivalent: "")
+        item.target = self
         menu.addItem(item)
     }
+
+    @objc private func noop() {}
 
     private func addActionItem(_ title: String, action: Selector, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -554,7 +582,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             lastBatteryRefreshAt = nil
             batteryRefreshInFlight = false
         }
-        statusMenuItem.title = remoteSummaryTitle()
         rebuildMenu()
         if connected {
             refreshRemoteBattery(force: !wasConnected || remoteBatteryPercent == nil)
@@ -586,19 +613,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         if state.allowsBatteryLookup, remoteConnected {
             refreshRemoteBattery(force: true)
         }
-    }
-
-    private func remoteSummaryTitle() -> String {
-        if remoteConnected {
-            if let remoteBatteryPercent {
-                return "Remote: Connected · Battery \(remoteBatteryPercent)%"
-            }
-            return "Remote: Connected"
-        }
-        if !inputAccessIsReady {
-            return "Remote: Setup Required"
-        }
-        return "Remote: Not Connected"
     }
 
     private func refreshRemoteBattery(force: Bool = false) {

@@ -482,7 +482,11 @@ final class RemoteInputHandler {
         case (0x0C, 0x04): return "siri"          // Siri button (actual)
         case (0x0C, 0x60): return "tv"            // TV button (actual)
         case (0x0C, 0x80): return "select"        // Selection
-        case (0x0C, 0x41): return "select"        // Menu Select (alternative)
+        case (0x0C, 0x41): return "select"        // Menu Pick (clickpad center press)
+        case (0x0C, 0x42): return "navUp"         // Menu Up (clickpad)
+        case (0x0C, 0x43): return "navDown"       // Menu Down (clickpad)
+        case (0x0C, 0x44): return "navLeft"       // Menu Left (clickpad)
+        case (0x0C, 0x45): return "navRight"      // Menu Right (clickpad)
         case (0x0C, 0xCD): return "playPause"     // Play/Pause
         case (0x0C, 0xE9): return "volumeUp"      // Volume Increment
         case (0x0C, 0xEA): return "volumeDown"    // Volume Decrement
@@ -547,9 +551,49 @@ final class RemoteInputHandler {
             sendKey(kVK_Escape)
         case .ctrlC:
             sendKey(kVK_ANSI_C, flags: .maskControl)
+        case .launchAgentClient:
+            toggleAgentClient()
         case .spaceKey, .rightCmd, .rightOpt:
             break // handled above
         }
+    }
+
+    /// Bundle identifiers of the agent desktop clients this remote can summon.
+    private static let codexBundleID = "com.openai.codex"        // ChatGPT / Codex desktop
+    private static let claudeBundleID = "com.anthropic.claudefordesktop"
+
+    /// Brings a coding-agent client to the front. If neither is frontmost, Codex comes up;
+    /// otherwise it toggles to the other one. Falls back to whichever is installed.
+    private func toggleAgentClient() {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let preferred: String
+        let fallback: String
+        switch front {
+        case Self.codexBundleID:
+            preferred = Self.claudeBundleID
+            fallback = Self.codexBundleID
+        case Self.claudeBundleID:
+            preferred = Self.codexBundleID
+            fallback = Self.claudeBundleID
+        default:
+            preferred = Self.codexBundleID
+            fallback = Self.claudeBundleID
+        }
+        if !activateApp(bundleID: preferred) {
+            _ = activateApp(bundleID: fallback)
+        }
+    }
+
+    @discardableResult
+    private func activateApp(bundleID: String) -> Bool {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return false
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        rmDebug("🚀 Activating agent client \(bundleID)")
+        return true
     }
 
     /// Press a virtual key and retain its exact specification until this HID button is released.
