@@ -238,6 +238,34 @@ Bundle layout is dictated by `SMAppService` and easy to get wrong:
 When adding a capability: extend `HelperProtocol`, bump `HelperConstants.version`, and
 remember an already-approved daemon keeps running the **old** binary until re-registered.
 
+### Registration gotchas (each cost real debugging time)
+
+- **A standalone daemon executable needs an embedded `__TEXT,__info_plist`.** Ours comes
+  from `PrivilegedHelper/Info.plist` via linker flags in `Package.swift`. Without it launchd
+  refuses to load the program and registration fails with "Operation not permitted".
+- **`register()` throws EPERM when the daemon is already registered and pending approval.**
+  That is not a failure. Check `status` after the throw and trust it over the error;
+  otherwise a perfectly good setup is reported to the user as broken.
+- **The app must run from `/Applications`.** From `~/Applications` the daemon plist resolves
+  to `.notFound`.
+- Approval state lives outside the app: `launchctl print system/com.viberemote.helper` and
+  `launchctl print-disabled system | grep viberemote` are the ground truth when the UI and
+  reality disagree. `job state = uninitialized` is normal — an XPC daemon launches on first
+  connection.
+- Registration cannot be tested from a plain command-line tool, because `SMAppService` reads
+  the plist from `Bundle.main`. To iterate without a human clicking, build a minimal signed
+  `.app` in a scratch directory whose executable calls `register()` and prints the full
+  `NSError`, then run it from `/Applications`.
+
+### Migration status (what still raises a password prompt)
+
+The helper currently owns **only** audio-driver installation. `startPacketLoggerBridgeLocked`
+still shells out through `osascript ... with administrator privileges`, so **starting the
+bridge continues to prompt every time**. Finishing that migration is the remaining work; the
+constraint that shapes it is in the bridge notes above: the voice helper must stay in the
+user's CoreAudio session, so the design is root-captures → user-session-decodes, with the
+existing FIFO as the data channel between them.
+
 ## Dead ends — do not re-litigate
 
 Each of these was investigated to a firm conclusion. Re-attempting them wastes a lot of
