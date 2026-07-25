@@ -2001,7 +2001,46 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             lastError = "\(expectedName) is not installed."
             return false
         }
+        // A freshly installed virtual device can come up attenuated (observed at 0.47),
+        // which buries remote speech under the noise floor and looks like "no audio".
+        raiseInputVolumeIfNeeded(deviceID, name: expectedName)
         return setDefaultInputDevice(deviceID)
+    }
+
+    /// Ensures the virtual device's input volume is at unity so decoded speech is audible.
+    private func raiseInputVolumeIfNeeded(_ id: AudioDeviceID, name: String) {
+        // Element 0 is the master channel; per-channel elements are only touched if the
+        // device does not expose a master control.
+        for element in [UInt32(0), UInt32(1), UInt32(2)] {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            guard AudioObjectHasProperty(id, &addr) else { continue }
+
+            var volume: Float32 = 0
+            var size = UInt32(MemoryLayout<Float32>.size)
+            guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &volume) == noErr else { continue }
+            guard volume < 0.99 else {
+                if element == 0 { return }
+                continue
+            }
+
+            var unity: Float32 = 1.0
+            let status = AudioObjectSetPropertyData(
+                id,
+                &addr,
+                0,
+                nil,
+                UInt32(MemoryLayout<Float32>.size),
+                &unity
+            )
+            if status == noErr {
+                appendAppLog("Raised \(name) input volume from \(volume) to 1.0")
+            }
+            if element == 0 { return }
+        }
     }
 
     @discardableResult
