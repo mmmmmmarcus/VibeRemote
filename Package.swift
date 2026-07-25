@@ -18,7 +18,20 @@ let package = Package(
         .executableTarget(
             name: "VibeRemoteHelper",
             dependencies: ["HelperProtocol"],
-            path: "PrivilegedHelper"
+            path: "PrivilegedHelper",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                // A daemon shipped as a standalone executable still needs an embedded
+                // identity: without a __TEXT,__info_plist section launchd refuses to load it
+                // and SMAppService registration fails with "Operation not permitted".
+                // The path is relative to the package root, which is where the build runs.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "PrivilegedHelper/Info.plist",
+                ])
+            ]
         ),
         .executableTarget(
             name: "VibeRemote",

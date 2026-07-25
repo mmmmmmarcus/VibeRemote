@@ -117,12 +117,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshInputMonitoringAccess()
         refreshAccessibilityAccess()
         VolumeRevertGuard.shared.prewarm()
+        logPrivilegedHelperState()
         microphoneBridgeManager.prepareAtLaunch()
         microphoneHealthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.microphoneBridgeManager.maintainBridgeHealth()
                 self?.refreshPermissionStates()
                 self?.menuBarManager.refresh()
+            }
+        }
+    }
+
+    /// Records the helper's state at launch, and when it is approved verifies the XPC round
+    /// trip. This is the health check that tells us the daemon is genuinely reachable rather
+    /// than merely registered.
+    private func logPrivilegedHelperState() {
+        let client = PrivilegedHelperClient.shared
+        let state = client.state
+        rmDebug("🔐 Privileged helper state at launch: \(state)")
+        guard state == .ready else { return }
+        client.fetchVersion { version, error in
+            if let version {
+                rmDebug("🔐 Privileged helper reachable over XPC; version=\(version)")
+            } else {
+                rmDebug("🔐 Privileged helper unreachable: \(error ?? "unknown error")")
             }
         }
     }

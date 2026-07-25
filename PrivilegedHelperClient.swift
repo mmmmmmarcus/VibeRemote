@@ -58,14 +58,33 @@ final class PrivilegedHelperClient {
             return .success(.unsupported)
         }
         let service = SMAppService.daemon(plistName: HelperConstants.daemonPlistName)
+        let statusBefore = service.status
+        rmDebug("🔐 Helper registration starting; status=\(statusBefore.rawValue) bundle=\(Bundle.main.bundlePath)")
+
+        // Already registered: re-registering a daemon that is enabled or merely waiting for
+        // the user's approval fails with EPERM, so don't attempt it.
+        if statusBefore == .enabled || statusBefore == .requiresApproval {
+            return .success(state)
+        }
+
         do {
-            if service.status != .enabled {
-                try service.register()
-            }
-            rmDebug("🔐 Privileged helper registration requested; status=\(service.status.rawValue)")
+            try service.register()
+            rmDebug("🔐 Helper registered; status=\(service.status.rawValue)")
             return .success(state)
         } catch {
-            rmDebug("🔐 Privileged helper registration failed: \(error.localizedDescription)")
+            // register() also reports "Operation not permitted" when the daemon actually did
+            // get registered and is pending approval in System Settings. Trust the resulting
+            // status over the thrown error, or the user sees a failure for a working setup.
+            let statusAfter = service.status
+            let nsError = error as NSError
+            if statusAfter == .requiresApproval || statusAfter == .enabled {
+                rmDebug("🔐 Helper registration reported \(nsError.code) but status=\(statusAfter.rawValue); treating as registered")
+                return .success(state)
+            }
+            rmDebug("""
+            🔐 Helper registration failed: domain=\(nsError.domain) code=\(nsError.code) \
+            status=\(statusAfter.rawValue) desc=\(nsError.localizedDescription)
+            """)
             return .failure(error)
         }
     }
