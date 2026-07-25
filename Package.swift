@@ -94,7 +94,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VibeRemoteTests",
-            dependencies: ["VibeRemote"],
+            dependencies: ["VibeRemote", "HelperProtocol"],
             path: "Tests/VibeRemoteTests"
         )
     ]

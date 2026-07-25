@@ -190,4 +190,26 @@ final class PrivilegedHelperClient {
             completion(succeeded, message)
         }
     }
+
+    func startPacketLoggerCapture(
+        packetLoggerExecutablePath: String,
+        runtimeDirectoryPath: String,
+        voiceHelperPath: String,
+        supervisorToken: String,
+        completion: @escaping @Sendable (Int32, String?) -> Void
+    ) {
+        let latch = ErrorLatch()
+        guard let helper = proxy(onError: { message in
+            completion(0, message)
+        }) else { return }
+        helper.startPacketLoggerCapture(
+            packetLoggerExecutablePath: packetLoggerExecutablePath,
+            runtimeDirectoryPath: runtimeDirectoryPath,
+            voiceHelperPath: voiceHelperPath,
+            supervisorToken: supervisorToken
+        ) { pid, message in
+            guard latch.trip() else { return }
+            completion(pid, message)
+        }
+    }
 }

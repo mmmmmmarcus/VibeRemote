@@ -1,3 +1,4 @@
+import HelperProtocol
 import XCTest
 @testable import VibeRemote
 
@@ -123,5 +124,73 @@ final class ModelTests: XCTestCase {
         )
         XCTAssertNil(RemoteBatteryReader.batteryPercent(fromSystemProfilerJSON: keyboardJSON))
         XCTAssertNil(RemoteBatteryReader.batteryPercent(fromSystemProfilerJSON: Data("not json".utf8)))
+    }
+
+    // MARK: - PacketLogger bridge (shared with the privileged helper)
+
+    func testPacketLoggerAppBundleDerivationRequiresOriginalStructure() {
+        XCTAssertEqual(
+            PacketLoggerBridge.appBundlePath(
+                forExecutablePath: "/Applications/Tools/PacketLogger.app/Contents/Resources/packetlogger"
+            ),
+            "/Applications/Tools/PacketLogger.app"
+        )
+        // Anything outside PacketLogger.app/Contents/Resources must be rejected: the root
+        // supervisor equates this app path with "what codesign validates".
+        XCTAssertNil(PacketLoggerBridge.appBundlePath(forExecutablePath: "/usr/local/bin/packetlogger"))
+        XCTAssertNil(
+            PacketLoggerBridge.appBundlePath(
+                forExecutablePath: "/tmp/Fake.app/Contents/Resources/packetlogger"
+            )
+        )
+        XCTAssertNil(
+            PacketLoggerBridge.appBundlePath(
+                forExecutablePath: "/tmp/PacketLogger.app/Contents/MacOS/packetlogger"
+            )
+        )
+    }
+
+    func testSupervisorCommandBindsIdentityAndEscapesPaths() {
+        let token = "0AC81F8B-6A21-4A29-B7E4-1D5A3F9C2E10"
+        let command = PacketLoggerBridge.supervisorCommand(
+            packetLogger: "/Apps/PacketLogger.app/Contents/Resources/packetlogger",
+            packetLoggerApp: "/Apps/PacketLogger.app",
+            helperSource: "/Apps/PacketLogger.app/Contents/Library/LaunchServices/com.apple.bluetooth.PacketLoggerHelper",
+            userHelper: "/Users/o'brien/VibeRemoteVoiceBridge",
+            runtimeDirectory: "/Users/o'brien/Library/Application Support/VibeRemote/MicrophoneBridge",
+            ownerPID: 4321,
+            ownerUID: 501,
+            supervisorToken: token
+        )
+        // The app verifies the supervisor by finding this exact assignment in ps output.
+        XCTAssertTrue(command.contains("viberemote_supervisor_token=\(token)"))
+        XCTAssertTrue(command.contains("owner_pid=4321"))
+        XCTAssertTrue(command.contains("expected_uid=501"))
+        // Paths with shell metacharacters must arrive single-quote escaped.
+        XCTAssertTrue(command.contains("runtime='/Users/o'\\''brien/Library/Application Support/VibeRemote/MicrophoneBridge'"))
+        // Runtime file paths are derived from the shared names, inside the runtime directory.
+        XCTAssertTrue(command.contains("/MicrophoneBridge/\(PacketLoggerBridge.RuntimeFile.voiceFIFO)'"))
+        XCTAssertTrue(command.contains("/MicrophoneBridge/\(PacketLoggerBridge.RuntimeFile.stopSignal)'"))
+    }
+
+    func testSupervisorCommandKeepsThePlatformLandmineWorkarounds() {
+        let command = PacketLoggerBridge.supervisorCommand(
+            packetLogger: "/Apps/PacketLogger.app/Contents/Resources/packetlogger",
+            packetLoggerApp: "/Apps/PacketLogger.app",
+            helperSource: "/dev/null",
+            userHelper: "/tmp/helper",
+            runtimeDirectory: "/tmp/runtime",
+            ownerPID: 1000,
+            ownerUID: 501,
+            supervisorToken: UUID().uuidString
+        )
+        // Each of these looked like an impossible bridge before it was found; losing any one
+        // of them silently breaks live capture again (see AGENTS.md).
+        XCTAssertTrue(command.contains("0<> \"$stdin_keepalive\""), "PacketLogger stdin must never reach EOF")
+        XCTAssertTrue(command.contains("supervisor_pid=$(exec /bin/sh -c 'echo $PPID')"), "PPID probe needs exec")
+        XCTAssertTrue(command.contains("'Last UsedPacket Priority Set' -int 3"), "priority 3 selects local live capture")
+        // Root-side signature validation must stay ahead of any system mutation.
+        XCTAssertTrue(command.contains("validate_packetlogger || fail"))
+        XCTAssertTrue(command.contains("validate_helper \"$helper_source\" || fail"))
     }
 }

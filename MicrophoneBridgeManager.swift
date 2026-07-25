@@ -11,6 +11,7 @@ import CoreAudio
 @preconcurrency import CoreBluetooth
 import Darwin
 import Foundation
+import HelperProtocol
 import IOBluetooth
 
 struct MicrophoneBridgeStatus: Sendable {
@@ -144,21 +145,23 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private let runtimeDirectoryPath: String
-    private var helperPIDFilePath: String { runtimePath("voice-helper.pid") }
+    // Names the root supervisor also derives from the runtime directory come from the shared
+    // PacketLoggerBridge definitions so the two sides cannot disagree.
+    private var helperPIDFilePath: String { runtimePath(PacketLoggerBridge.RuntimeFile.voiceHelperPID) }
     private var packetLoggerPIDFilePath: String { runtimePath("packetlogger-supervisor.pid") }
     private var previousInputDeviceFilePath: String { runtimePath("previous-input-device.id") }
-    private var fifoPath: String { runtimePath("voice-helper.nhdr") }
-    private var packetLoggerFIFOPath: String { runtimePath("packetlogger-output.nhdr") }
-    private var stopSignalPath: String { runtimePath("stop") }
+    private var fifoPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.voiceFIFO) }
+    private var packetLoggerFIFOPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerFIFO) }
+    private var stopSignalPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.stopSignal) }
     private var helperLogPath: String { runtimePath("voice-helper.log") }
-    private var packetLoggerLogPath: String { runtimePath("packetlogger.log") }
-    private var packetCapturePath: String { runtimePath("packets.log") }
+    private var packetLoggerLogPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerLog) }
+    private var packetCapturePath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetCapture) }
     private var directHIDCapturePath: String { runtimePath("direct-hid-audio.log") }
-    private var packetLoggerSessionPath: String { runtimePath("packetlogger.session") }
+    private var packetLoggerSessionPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerSession) }
     private var appLogPath: String { vibeRemoteLogPath }
-    private let packetLoggerHelperInstallPath = "/Library/PrivilegedHelperTools/com.apple.bluetooth.PacketLoggerHelper"
-    private let packetLoggerHelperPlistPath = "/Library/LaunchDaemons/com.apple.bluetooth.PacketLoggerHelper.plist"
-    private let bluetoothDebugPreferencesPath = "/Library/Preferences/com.apple.MobileBluetooth.debug.plist"
+    private let packetLoggerHelperInstallPath = PacketLoggerBridge.systemHelperInstallPath
+    private let packetLoggerHelperPlistPath = PacketLoggerBridge.systemHelperPlistPath
+    private let bluetoothDebugPreferencesPath = PacketLoggerBridge.bluetoothDebugPreferencesPath
     private let appBundle: Bundle
     private let workQueue = DispatchQueue(label: "com.viberemote.microphoneBridge", qos: .userInitiated)
     private let workQueueKey = DispatchSpecificKey<Void>()
@@ -210,8 +213,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    /// Launch-time housekeeping. The bridge itself is never auto-started: the PacketLogger
-    /// engine needs an admin prompt, so starting stays an explicit, user-initiated menu action.
+    /// Launch-time housekeeping. The bridge itself is never auto-started: starting swaps the
+    /// system default input device (and can still raise an admin prompt when the privileged
+    /// helper is unavailable), so it stays an explicit, user-initiated menu action.
     func prepareAtLaunch(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
             guard let self else { return }
@@ -649,10 +653,174 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         helperRunner.arguments = ["-c", helperCommand]
 
         let supervisorToken = UUID().uuidString.uppercased()
-        let command = privilegedPacketLoggerCommand(
+        appendAppLog("Microphone bridge starting PacketLogger supervisor")
+        let pid: Int32
+        switch startPacketLoggerSupervisor(
             packetLogger: packetLogger,
             packetLoggerApp: packetLoggerApp,
             userHelper: helper,
+            supervisorToken: supervisorToken
+        ) {
+        case .started(let supervisorPID):
+            pid = supervisorPID
+        case .failed(let message):
+            setLastError(message)
+            stopUserHelper()
+            removeBridgeFIFOs()
+            return
+        }
+        let identity = SupervisorIdentity(pid: pid, token: supervisorToken)
+        guard packetLoggerSupervisorMatches(identity) else {
+            setLastError("The privileged PacketLogger supervisor could not be verified.")
+            _ = writePrivateFile("stop\n", at: stopSignalPath)
+            removeBridgeFIFOs()
+            return
+        }
+        packetLoggerIdentity = identity
+        guard writePrivateFile("\(pid) \(supervisorToken)\n", at: packetLoggerPIDFilePath) else {
+            setLastError("Could not record the verified PacketLogger supervisor identity.")
+            stopPacketLogger()
+            removeBridgeFIFOs()
+            return
+        }
+        do {
+            try helperRunner.run()
+            helperProcess = helperRunner
+            helperPID = helperRunner.processIdentifier
+            guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
+                throw NSError(
+                    domain: "VibeRemote.MicrophoneBridge",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not record the voice-helper identity."]
+                )
+            }
+            appendAppLog("Microphone bridge helper runner started pid=\(helperRunner.processIdentifier)")
+        } catch {
+            setLastError("Could not start voice helper: \(error.localizedDescription)")
+            stopPacketLogger()
+            removeBridgeFIFOs()
+            return
+        }
+        guard captureDefaultInputDevice() else {
+            setLastError("Could not save the current default input device for later restoration.")
+            stopLocked()
+            return
+        }
+        guard setDefaultInputDevice(named: outputDeviceName) else {
+            setLastError("Could not select \(outputDeviceName) as the default input device.")
+            stopLocked()
+            return
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        if packetLoggerDisconnected() {
+            setLastError("PacketLogger disconnected from OS X Device. Live Bluetooth capture is unavailable.")
+            stopLocked()
+            return
+        }
+        if liveHelperPID() == nil || livePacketLoggerIdentity() == nil {
+            setLastError("The microphone bridge exited during startup.")
+            stopLocked()
+            return
+        }
+        clearLastError()
+        appendAppLog("Microphone bridge started successfully pid=\(pid)")
+    }
+
+    /// Starts the root capture supervisor, preferring the approved privileged helper daemon
+    /// (no password prompt) and falling back to a one-off administrator authorization when
+    /// the daemon is unavailable or predates the capture capability.
+    private enum SupervisorStartOutcome {
+        case started(Int32)
+        case failed(String)
+    }
+
+    private func startPacketLoggerSupervisor(
+        packetLogger: String,
+        packetLoggerApp: String,
+        userHelper: String,
+        supervisorToken: String
+    ) -> SupervisorStartOutcome {
+        if let viaHelper = startSupervisorViaPrivilegedHelper(
+            packetLogger: packetLogger,
+            userHelper: userHelper,
+            supervisorToken: supervisorToken
+        ) {
+            return viaHelper
+        }
+        return startSupervisorViaAdministratorPrompt(
+            packetLogger: packetLogger,
+            packetLoggerApp: packetLoggerApp,
+            userHelper: userHelper,
+            supervisorToken: supervisorToken
+        )
+    }
+
+    /// Returns nil when the daemon cannot be used, which sends the caller to the prompt path.
+    /// A returned failure is final: the daemon ran the same validated script the prompt path
+    /// would run, so re-prompting the user could only fail the same way.
+    private func startSupervisorViaPrivilegedHelper(
+        packetLogger: String,
+        userHelper: String,
+        supervisorToken: String
+    ) -> SupervisorStartOutcome? {
+        guard PrivilegedHelperClient.shared.state == .ready else { return nil }
+        // An approved daemon keeps running the binary it launched with, which may predate
+        // this capability. Probe its version instead of sending a selector it may lack.
+        guard let version = fetchPrivilegedHelperVersion(timeout: 10) else {
+            appendAppLog("Microphone bridge helper did not answer a version probe; falling back to an administrator prompt")
+            return nil
+        }
+        guard version >= HelperConstants.packetLoggerCaptureMinimumVersion else {
+            appendAppLog("Microphone bridge helper is version \(version), needs \(HelperConstants.packetLoggerCaptureMinimumVersion); falling back to an administrator prompt (restarting the daemon picks up the new binary)")
+            return nil
+        }
+        appendAppLog("Microphone bridge starting the supervisor via the privileged helper")
+        let outcome = ValueBox<(pid: Int32, message: String?)>()
+        let semaphore = DispatchSemaphore(value: 0)
+        PrivilegedHelperClient.shared.startPacketLoggerCapture(
+            packetLoggerExecutablePath: packetLogger,
+            runtimeDirectoryPath: runtimeDirectoryPath,
+            voiceHelperPath: userHelper,
+            supervisorToken: supervisorToken
+        ) { pid, message in
+            outcome.store((pid, message))
+            semaphore.signal()
+        }
+        // Root-side codesign --deep of PacketLogger.app plus daemon setup takes seconds,
+        // not minutes; a hang beyond this is a failure, not a reason to also prompt.
+        guard semaphore.wait(timeout: .now() + 60) == .success,
+              let result = outcome.value else {
+            return .failed("The VibeRemote helper did not finish starting the capture supervisor in time.")
+        }
+        guard result.pid > 1 else {
+            return .failed(result.message ?? "The VibeRemote helper could not start the capture supervisor.")
+        }
+        return .started(result.pid)
+    }
+
+    private func fetchPrivilegedHelperVersion(timeout: TimeInterval) -> Int? {
+        let outcome = ValueBox<Int?>()
+        let semaphore = DispatchSemaphore(value: 0)
+        PrivilegedHelperClient.shared.fetchVersion { version, _ in
+            outcome.store(version)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + timeout) == .success else { return nil }
+        return outcome.value ?? nil
+    }
+
+    /// The pre-daemon path: one `osascript … with administrator privileges` run of the same
+    /// shared supervisor script, raising a password prompt.
+    private func startSupervisorViaAdministratorPrompt(
+        packetLogger: String,
+        packetLoggerApp: String,
+        userHelper: String,
+        supervisorToken: String
+    ) -> SupervisorStartOutcome {
+        let command = privilegedPacketLoggerCommand(
+            packetLogger: packetLogger,
+            packetLoggerApp: packetLoggerApp,
+            userHelper: userHelper,
             supervisorToken: supervisorToken
         )
         let osa = Process()
@@ -665,78 +833,37 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         osa.standardError = err
 
         do {
-            appendAppLog("Microphone bridge starting PacketLogger supervisor")
             try osa.run()
-            osa.waitUntilExit()
-            let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let errorText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            appendAppLog("Microphone bridge osascript exit=\(osa.terminationStatus) output=\(output) error=\(errorText)")
-            guard osa.terminationStatus == 0, let pid = Int32(output) else {
-                setLastError(errorText.isEmpty ? "Could not start microphone bridge." : errorText)
-                stopUserHelper()
-                removeBridgeFIFOs()
-                return
-            }
-            let identity = SupervisorIdentity(pid: pid, token: supervisorToken)
-            guard packetLoggerSupervisorMatches(identity) else {
-                setLastError("The privileged PacketLogger supervisor could not be verified.")
-                _ = writePrivateFile("stop\n", at: stopSignalPath)
-                removeBridgeFIFOs()
-                return
-            }
-            packetLoggerIdentity = identity
-            guard writePrivateFile("\(pid) \(supervisorToken)\n", at: packetLoggerPIDFilePath) else {
-                setLastError("Could not record the verified PacketLogger supervisor identity.")
-                stopPacketLogger()
-                removeBridgeFIFOs()
-                return
-            }
-            do {
-                try helperRunner.run()
-                helperProcess = helperRunner
-                helperPID = helperRunner.processIdentifier
-                guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
-                    throw NSError(
-                        domain: "VibeRemote.MicrophoneBridge",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Could not record the voice-helper identity."]
-                    )
-                }
-                appendAppLog("Microphone bridge helper runner started pid=\(helperRunner.processIdentifier)")
-            } catch {
-                setLastError("Could not start voice helper: \(error.localizedDescription)")
-                stopPacketLogger()
-                removeBridgeFIFOs()
-                return
-            }
-            guard captureDefaultInputDevice() else {
-                setLastError("Could not save the current default input device for later restoration.")
-                stopLocked()
-                return
-            }
-            guard setDefaultInputDevice(named: outputDeviceName) else {
-                setLastError("Could not select \(outputDeviceName) as the default input device.")
-                stopLocked()
-                return
-            }
-            Thread.sleep(forTimeInterval: 1.5)
-            if packetLoggerDisconnected() {
-                setLastError("PacketLogger disconnected from OS X Device. Live Bluetooth capture is unavailable.")
-                stopLocked()
-                return
-            }
-            if liveHelperPID() == nil || livePacketLoggerIdentity() == nil {
-                setLastError("The microphone bridge exited during startup.")
-                stopLocked()
-                return
-            }
-            clearLastError()
-            appendAppLog("Microphone bridge started successfully pid=\(pid)")
         } catch {
-            setLastError("Could not start microphone bridge: \(error.localizedDescription)")
-            stopLocked()
+            return .failed("Could not start microphone bridge: \(error.localizedDescription)")
+        }
+        osa.waitUntilExit()
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let errorText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        appendAppLog("Microphone bridge osascript exit=\(osa.terminationStatus) output=\(output) error=\(errorText)")
+        guard osa.terminationStatus == 0, let pid = Int32(output) else {
+            return .failed(errorText.isEmpty ? "Could not start microphone bridge." : errorText)
+        }
+        return .started(pid)
+    }
+
+    /// One-shot storage a @Sendable XPC reply can fill while the work queue waits on it.
+    private final class ValueBox<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: T?
+
+        func store(_ value: T) {
+            lock.lock()
+            defer { lock.unlock() }
+            if stored == nil { stored = value }
+        }
+
+        var value: T? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
         }
     }
 
@@ -1420,23 +1547,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func packetLoggerAppPath(for executablePath: String) -> String? {
-        let executableURL = URL(fileURLWithPath: executablePath)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        guard executableURL.lastPathComponent == "packetlogger",
-              executableURL.deletingLastPathComponent().lastPathComponent == "Resources",
-              executableURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents" else {
-            return nil
-        }
-        let appURL = executableURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        guard appURL.pathExtension.lowercased() == "app",
-              appURL.lastPathComponent == "PacketLogger.app" else {
-            return nil
-        }
-        return appURL.path
+        PacketLoggerBridge.appBundlePath(forExecutablePath: executablePath)
     }
 
     private func packetLoggerValidationError(executablePath: String, appPath: String) -> String? {
@@ -1502,9 +1613,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     private func packetLoggerSystemHelperSourcePath(for packetLogger: String) -> String? {
         guard let appPath = packetLoggerAppPath(for: packetLogger) else { return nil }
-        let helperPath = URL(fileURLWithPath: appPath)
-            .appendingPathComponent("Contents/Library/LaunchServices/com.apple.bluetooth.PacketLoggerHelper")
-            .path
+        let helperPath = PacketLoggerBridge.systemHelperSourcePath(forAppBundlePath: appPath)
         return FileManager.default.isExecutableFile(atPath: helperPath) ? helperPath : nil
     }
 
@@ -1702,279 +1811,19 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         userHelper: String,
         supervisorToken: String
     ) -> String {
+        // The script itself lives in the shared HelperProtocol target so this fallback and
+        // the privileged helper daemon run byte-identical supervisors.
         let helperSource = packetLoggerSystemHelperSourcePath(for: packetLogger) ?? "/dev/null"
-        let ownerPID = getpid()
-        let ownerUID = getuid()
-
-        return """
-        set -eu
-        umask 077
-        viberemote_supervisor_token=\(supervisorToken)
-        owner_pid=\(ownerPID)
-        expected_uid=\(ownerUID)
-        runtime=\(shellEscape(runtimeDirectoryPath))
-        packetlogger_app=\(shellEscape(packetLoggerApp))
-        packetlogger=\(shellEscape(packetLogger))
-        helper_source=\(shellEscape(helperSource))
-        helper_install=\(shellEscape(packetLoggerHelperInstallPath))
-        helper_plist=\(shellEscape(packetLoggerHelperPlistPath))
-        debug_preferences=\(shellEscape(bluetoothDebugPreferencesPath))
-        voice_fifo=\(shellEscape(fifoPath))
-        packet_fifo=\(shellEscape(packetLoggerFIFOPath))
-        packet_log=\(shellEscape(packetLoggerLogPath))
-        packet_capture=\(shellEscape(packetCapturePath))
-        packet_session=\(shellEscape(packetLoggerSessionPath))
-        stop_signal=\(shellEscape(stopSignalPath))
-        user_helper=\(shellEscape(userHelper))
-        helper_pid_file=\(shellEscape(helperPIDFilePath))
-
-        fail() {
-          echo "$1" >&2
-          exit 1
-        }
-        validate_packetlogger() {
-          [ ! -L "$packetlogger_app" ] && [ -d "$packetlogger_app" ] || return 1
-          [ ! -L "$packetlogger" ] && [ -x "$packetlogger" ] || return 1
-          [ "$packetlogger" = "$packetlogger_app/Contents/Resources/packetlogger" ] || return 1
-          /usr/bin/codesign --verify --strict --deep -R='identifier "com.apple.PacketLogger" and anchor apple' "$packetlogger_app" >/dev/null 2>&1 || return 1
-          /usr/bin/codesign --verify --strict -R='identifier "com.apple.packetlogger" and anchor apple' "$packetlogger" >/dev/null 2>&1 || return 1
-        }
-        validate_helper() {
-          [ ! -L "$1" ] && [ -x "$1" ] || return 1
-          /usr/bin/codesign --verify --strict -R='identifier "com.apple.bluetooth.PacketLoggerHelper" and anchor apple' "$1" >/dev/null 2>&1
-        }
-
-        [ ! -L "$runtime" ] && [ -d "$runtime" ] || fail "Unsafe VibeRemote runtime directory."
-        [ "$(/usr/bin/stat -f '%u' "$runtime")" = "$expected_uid" ] || fail "VibeRemote runtime directory has the wrong owner."
-        [ "$(/usr/bin/stat -f '%Lp' "$runtime")" = "700" ] || fail "VibeRemote runtime directory permissions must be 0700."
-        [ ! -L "$voice_fifo" ] && [ -p "$voice_fifo" ] || fail "Voice FIFO is missing or unsafe."
-        [ ! -L "$packet_fifo" ] && [ -p "$packet_fifo" ] || fail "PacketLogger FIFO is missing or unsafe."
-        [ "$(/usr/bin/stat -f '%u' "$voice_fifo")" = "$expected_uid" ] || fail "Voice FIFO has the wrong owner."
-        [ "$(/usr/bin/stat -f '%u' "$packet_fifo")" = "$expected_uid" ] || fail "PacketLogger FIFO has the wrong owner."
-        validate_packetlogger || fail "PacketLogger failed root-side Apple signature validation."
-        validate_helper "$helper_source" || fail "PacketLoggerHelper failed root-side Apple signature validation."
-
-        backup_dir=$(/usr/bin/mktemp -d /var/run/viberemote-microphone.XXXXXX) || fail "Could not create a root-only rollback directory."
-        /bin/chmod 700 "$backup_dir"
-        trap '/bin/rm -rf "$backup_dir"' EXIT HUP INT TERM
-        validate_packetlogger || { /bin/rm -rf "$backup_dir"; fail "PacketLogger changed after elevation."; }
-        validate_helper "$helper_source" || { /bin/rm -rf "$backup_dir"; fail "PacketLoggerHelper changed after elevation."; }
-        helper_installed_by_bridge=0
-        plist_installed_by_bridge=0
-        helper_was_loaded=0
-        rollback_owned_by_supervisor=0
-
-        if /bin/launchctl print system/com.apple.bluetooth.PacketLoggerHelper >/dev/null 2>&1; then
-          helper_was_loaded=1
-        fi
-
-        restore_system_state() {
-          if [ "$helper_was_loaded" -eq 0 ]; then
-            /bin/launchctl bootout system "$helper_plist" >/dev/null 2>&1 || true
-          fi
-          if [ "$plist_installed_by_bridge" -eq 1 ]; then /bin/rm -f "$helper_plist"; fi
-          if [ "$helper_installed_by_bridge" -eq 1 ]; then /bin/rm -f "$helper_install"; fi
-        }
-        setup_exit() {
-          if [ "$rollback_owned_by_supervisor" -eq 0 ]; then
-            restore_system_state
-            /bin/rm -rf "$backup_dir"
-          fi
-        }
-        trap setup_exit EXIT HUP INT TERM
-
-        if [ -e "$helper_install" ]; then
-          validate_helper "$helper_install" || fail "The installed PacketLoggerHelper is not valid Apple code."
-        else
-          /usr/bin/install -m 755 -o root -g wheel "$helper_source" "$helper_install"
-          helper_installed_by_bridge=1
-        fi
-        validate_helper "$helper_install" || fail "The installed PacketLoggerHelper failed post-install signature validation."
-        if [ -e "$helper_plist" ]; then
-          [ ! -L "$helper_plist" ] && [ -f "$helper_plist" ] || fail "The PacketLoggerHelper launch daemon plist is unsafe."
-          [ "$(/usr/bin/stat -f '%u' "$helper_plist")" = "0" ] || fail "The PacketLoggerHelper plist has an unsafe owner."
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$helper_plist" 2>/dev/null)" = "com.apple.bluetooth.PacketLoggerHelper" ] || fail "The PacketLoggerHelper plist has an unexpected label."
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$helper_plist" 2>/dev/null)" = "$helper_install" ] || fail "The PacketLoggerHelper plist has an unexpected executable."
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:com.apple.bluetooth.PacketLoggerHelper' "$helper_plist" 2>/dev/null)" = "true" ] || fail "The PacketLoggerHelper plist has unexpected Mach services."
-        else
-          temp_plist="$backup_dir/PacketLoggerHelper.plist"
-          /usr/bin/touch "$temp_plist"
-          /usr/libexec/PlistBuddy -c 'Clear dict' -c 'Add :Label string com.apple.bluetooth.PacketLoggerHelper' -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /Library/PrivilegedHelperTools/com.apple.bluetooth.PacketLoggerHelper' -c 'Add :MachServices dict' -c 'Add :MachServices:com.apple.bluetooth.PacketLoggerHelper bool true' -c 'Add :RunAtLoad bool true' "$temp_plist" >/dev/null
-          /usr/bin/install -m 644 -o root -g wheel "$temp_plist" "$helper_plist"
-          plist_installed_by_bridge=1
-        fi
-        if [ "$helper_was_loaded" -eq 0 ]; then
-          /bin/launchctl bootstrap system "$helper_plist" >/dev/null 2>&1 || true
-          /bin/launchctl kickstart system/com.apple.bluetooth.PacketLoggerHelper >/dev/null 2>&1 || true
-        fi
-
-        bluetooth_ready=1
-        /usr/bin/defaults read /Library/Preferences/com.apple.MobileBluetooth.debug HCITraces 2>/dev/null | /usr/bin/grep -q 'StackDebugEnabled = 1' || bluetooth_ready=0
-        /usr/bin/defaults read /Library/Preferences/com.apple.MobileBluetooth.debug HCI 2>/dev/null | /usr/bin/grep -q 'lmpRouting = 1' || bluetooth_ready=0
-        /usr/bin/defaults read /Library/Preferences/com.apple.MobileBluetooth.debug FWStreamLogging 2>/dev/null | /usr/bin/grep -q 'FWCoreDumpEnable = 1' || bluetooth_ready=0
-        /usr/bin/defaults read /Library/Preferences/com.apple.MobileBluetooth.debug FWStreamLogging 2>/dev/null | /usr/bin/grep -q 'FWStreamLoggingEnable = 1' || bluetooth_ready=0
-        nvram_value=
-        if nvram_line=$(/usr/sbin/nvram SkipBluetoothPacketLogAuthorization 2>/dev/null); then
-          nvram_value=$(printf '%s\n' "$nvram_line" | /usr/bin/cut -f2- | /usr/bin/tr -d '[:space:]')
-        else
-          bluetooth_ready=0
-        fi
-        if [ -n "$nvram_value" ]; then bluetooth_ready=0; fi
-        if [ "$bluetooth_ready" -eq 0 ]; then
-          /usr/bin/defaults write /Library/Preferences/com.apple.MobileBluetooth.debug FWStreamLogging -dict FWCoreDumpEnable -bool true FWStreamLoggingEnable -bool true
-          /usr/bin/defaults write /Library/Preferences/com.apple.MobileBluetooth.debug HCI -dict lmpRouting -bool true
-          /usr/bin/defaults write /Library/Preferences/com.apple.MobileBluetooth.debug HCITraces -dict StackDebugEnabled -bool true
-          /usr/sbin/nvram SkipBluetoothPacketLogAuthorization=" "
-        fi
-
-        # PacketLogger 26 treats priority 3 as the local live-capture source.
-        # Without it the CLI prints the device inventory, then immediately
-        # disconnects from "OS X Device" even when its helper is healthy.
-        /usr/bin/defaults write com.apple.PacketLogger 'Last UsedPacket Priority Set' -int 3 >/dev/null 2>&1 || true
-
-        /bin/rm -f "$packet_log" "$packet_capture" "$packet_session" "$stop_signal"
-        : > "$packet_log"
-        : > "$packet_capture"
-        : > "$packet_session"
-        /usr/sbin/chown "$expected_uid" "$packet_log" "$packet_capture" "$packet_session"
-        /bin/chmod 600 "$packet_log" "$packet_capture" "$packet_session"
-
-        # PacketLogger treats stdin EOF as Ctrl-D and tears down the local live-capture
-        # session immediately ("Disconnected from OS X Device"). Give it a FIFO opened
-        # read-write below, which never delivers data or EOF.
-        stdin_keepalive="$runtime/packetlogger-stdin.keepalive"
-        /bin/rm -f "$stdin_keepalive"
-        /usr/bin/mkfifo -m 600 "$stdin_keepalive" || fail "Could not create the PacketLogger stdin keepalive FIFO."
-
-        (
-          # `exec` keeps the probe in the command-substitution fork itself, so PPID is this
-          # subshell. Without it, sh runs one fork deeper and reports the wrong parent,
-          # making every is_direct_child check fail and tearing the bridge down instantly.
-          supervisor_pid=$(exec /bin/sh -c 'echo $PPID')
-          logger_pid=
-          tee_pid=
-          is_direct_child() {
-            case "$1" in ''|*[!0-9]*) return 1 ;; esac
-            [ "$1" -gt 1 ] || return 1
-            child_parent=$(/bin/ps -p "$1" -o ppid= 2>/dev/null | /usr/bin/tr -d ' ')
-            [ "$child_parent" = "$supervisor_pid" ]
-          }
-          terminate_direct_child() {
-            child_pid="$1"
-            is_direct_child "$child_pid" || return 0
-            /bin/kill -TERM "$child_pid" 2>/dev/null || true
-            /bin/sleep 0.2
-            if is_direct_child "$child_pid"; then /bin/kill -KILL "$child_pid" 2>/dev/null || true; fi
-          }
-          packetlogger_process_matches() {
-            checked_pid="$1"
-            checked_uid=$(/bin/ps -p "$checked_pid" -o uid= 2>/dev/null | /usr/bin/tr -d ' ')
-            checked_command=$(/bin/ps -p "$checked_pid" -o comm= 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            [ "$checked_uid" = "0" ] || return 1
-            [ "$checked_command" = "$packetlogger" ]
-          }
-          packetlogger_is_alive() {
-            candidate_pids="$(/usr/bin/pgrep -f "$packetlogger" 2>/dev/null || true)"
-            for checked_pid in $candidate_pids; do
-              if packetlogger_process_matches "$checked_pid"; then return 0; fi
-            done
-            return 1
-          }
-          terminate_packetlogger_processes() {
-            matching_pids=
-            candidate_pids="$(/usr/bin/pgrep -f "$packetlogger" 2>/dev/null || true)"
-            for checked_pid in $candidate_pids; do
-              if packetlogger_process_matches "$checked_pid"; then
-                matching_pids="$matching_pids $checked_pid"
-                /bin/kill -TERM "$checked_pid" 2>/dev/null || true
-              fi
-            done
-            [ -z "$matching_pids" ] && return 0
-            /bin/sleep 0.2
-            for checked_pid in $matching_pids; do
-              if packetlogger_process_matches "$checked_pid"; then
-                /bin/kill -KILL "$checked_pid" 2>/dev/null || true
-              fi
-            done
-          }
-          user_helper_matches() {
-            checked_pid="$1"
-            checked_uid=$(/bin/ps -p "$checked_pid" -o uid= 2>/dev/null | /usr/bin/tr -d ' ')
-            checked_command=$(/bin/ps -p "$checked_pid" -o comm= 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            [ "$checked_uid" = "$expected_uid" ] || return 1
-            if [ "$checked_command" = "$user_helper" ]; then return 0; fi
-            [ "$checked_command" = "/bin/bash" ] || return 1
-            checked_arguments=$(/bin/ps -ww -p "$checked_pid" -o command= 2>/dev/null || true)
-            case "$checked_arguments" in *"$user_helper"*"$voice_fifo"*) return 0 ;; esac
-            return 1
-          }
-          terminate_user_helper() {
-            [ ! -L "$helper_pid_file" ] && [ -f "$helper_pid_file" ] || return 0
-            [ "$(/usr/bin/stat -f '%u' "$helper_pid_file" 2>/dev/null)" = "$expected_uid" ] || return 0
-            [ "$(/usr/bin/stat -f '%l' "$helper_pid_file" 2>/dev/null)" = "1" ] || return 0
-            helper_pid_file_size=$(/usr/bin/stat -f '%z' "$helper_pid_file" 2>/dev/null || echo 999)
-            case "$helper_pid_file_size" in ''|*[!0-9]*) return 0 ;; esac
-            [ "$helper_pid_file_size" -le 64 ] || return 0
-            helper_pid=$(/bin/cat "$helper_pid_file" 2>/dev/null || true)
-            case "$helper_pid" in ''|*[!0-9]*) return 0 ;; esac
-            [ "$helper_pid" -gt 1 ] || return 0
-            user_helper_matches "$helper_pid" || return 0
-            /bin/kill -TERM "$helper_pid" 2>/dev/null || true
-            /bin/sleep 0.2
-            if user_helper_matches "$helper_pid"; then
-              /bin/kill -KILL "$helper_pid" 2>/dev/null || true
-            fi
-            /bin/rm -f "$helper_pid_file"
-          }
-          supervisor_cleanup() {
-            terminate_direct_child "$logger_pid"
-            terminate_packetlogger_processes
-            terminate_direct_child "$tee_pid"
-            terminate_user_helper
-            /bin/date '+%Y-%m-%d %H:%M:%S PacketLogger supervisor stopped' >> "$packet_log" 2>/dev/null || true
-            restore_system_state
-            /bin/rm -f "$stop_signal" "$voice_fifo" "$packet_fifo" "$stdin_keepalive"
-            /bin/rm -rf "$backup_dir"
-          }
-          trap supervisor_cleanup EXIT
-          trap 'exit 0' HUP INT TERM
-
-          while [ ! -e "$stop_signal" ] && /bin/kill -0 "$owner_pid" 2>/dev/null; do
-            if ! validate_packetlogger; then
-              /bin/date '+%Y-%m-%d %H:%M:%S PacketLogger signature changed; stopping' >> "$packet_log"
-              break
-            fi
-            /bin/date '+%Y-%m-%d %H:%M:%S PacketLogger starting' >> "$packet_log"
-            # PacketLogger 26 supports live stdout through `convert -s`. Its stdin must
-            # never reach EOF (Control-D disconnects the local OS X Device session), so
-            # it reads the keepalive FIFO opened read-write instead of /dev/null.
-            "$packetlogger" convert -s -f nhdr 0<> "$stdin_keepalive" > "$packet_fifo" 2>> "$packet_log" &
-            logger_pid=$!
-            /usr/bin/tee -a "$packet_capture" < "$packet_fifo" > "$voice_fifo" &
-            tee_pid=$!
-            while is_direct_child "$tee_pid"; do
-              if [ -e "$stop_signal" ] || ! /bin/kill -0 "$owner_pid" 2>/dev/null; then break; fi
-              if ! is_direct_child "$logger_pid" && ! packetlogger_is_alive; then break; fi
-              /bin/sleep 1
-            done
-            terminate_direct_child "$logger_pid"
-            terminate_packetlogger_processes
-            terminate_direct_child "$tee_pid"
-            logger_status=0
-            /bin/wait "$logger_pid" 2>/dev/null || logger_status=$?
-            /bin/wait "$tee_pid" 2>/dev/null || true
-            logger_pid=
-            tee_pid=
-            if [ -e "$stop_signal" ] || ! /bin/kill -0 "$owner_pid" 2>/dev/null; then break; fi
-            /bin/date "+%Y-%m-%d %H:%M:%S PacketLogger exited with status $logger_status; restarting in 2 seconds" >> "$packet_log"
-            /bin/sleep 2
-          done
-        ) >/dev/null 2>/dev/null < /dev/null &
-        supervisor_pid=$!
-        rollback_owned_by_supervisor=1
-        trap - EXIT HUP INT TERM
-        echo "$supervisor_pid"
-        """
+        return PacketLoggerBridge.supervisorCommand(
+            packetLogger: packetLogger,
+            packetLoggerApp: packetLoggerApp,
+            helperSource: helperSource,
+            userHelper: userHelper,
+            runtimeDirectory: runtimeDirectoryPath,
+            ownerPID: getpid(),
+            ownerUID: getuid(),
+            supervisorToken: supervisorToken
+        )
     }
 
     private func helperExecutablePath() -> String? {

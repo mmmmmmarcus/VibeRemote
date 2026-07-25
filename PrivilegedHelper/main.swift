@@ -4,8 +4,8 @@
 //
 //  A root LaunchDaemon registered through SMAppService. The user approves it once, and it
 //  then performs the privileged work the microphone bridge needs — installing the virtual
-//  audio driver today, and the Bluetooth capture setup as that migrates over — so the app
-//  never has to raise an administrator prompt again.
+//  audio driver, and starting the root PacketLogger capture supervisor — so the app never
+//  has to raise an administrator prompt again.
 //
 //  Every incoming XPC connection is validated against our own code-signing requirement
 //  before any privileged work is done: this process runs as root, so an unverified peer
@@ -22,7 +22,7 @@ private func helperLog(_ message: String) {
     fflush(stdout)
 }
 
-final class HelperService: NSObject, HelperProtocol, NSXPCListenerDelegate {
+final class HelperService: NSObject, NSXPCListenerDelegate {
     private let halPlugInDirectory = "/Library/Audio/Plug-Ins/HAL"
     private let audioDriverBundleName = "VibeRemoteAudio.driver"
 
@@ -33,8 +33,16 @@ final class HelperService: NSObject, HelperProtocol, NSXPCListenerDelegate {
             helperLog("Rejected an XPC connection that failed code-signature validation")
             return false
         }
+        // Each connection gets its own handler carrying the peer's uid and pid from the
+        // connection itself. Privileged operations scope what they touch (and which process
+        // lifetime they bind to) with these values, never with client-supplied ones.
+        let handler = HelperRequestHandler(
+            service: self,
+            clientUID: connection.effectiveUserIdentifier,
+            clientPID: connection.processIdentifier
+        )
         connection.exportedInterface = NSXPCInterface(with: HelperProtocol.self)
-        connection.exportedObject = self
+        connection.exportedObject = handler
         connection.resume()
         return true
     }
@@ -75,11 +83,7 @@ final class HelperService: NSObject, HelperProtocol, NSXPCListenerDelegate {
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
-    // MARK: - HelperProtocol
-
-    func helperVersion(reply: @escaping (Int) -> Void) {
-        reply(HelperConstants.version)
-    }
+    // MARK: - Privileged capabilities (invoked via HelperRequestHandler)
 
     func installAudioDriver(fromPath sourcePath: String, reply: @escaping (Bool, String?) -> Void) {
         // The source must be a driver bundle inside a signed VibeRemote app; refuse anything
@@ -114,6 +118,90 @@ final class HelperService: NSObject, HelperProtocol, NSXPCListenerDelegate {
             helperLog(message)
             reply(false, message)
         }
+    }
+
+    /// Starts the root PacketLogger capture supervisor on behalf of the connected client.
+    ///
+    /// The supervisor script is the shared `PacketLoggerBridge` one — identical to what the
+    /// app's administrator-prompt fallback runs — and it re-validates everything root-side:
+    /// runtime directory ownership and 0700 mode against the client's uid, FIFO safety, and
+    /// Apple code signatures on PacketLogger and PacketLoggerHelper before any system change.
+    /// The client only chooses *which* validated things participate, never what root executes.
+    func startPacketLoggerCapture(
+        packetLoggerExecutablePath: String,
+        runtimeDirectoryPath: String,
+        voiceHelperPath: String,
+        supervisorToken: String,
+        clientUID: uid_t,
+        clientPID: pid_t,
+        reply: @escaping (Int32, String?) -> Void
+    ) {
+        // The token is interpolated into a shell command line (unquoted, by design, so the
+        // app can find it in ps output). Accept only a canonical UUID.
+        guard let token = UUID(uuidString: supervisorToken) else {
+            reply(0, "The supervisor token is not a valid UUID.")
+            return
+        }
+        guard packetLoggerExecutablePath.hasPrefix("/"),
+              runtimeDirectoryPath.hasPrefix("/"),
+              voiceHelperPath.hasPrefix("/") else {
+            reply(0, "PacketLogger capture paths must be absolute.")
+            return
+        }
+        guard let appPath = PacketLoggerBridge.appBundlePath(forExecutablePath: packetLoggerExecutablePath) else {
+            reply(0, "PacketLogger must be the executable inside PacketLogger.app.")
+            return
+        }
+        // Missing source is tolerated when a valid PacketLoggerHelper is already installed;
+        // the script validates whichever it ends up using.
+        let helperSourceCandidate = PacketLoggerBridge.systemHelperSourcePath(forAppBundlePath: appPath)
+        let helperSource = FileManager.default.isExecutableFile(atPath: helperSourceCandidate)
+            ? helperSourceCandidate
+            : "/dev/null"
+
+        let command = PacketLoggerBridge.supervisorCommand(
+            packetLogger: packetLoggerExecutablePath,
+            packetLoggerApp: appPath,
+            helperSource: helperSource,
+            userHelper: voiceHelperPath,
+            runtimeDirectory: runtimeDirectoryPath,
+            ownerPID: clientPID,
+            ownerUID: clientUID,
+            supervisorToken: token.uuidString.uppercased()
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        do {
+            try process.run()
+        } catch {
+            let message = "Could not launch the PacketLogger supervisor: \(error.localizedDescription)"
+            helperLog(message)
+            reply(0, message)
+            return
+        }
+        // The setup phase exits quickly after backgrounding the supervisor (which holds no
+        // pipe ends open), so reading to EOF here cannot hang on the capture itself.
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let errorText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, let pid = Int32(output), pid > 1 else {
+            let message = errorText.isEmpty
+                ? "The PacketLogger supervisor setup exited with status \(process.terminationStatus)."
+                : errorText
+            helperLog("PacketLogger capture start failed for uid \(clientUID): \(message)")
+            reply(0, message)
+            return
+        }
+        helperLog("Started the PacketLogger supervisor pid=\(pid) for uid \(clientUID) pid \(clientPID)")
+        reply(pid, nil)
     }
 
     // MARK: - Privileged operations
@@ -165,6 +253,46 @@ final class HelperService: NSObject, HelperProtocol, NSXPCListenerDelegate {
                 userInfo: [NSLocalizedDescriptionKey: "Restarting coreaudiod failed."]
             )
         }
+    }
+}
+
+/// The object actually exported over XPC: one per connection, so every privileged call is
+/// bound to the identity (uid, pid) of the validated peer that made it.
+final class HelperRequestHandler: NSObject, HelperProtocol {
+    private let service: HelperService
+    private let clientUID: uid_t
+    private let clientPID: pid_t
+
+    init(service: HelperService, clientUID: uid_t, clientPID: pid_t) {
+        self.service = service
+        self.clientUID = clientUID
+        self.clientPID = clientPID
+    }
+
+    func helperVersion(reply: @escaping (Int) -> Void) {
+        reply(HelperConstants.version)
+    }
+
+    func installAudioDriver(fromPath sourcePath: String, reply: @escaping (Bool, String?) -> Void) {
+        service.installAudioDriver(fromPath: sourcePath, reply: reply)
+    }
+
+    func startPacketLoggerCapture(
+        packetLoggerExecutablePath: String,
+        runtimeDirectoryPath: String,
+        voiceHelperPath: String,
+        supervisorToken: String,
+        reply: @escaping (Int32, String?) -> Void
+    ) {
+        service.startPacketLoggerCapture(
+            packetLoggerExecutablePath: packetLoggerExecutablePath,
+            runtimeDirectoryPath: runtimeDirectoryPath,
+            voiceHelperPath: voiceHelperPath,
+            supervisorToken: supervisorToken,
+            clientUID: clientUID,
+            clientPID: clientPID,
+            reply: reply
+        )
     }
 }
 

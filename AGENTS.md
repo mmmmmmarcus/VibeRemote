@@ -143,13 +143,16 @@ defaults write com.viberemote.app microphoneBridgeEngine packetlogger
 - **PacketLogger engine (what works).** `startPacketLoggerBridgeLocked()` runs
   Apple's signed `PacketLogger.app` CLI as root to capture live HCI, tees the
   stream to the user-session helper, and decodes the `1B 35` voice frames.
-  Requires an admin password prompt on each start.
+  Root access comes from the approved privileged helper daemon over XPC (no
+  prompt); when the daemon is unavailable or stale it degrades to a one-off
+  `osascript … with administrator privileges` password prompt.
 
-### Landmines in the PacketLogger supervisor (`privilegedPacketLoggerCommand`)
+### Landmines in the PacketLogger supervisor (`PacketLoggerBridge.supervisorCommand`)
 
-The root supervisor is a shell script embedded in `MicrophoneBridgeManager.swift`.
-Two bugs here previously made the whole path look impossible; do not regress
-them:
+The root supervisor is a shell script built in `HelperProtocol/HelperProtocol.swift`,
+shared so the helper daemon and the osascript fallback run byte-identical scripts
+(`ModelTests` pins the landmines below). Two bugs here previously made the whole
+path look impossible; do not regress them:
 
 1. **stdin must never reach EOF.** `packetlogger convert -s` treats stdin EOF as
    Ctrl-D and immediately prints `Disconnected from OS X Device`. It reads a
@@ -259,12 +262,22 @@ remember an already-approved daemon keeps running the **old** binary until re-re
 
 ### Migration status (what still raises a password prompt)
 
-The helper currently owns **only** audio-driver installation. `startPacketLoggerBridgeLocked`
-still shells out through `osascript ... with administrator privileges`, so **starting the
-bridge continues to prompt every time**. Finishing that migration is the remaining work; the
-constraint that shapes it is in the bridge notes above: the voice helper must stay in the
-user's CoreAudio session, so the design is root-captures → user-session-decodes, with the
-existing FIFO as the data channel between them.
+The helper owns audio-driver installation **and** PacketLogger capture
+(`startPacketLoggerCapture`, helper version 2): with the daemon approved, starting the
+bridge no longer prompts. The design constraint held — the voice helper stays in the
+user's CoreAudio session; only the capture supervisor runs as root, launched by the
+daemon instead of osascript, with the same FIFO data channel and the same stop-signal
+file. The prompt survives in exactly two cases: the daemon is not approved / not
+reachable, or an approved daemon is still **running a pre-v2 binary** (a replaced app
+bundle does not restart a live daemon — the app probes `helperVersion` first and falls
+back rather than calling a selector the old process lacks; `sudo launchctl kickstart -k
+system/com.viberemote.helper` or re-registration picks up the new binary).
+
+Root-side trust does not come from the XPC client: the daemon takes the caller's
+uid/pid from the connection (never from parameters), accepts only a canonical UUID as
+the supervisor token, and the shared script re-validates directory ownership, FIFO
+safety, and Apple code signatures before touching the system — same checks as the
+prompt path, because it *is* the same script.
 
 ## Dead ends — do not re-litigate
 
