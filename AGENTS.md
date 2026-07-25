@@ -100,7 +100,9 @@ single source of truth. Only the **Siri button** is user-customizable (persisted
 `siriButtonAction` default); everything else is hardcoded and has no menu UI.
 
 Current intent: clickpad arrows → arrow keys, clickpad center → Enter, Back/Menu →
-Backspace, TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
+word-wise Backspace (Option+Delete — macOS `deleteWordBackward:`, whose tokenizer also
+segments Chinese words; repeat runs at a slower word cadence than character repeat),
+TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
 the Codex/Claude desktop client to the front, Power → Enter, volume keys → bullet-list
 control, Siri → held Space, Mute → tap types "/" (the skill/command-picker trigger in
 agent apps); held, it is a modifier: Mute+Back clears all input (Cmd+A, Backspace) and

@@ -589,7 +589,13 @@ final class RemoteInputHandler {
         case .shiftEnter:
             sendKey(kVK_Return, flags: .maskShift)
         case .backspace:
-            beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_Delete) }
+            // Option+Delete = the system's deleteWordBackward:. Apple's text system segments
+            // Chinese with its dictionary tokenizer (我爱北京天安门 deletes 天安门, then 北京…),
+            // so word-wise deletion works for English, Chinese, and mixed text alike. Repeat
+            // is slowed to word cadence — 50ms per word would erase half a sentence per second.
+            beginRepeating(button: button, interval: wordRepeatInterval) { [weak self] in
+                self?.sendKey(kVK_Delete, flags: .maskAlternate)
+            }
         case .upKey:
             beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_UpArrow) }
         case .downKey:
@@ -632,17 +638,19 @@ final class RemoteInputHandler {
 
     private let repeatInitialDelay: TimeInterval = 0.4
     private let repeatInterval: TimeInterval = 0.05
+    /// Word-wise deletion erases far more per tick than a character, so it repeats slower.
+    private let wordRepeatInterval: TimeInterval = 0.18
     private let repeatMaxTicks = 400   // ~20s safety cap in case a release is ever dropped
     private let longPressThreshold: TimeInterval = 0.4
 
     /// Fire immediately, then auto-repeat while the button stays held (Backspace, arrows).
-    private func beginRepeating(button: String, fire: @escaping () -> Void) {
+    private func beginRepeating(button: String, interval: TimeInterval? = nil, fire: @escaping () -> Void) {
         stopRepeat(for: button)
         fire()
         let starter = Timer.scheduledTimer(withTimeInterval: repeatInitialDelay, repeats: false) { [weak self] _ in
             guard let self else { return }
             var ticks = 0
-            let repeater = Timer.scheduledTimer(withTimeInterval: self.repeatInterval, repeats: true) { [weak self] timer in
+            let repeater = Timer.scheduledTimer(withTimeInterval: interval ?? self.repeatInterval, repeats: true) { [weak self] timer in
                 guard let self else { timer.invalidate(); return }
                 ticks += 1
                 if ticks > self.repeatMaxTicks {
