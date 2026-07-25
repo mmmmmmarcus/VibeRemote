@@ -100,6 +100,18 @@ final class ModelTests: XCTestCase {
         ))
     }
 
+    func testMuteButtonDrivesPunctuationWithoutHold() {
+        let mute = remoteButtonDescriptors.first { $0.key == "mute" }
+        XCTAssertEqual(mute?.defaultAction, .punctuation)
+        // Punctuation is a tap/double-tap/long-press gesture, not a held-key action.
+        XCTAssertFalse(ButtonAction.punctuation.requiresHold)
+        XCTAssertEqual(mute?.supportsHold, false)
+        // The 2nd-gen remote reports mute as Consumer 0xE2 (the standard usage). Without
+        // this mapping the HID marker is never set, the media-key interceptor lets the
+        // event through, and the button mutes the system instead of typing punctuation.
+        XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0xE2), "mute")
+    }
+
     func testEveryRemoteButtonDescriptorHasAUniqueKeyAndValidHoldDefault() {
         let keys = remoteButtonDescriptors.map(\.key)
         XCTAssertEqual(Set(keys).count, keys.count)

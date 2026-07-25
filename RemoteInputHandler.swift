@@ -496,7 +496,8 @@ final class RemoteInputHandler {
         case (0x0C, 0x224): return "back"         // AC Back
         case (0x0C, 0x40): return "menu"          // Menu
         case (0x0C, 0x30): return "power"         // Power
-        case (0x0C, 0x20): return "mute"          // Mute (some remotes)
+        case (0x0C, 0xE2): return "mute"          // Mute (standard Consumer usage; verified on 2nd-gen Siri Remote)
+        case (0x0C, 0x20): return "mute"          // Mute (some remotes report this instead)
 
         // Button Page (0x09)
         case (0x09, 0x01): return "select"        // Button 1
@@ -523,6 +524,7 @@ final class RemoteInputHandler {
             // any physically held key captured for this button.
             stopRepeat(for: button)
             resolveRelease(for: button)
+            resolveMultiTapRelease(for: button)
             releaseHeldKey(for: button)
             return
         }
@@ -564,6 +566,16 @@ final class RemoteInputHandler {
             )
         case .bulletOutdent:
             sendKey(kVK_Tab, flags: .maskShift)
+        case .punctuation:
+            // Tap = comma, double-tap = period, long-press = question mark. The physical
+            // keys are sent unmodified (Shift+/ for "?"), so the active input method
+            // decides between half- and full-width forms (, vs ,).
+            beginTapDoubleTapOrLongPress(
+                button: button,
+                tap: { [weak self] in self?.sendKey(kVK_ANSI_Comma) },
+                doubleTap: { [weak self] in self?.sendKey(kVK_ANSI_Period) },
+                longPress: { [weak self] in self?.sendKey(kVK_ANSI_Slash, flags: .maskShift) }
+            )
         case .spaceKey, .rightCmd, .rightOpt:
             break // handled above
         }
@@ -639,12 +651,92 @@ final class RemoteInputHandler {
         pendingTapActions[button] = nil
     }
 
+    // MARK: Tap / double-tap / long-press
+
+    // Three-way recognizer (punctuation button). A single tap can only be confirmed after
+    // the double-tap window passes, so the tap action fires ~0.3s after release — the
+    // unavoidable cost of sharing one button between three gestures.
+    private var multiTapHoldTimers: [String: Timer] = [:]      // press → long-press threshold
+    private var multiTapConfirmTimers: [String: Timer] = [:]   // release → double-tap window
+    private var multiTapPendingSingle: [String: () -> Void] = [:]
+    private var multiTapPendingDouble: [String: () -> Void] = [:]
+    private var multiTapAwaitingSecondRelease: Set<String> = []
+
+    private let doubleTapWindow: TimeInterval = 0.3
+
+    private func beginTapDoubleTapOrLongPress(
+        button: String,
+        tap: @escaping () -> Void,
+        doubleTap: @escaping () -> Void,
+        longPress: @escaping () -> Void
+    ) {
+        if let confirm = multiTapConfirmTimers[button] {
+            // Second press inside the window: the pending single tap is off, and the
+            // double-tap action fires on this press's release.
+            confirm.invalidate()
+            multiTapConfirmTimers[button] = nil
+            multiTapPendingSingle[button] = nil
+            multiTapPendingDouble[button] = doubleTap
+            multiTapAwaitingSecondRelease.insert(button)
+            return
+        }
+        cancelMultiTap(for: button)
+        multiTapPendingSingle[button] = tap
+        let timer = Timer.scheduledTimer(withTimeInterval: longPressThreshold, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.multiTapHoldTimers[button] = nil
+            self.multiTapPendingSingle[button] = nil
+            longPress()
+        }
+        multiTapHoldTimers[button] = timer
+    }
+
+    private func resolveMultiTapRelease(for button: String) {
+        if multiTapAwaitingSecondRelease.contains(button) {
+            multiTapAwaitingSecondRelease.remove(button)
+            let action = multiTapPendingDouble[button]
+            multiTapPendingDouble[button] = nil
+            action?()
+            return
+        }
+        // No hold timer means either the long press already fired or this button never
+        // started a multi-tap gesture; both mean the release resolves nothing.
+        guard let hold = multiTapHoldTimers[button] else { return }
+        hold.invalidate()
+        multiTapHoldTimers[button] = nil
+        guard let tap = multiTapPendingSingle[button] else { return }
+        multiTapPendingSingle[button] = nil
+        let timer = Timer.scheduledTimer(withTimeInterval: doubleTapWindow, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.multiTapConfirmTimers[button] = nil
+            tap()
+        }
+        multiTapConfirmTimers[button] = timer
+    }
+
+    private func cancelMultiTap(for button: String) {
+        multiTapHoldTimers[button]?.invalidate()
+        multiTapHoldTimers[button] = nil
+        multiTapConfirmTimers[button]?.invalidate()
+        multiTapConfirmTimers[button] = nil
+        multiTapPendingSingle[button] = nil
+        multiTapPendingDouble[button] = nil
+        multiTapAwaitingSecondRelease.remove(button)
+    }
+
     private func stopAllHoldTimers() {
         repeatTimers.values.forEach { $0.invalidate() }
         repeatTimers.removeAll()
         longPressTimers.values.forEach { $0.invalidate() }
         longPressTimers.removeAll()
         pendingTapActions.removeAll()
+        multiTapHoldTimers.values.forEach { $0.invalidate() }
+        multiTapHoldTimers.removeAll()
+        multiTapConfirmTimers.values.forEach { $0.invalidate() }
+        multiTapConfirmTimers.removeAll()
+        multiTapPendingSingle.removeAll()
+        multiTapPendingDouble.removeAll()
+        multiTapAwaitingSecondRelease.removeAll()
     }
 
     /// "- " + space is the markdown input rule that turns the current line into a bullet.
