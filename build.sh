@@ -1,72 +1,82 @@
 #!/bin/bash
 
-# Build script for HyperVibe
-# Make sure Xcode Command Line Tools are installed: xcode-select --install
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
-echo "Building HyperVibe..."
+APP_NAME="VibeRemote"
+VOICE_BRIDGE_NAME="VibeRemoteVoiceBridge"
+CONFIGURATION="${CONFIGURATION:-release}"
+MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-11.0}"
+ARCHS="${ARCHS:-arm64 x86_64}"
 
-SWIFT_FILES=(
-    "main.swift"
-    "SiriRemoteApp.swift"
-    "MenuBarManager.swift"
-    "RemoteDetector.swift"
-    "RemoteInputHandler.swift"
-    "CursorController.swift"
-    "MediaController.swift"
-    "MediaKeyInterceptor.swift"
-    "TouchHandler.swift"
-    "SystemVolume.swift"
-)
-
-# Find SDK path
-SDK_PATH=$(xcrun --show-sdk-path --sdk macosx 2>/dev/null || echo "")
-
-if [ -z "$SDK_PATH" ]; then
-    echo "Error: macOS SDK not found. Please install Xcode Command Line Tools:"
+if ! command -v xcrun >/dev/null 2>&1 || ! xcrun --show-sdk-path --sdk macosx >/dev/null 2>&1; then
+    echo "Error: macOS SDK not found. Install Xcode Command Line Tools with:"
     echo "  xcode-select --install"
     exit 1
 fi
 
-echo "Using SDK: $SDK_PATH"
-
-# Detect architecture
-ARCH=$(uname -m)
-if [ "$ARCH" == "arm64" ]; then
-    TARGET="arm64-apple-macosx11.0"
-else
-    TARGET="x86_64-apple-macosx11.0"
-fi
-
-echo "Building for: $TARGET"
-
-# Build
-swiftc \
-    -sdk "$SDK_PATH" \
-    -target "$TARGET" \
-    -o HyperVibe \
-    "${SWIFT_FILES[@]}" \
-    -import-objc-header SiriRemote-Bridging-Header.h \
-    -F /System/Library/PrivateFrameworks \
-    -framework IOKit \
-    -framework CoreGraphics \
-    -framework AudioToolbox \
-    -framework Carbon \
-    -framework AppKit \
-    -framework MultitouchSupport
-
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "✓ Build successful!"
-    echo ""
-    echo "To create a proper macOS app bundle, run:"
-    echo "  ./create_app_bundle.sh"
-    echo ""
-    echo "Or run directly with:"
-    echo "  ./HyperVibe"
-else
-    echo ""
-    echo "✗ Build failed!"
+read -r -a architectures <<< "$ARCHS"
+if [ "${#architectures[@]}" -eq 0 ]; then
+    echo "Error: ARCHS must contain at least one architecture."
     exit 1
 fi
+
+echo "Building $APP_NAME ($CONFIGURATION) for: ${architectures[*]}"
+
+app_binaries=()
+voice_bridge_binaries=()
+for arch in "${architectures[@]}"; do
+    case "$arch" in
+        arm64|x86_64) ;;
+        *)
+            echo "Error: unsupported architecture '$arch' (expected arm64 or x86_64)."
+            exit 1
+            ;;
+    esac
+
+    triple="${arch}-apple-macosx${MACOS_DEPLOYMENT_TARGET}"
+    scratch_path=".build/${arch}"
+    swift build \
+        --configuration "$CONFIGURATION" \
+        --triple "$triple" \
+        --scratch-path "$scratch_path" \
+        --product "$APP_NAME"
+    swift build \
+        --configuration "$CONFIGURATION" \
+        --triple "$triple" \
+        --scratch-path "$scratch_path" \
+        --product "$VOICE_BRIDGE_NAME"
+    bin_path="$(swift build \
+        --configuration "$CONFIGURATION" \
+        --triple "$triple" \
+        --scratch-path "$scratch_path" \
+        --show-bin-path)"
+    app_binary="$bin_path/$APP_NAME"
+    voice_bridge_binary="$bin_path/$VOICE_BRIDGE_NAME"
+    if [ ! -x "$app_binary" ]; then
+        echo "Error: SwiftPM did not produce $app_binary"
+        exit 1
+    fi
+    if [ ! -x "$voice_bridge_binary" ]; then
+        echo "Error: SwiftPM did not produce $voice_bridge_binary"
+        exit 1
+    fi
+    app_binaries+=("$app_binary")
+    voice_bridge_binaries+=("$voice_bridge_binary")
+done
+
+if [ "${#app_binaries[@]}" -eq 1 ]; then
+    cp "${app_binaries[0]}" "$APP_NAME"
+    cp "${voice_bridge_binaries[0]}" "$VOICE_BRIDGE_NAME"
+else
+    xcrun lipo -create "${app_binaries[@]}" -output "$APP_NAME"
+    xcrun lipo -create "${voice_bridge_binaries[@]}" -output "$VOICE_BRIDGE_NAME"
+fi
+
+chmod +x "$APP_NAME" "$VOICE_BRIDGE_NAME"
+echo "Built $ROOT_DIR/$APP_NAME"
+xcrun lipo -info "$APP_NAME"
+echo "Built $ROOT_DIR/$VOICE_BRIDGE_NAME"
+xcrun lipo -info "$VOICE_BRIDGE_NAME"

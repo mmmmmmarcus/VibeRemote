@@ -1,26 +1,36 @@
 //
 //  MediaKeyInterceptor.swift
-//  Remotastic
+//  VibeRemote
 //
 //  Intercepts system media key events at HID level to reliably prevent default handling.
 //  Re-enables tap when disabled by timeout/sleep and on wake.
 //
 
 import Cocoa
-import CoreGraphics
+@preconcurrency import CoreGraphics
 
-class MediaKeyInterceptor {
+@MainActor
+final class MediaKeyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var wakeObserver: NSObjectProtocol?
     
-    var onMediaKey: ((MediaKeyType) -> Bool)?
+    var onMediaKey: ((MediaKeyType, Bool) -> Bool)?
     
     enum MediaKeyType {
         case playPause, next, previous, volumeUp, volumeDown, mute
     }
     
-    func start() {
+    /// Starts intercepting system-defined media key events.
+    ///
+    /// - Returns: `true` when the tap is installed (or was already installed),
+    ///   and `false` when macOS denied creation of the HID-level event tap.
+    @discardableResult
+    func start() -> Bool {
+        if eventTap != nil {
+            return true
+        }
+
         let eventMask: CGEventMask = 1 << 14 // NX_SYSDEFINED
         
         // HID-level tap intercepts media keys before the system handles them (more reliable than session tap).
@@ -30,22 +40,27 @@ class MediaKeyInterceptor {
             options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
                 let interceptor = Unmanaged<MediaKeyInterceptor>.fromOpaque(refcon).takeUnretainedValue()
-                return interceptor.handleEvent(proxy: proxy, type: type, event: event)
+                // This tap is scheduled exclusively on the main run loop below.
+                return MainActor.assumeIsolated {
+                    interceptor.handleEvent(proxy: proxy, type: type, event: event)
+                }
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            return
+            return false
         }
-        
+
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return false
+        }
+
         eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        
-        if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-        }
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
         
         // Re-enable tap after sleep/wake (system often disables taps during sleep).
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -53,8 +68,12 @@ class MediaKeyInterceptor {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.reenableTap()
+            Task { @MainActor [weak self] in
+                self?.reenableTap()
+            }
         }
+
+        return true
     }
     
     func stop() {
@@ -67,6 +86,9 @@ class MediaKeyInterceptor {
         }
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
         }
         eventTap = nil
         runLoopSource = nil
@@ -87,17 +109,17 @@ class MediaKeyInterceptor {
         
         // NX_SYSDEFINED = 14
         guard type.rawValue == 14 else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         // Get NSEvent to parse the media key
         guard let nsEvent = NSEvent(cgEvent: event) else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         // Check subtype 8 = media key event
         guard nsEvent.subtype.rawValue == 8 else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         // Parse the key code from data1
@@ -105,10 +127,10 @@ class MediaKeyInterceptor {
         let keyFlags = nsEvent.data1 & 0x0000FFFF
         let keyState = (keyFlags & 0xFF00) >> 8
         let isKeyDown = keyState == 0x0A
-        
-        // Only handle key down events
-        guard isKeyDown else {
-            return Unmanaged.passRetained(event)
+        let isKeyUp = keyState == 0x0B
+
+        guard isKeyDown || isKeyUp else {
+            return Unmanaged.passUnretained(event)
         }
         
         // Identify the media key
@@ -130,14 +152,10 @@ class MediaKeyInterceptor {
             break
         }
         
-        if let key = mediaKey, let handler = onMediaKey, handler(key) {
+        if let key = mediaKey, let handler = onMediaKey, handler(key, isKeyDown) {
             return nil // Consume event
         }
         
-        return Unmanaged.passRetained(event)
-    }
-    
-    deinit {
-        stop()
+        return Unmanaged.passUnretained(event)
     }
 }

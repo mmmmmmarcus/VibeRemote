@@ -1,6 +1,6 @@
 //
 //  RemoteInputHandler.swift
-//  HyperVibe
+//  VibeRemote
 //
 //  Processes HID input events from Siri Remote
 //
@@ -11,94 +11,438 @@ import Foundation
 import Carbon.HIToolbox
 import AppKit
 
-class RemoteInputHandler {
-    private let cursorController: CursorController
+/// HID callbacks are delivered on the main run loop. Keeping device, button, and synthetic-key
+/// state on the main actor prevents teardown from racing an in-flight press or release.
+@MainActor
+final class RemoteInputHandler {
+    private final class InputReportRegistration {
+        let buffer: UnsafeMutablePointer<UInt8>
+        let capacity: Int
+
+        init(capacity: Int) {
+            self.capacity = capacity
+            self.buffer = .allocate(capacity: capacity)
+            self.buffer.initialize(repeating: 0, count: capacity)
+        }
+
+        deinit {
+            buffer.deinitialize(count: capacity)
+            buffer.deallocate()
+        }
+    }
+
+    fileprivate final class FeatureEnableRequest {
+        weak var handler: RemoteInputHandler?
+        let usagePage: Int
+        let usage: Int
+        let variant: String
+        let buffer: UnsafeMutablePointer<UInt8>
+        let length: Int
+
+        /// `payload` is the exact byte sequence handed to IOHID. Whether IOHID strips a
+        /// leading report-ID byte before the GATT write is transport-dependent, so callers
+        /// try both framings.
+        init(handler: RemoteInputHandler, usagePage: Int, usage: Int, variant: String, payload: [UInt8]) {
+            self.handler = handler
+            self.usagePage = usagePage
+            self.usage = usage
+            self.variant = variant
+            self.length = payload.count
+            self.buffer = .allocate(capacity: payload.count)
+            for (index, byte) in payload.enumerated() {
+                self.buffer[index] = byte
+            }
+        }
+
+        deinit {
+            buffer.deallocate()
+        }
+    }
+
     private weak var menuBarManager: MenuBarManager?
-    private var devices: [IOHIDDevice] = []
-    
-    /// Called on any button activity; use to trigger trackpad re-scan after remote wake.
-    var onButtonActivity: (() -> Void)?
-    
-    // First press after connection: do not perform action (sound already played at connect).
-    private var isFirstPressAfterConnection = false
-    
-    // Click/drag state
-    private var isSelectPressed = false
-    private var selectPressTime: UInt64 = 0
-    private var isDragging = false
-    private let clickThreshold: Double = 0.25
-    
-    // Prevent double-processing with MediaKeyInterceptor
+    private weak var microphoneBridgeManager: MicrophoneBridgeManager?
+    private var devices: [ObjectIdentifier: IOHIDDevice] = [:]
+    private var inputReportRegistrations: [ObjectIdentifier: InputReportRegistration] = [:]
+    private var audioReportCounts: [ObjectIdentifier: UInt64] = [:]
+    private var lastAudioReports: [ObjectIdentifier: (data: Data, time: TimeInterval)] = [:]
+    private var isAcceptingInput = true
+
+    // Prevent double-processing with MediaKeyInterceptor. Both producers run on the main loop.
     static var lastProcessedButton: String?
     static var lastProcessedTime: UInt64 = 0
 
     /// Virtual keys currently held down, keyed by the HID button that initiated the hold.
-    /// Captured at press time so release can fire the correct keyUp even if the user
-    /// rebinds the button mid-hold. Cleared on device removal to avoid stuck modifiers.
+    /// The key specification is captured at press time so release remains correct even if the
+    /// user changes that button's mapping before letting go.
     private var heldKeys: [String: (keyCode: Int, flags: CGEventFlags)] = [:]
+    private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags)] = [:]
 
-    /// Last observed pressed/released state per button. The Siri Remote mirrors each logical
-    /// button across multiple HID interfaces (6 seized here), so every physical press/release
-    /// fires the callback N times. This collapses dup events to a single state transition.
+    /// Last observed pressed/released state per logical button. A Siri Remote may mirror a
+    /// button over multiple HID interfaces, so this collapses duplicates into one transition.
     private var buttonState: [String: Bool] = [:]
-    
-    init(cursorController: CursorController, menuBarManager: MenuBarManager) {
-        self.cursorController = cursorController
-        self.menuBarManager = menuBarManager
+
+    var isConnected: Bool {
+        !devices.isEmpty
     }
-    
-    func setRemoteDevice(_ device: IOHIDDevice?) {
-        guard let device = device else {
-            releaseAllHeldKeys()
-            for d in devices {
-                IOHIDDeviceRegisterInputValueCallback(d, nil, nil)
-                IOHIDDeviceUnscheduleFromRunLoop(d, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
-                IOHIDDeviceClose(d, IOOptionBits(kIOHIDOptionsTypeNone))
-            }
-            devices.removeAll()
-            isFirstPressAfterConnection = false
+
+    init(menuBarManager: MenuBarManager, microphoneBridgeManager: MicrophoneBridgeManager) {
+        self.menuBarManager = menuBarManager
+        self.microphoneBridgeManager = microphoneBridgeManager
+    }
+
+    /// Opens one exact HID interface and reports whether at least one interface is usable.
+    @discardableResult
+    func addRemoteDevice(_ device: IOHIDDevice) -> Bool {
+        guard isAcceptingInput else { return isConnected }
+
+        let interfaceID = ObjectIdentifier(device)
+        guard devices[interfaceID] == nil else { return isConnected }
+
+        let preferredOptions: IOOptionBits = shouldSeize(device)
+            ? IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
+            : IOOptionBits(kIOHIDOptionsTypeNone)
+
+        var openResult = IOHIDDeviceOpen(device, preferredOptions)
+        var openedOptions = preferredOptions
+        if openResult != kIOReturnSuccess,
+           preferredOptions == IOOptionBits(kIOHIDOptionsTypeSeizeDevice) {
+            rmDebug(String(
+                format: "⚠️ FAILED to seize HID device (IOReturn=0x%X) — opening unseized",
+                openResult
+            ))
+            openedOptions = IOOptionBits(kIOHIDOptionsTypeNone)
+            openResult = IOHIDDeviceOpen(device, openedOptions)
+        }
+
+        guard openResult == kIOReturnSuccess else {
+            rmDebug(String(format: "⚠️ FAILED to open Siri HID interface (IOReturn=0x%X)", openResult))
+            return isConnected
+        }
+
+        let mode = openedOptions == IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
+            ? "SEIZED"
+            : "LISTENING"
+        rmDebug(String(
+            format: "🔒 %@ HID device (vendor=0x%X product=0x%X usagePage=0x%X usage=0x%X)",
+            mode,
+            property(kIOHIDVendorIDKey, of: device),
+            property(kIOHIDProductIDKey, of: device),
+            property(kIOHIDPrimaryUsagePageKey, of: device),
+            property(kIOHIDPrimaryUsageKey, of: device)
+        ))
+
+        let isAudioInterface = Self.isAudioInterface(
+            usagePage: property(kIOHIDPrimaryUsagePageKey, of: device),
+            usage: property(kIOHIDPrimaryUsageKey, of: device)
+        )
+        if isAudioInterface {
+            let advertisedSize = property(kIOHIDMaxInputReportSizeKey, of: device)
+            let capacity = max(1, advertisedSize)
+            let registration = InputReportRegistration(capacity: capacity)
+            inputReportRegistrations[interfaceID] = registration
+            audioReportCounts[interfaceID] = 0
+            IOHIDDeviceRegisterInputReportCallback(
+                device,
+                registration.buffer,
+                registration.capacity,
+                inputReportCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            // Buffered-byte HID elements are delivered as IOHIDValue on some macOS builds even
+            // when the raw report queue remains empty. Register both paths and deduplicate below.
+            IOHIDDeviceRegisterInputValueCallback(
+                device,
+                inputValueCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            rmDebug("🎙 Direct HID audio listener registered (capacity=\(capacity))")
+        } else {
+            IOHIDDeviceRegisterInputValueCallback(
+                device,
+                inputValueCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+        }
+        IOHIDDeviceScheduleWithRunLoop(
+            device,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
+        devices[interfaceID] = device
+        enableRemoteInputStreaming(on: device)
+        return true
+    }
+
+    /// Third-generation Siri Remotes keep all HID input reports, including microphone audio,
+    /// silent until the host writes 0xAF to their writable HID Feature reports (the
+    /// siri-remote reverse-engineering project confirms Gen-3 exposes the enable control as
+    /// Feature reports; Gen-1/2 used Output reports, which macOS does not surface at all).
+    /// macOS presents each HID-over-GATT Report characteristic as a separate IOHIDDevice and
+    /// remaps its report ID to 0xFF, so try the write on every interface; the remote ignores
+    /// the reports that are not the input-enable control characteristic.
+    ///
+    /// The over-the-air characteristic value must be exactly one byte, 0xAF. Whether IOHID
+    /// strips a leading report-ID byte from the caller's buffer before the GATT write is not
+    /// documented for the Bluetooth transport, so send both framings; the wrong one is
+    /// ignored by the remote.
+    private func enableRemoteInputStreaming(on device: IOHIDDevice) {
+        guard property(kIOHIDVendorIDKey, of: device) == 0x004C,
+              property(kIOHIDMaxFeatureReportSizeKey, of: device) >= 1 else {
             return
         }
-        
-        guard !devices.contains(where: { $0 == device }) else { return }
-        
-        // Seize device to prevent system from handling events
-        let openResult = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
 
-        if openResult == kIOReturnSuccess {
-            rmDebug(String(format: "🔒 SEIZED HID device (vendor=0x%X product=0x%X)",
-                  IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int ?? 0,
-                  IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int ?? 0))
-            IOHIDDeviceRegisterInputValueCallback(device, inputValueCallback, Unmanaged.passUnretained(self).toOpaque())
-            IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
-            devices.append(device)
-            isFirstPressAfterConnection = true
-        } else {
-            rmDebug(String(format: "⚠️ FAILED to seize HID device (IOReturn=0x%X) — opening unseized", openResult))
-            if IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess {
-                IOHIDDeviceRegisterInputValueCallback(device, inputValueCallback, Unmanaged.passUnretained(self).toOpaque())
-                IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
-                devices.append(device)
-                isFirstPressAfterConnection = true
+        let usagePage = property(kIOHIDPrimaryUsagePageKey, of: device)
+        let usage = property(kIOHIDPrimaryUsageKey, of: device)
+        let variants: [(String, [UInt8])] = [
+            ("id+value", [0xFF, 0xAF]),
+            ("value-only", [0xAF]),
+        ]
+        for (variant, payload) in variants {
+            let request = FeatureEnableRequest(
+                handler: self,
+                usagePage: usagePage,
+                usage: usage,
+                variant: variant,
+                payload: payload
+            )
+            let context = Unmanaged.passRetained(request).toOpaque()
+            let result = IOHIDDeviceSetReportWithCallback(
+                device,
+                kIOHIDReportTypeFeature,
+                0xFF,
+                request.buffer,
+                request.length,
+                1_000,
+                featureEnableCallback,
+                context
+            )
+            if result != kIOReturnSuccess {
+                Unmanaged<FeatureEnableRequest>.fromOpaque(context).release()
+                handleFeatureEnableResult(result, usagePage: usagePage, usage: usage, variant: variant)
             }
         }
+        readBackEnableFeature(on: device, usagePage: usagePage, usage: usage)
     }
-    
-    func handleInputValue(_ value: IOHIDValue) {
+
+    /// Diagnostic read-back: if the transport round-trips GetReport to the remote, the value
+    /// shows whether an enable write actually landed on this characteristic.
+    private func readBackEnableFeature(on device: IOHIDDevice, usagePage: Int, usage: Int) {
+        var buffer = [UInt8](repeating: 0, count: 209)
+        var length = CFIndex(buffer.count)
+        let result = IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, 0xFF, &buffer, &length)
+        if result == kIOReturnSuccess {
+            let preview = buffer.prefix(min(8, max(1, length)))
+                .map { String(format: "%02X", $0) }
+                .joined(separator: " ")
+            rmDebug(String(
+                format: "🔎 Feature read-back length=%ld bytes=[%@] (usagePage=0x%X usage=0x%X)",
+                length,
+                preview,
+                usagePage,
+                usage
+            ))
+        } else {
+            rmDebug(String(
+                format: "🔎 Feature read-back failed (IOReturn=0x%X usagePage=0x%X usage=0x%X)",
+                result,
+                usagePage,
+                usage
+            ))
+        }
+    }
+
+    fileprivate func handleFeatureEnableResult(
+        _ result: IOReturn,
+        usagePage: Int,
+        usage: Int,
+        variant: String
+    ) {
+        if result == kIOReturnSuccess {
+            rmDebug(String(
+                format: "📡 Siri Remote input enabled (Feature %@ <- 0xAF, usagePage=0x%X usage=0x%X)",
+                variant,
+                usagePage,
+                usage
+            ))
+        } else {
+            rmDebug(String(
+                format: "ℹ️ Siri Remote input-enable %@ ignored (IOReturn=0x%X usagePage=0x%X usage=0x%X)",
+                variant,
+                result,
+                usagePage,
+                usage
+            ))
+        }
+    }
+
+    /// Closes only the interface that disappeared. Remaining interfaces continue handling input.
+    @discardableResult
+    func removeRemoteDevice(_ device: IOHIDDevice) -> Bool {
+        let interfaceID = ObjectIdentifier(device)
+        guard let openedDevice = devices.removeValue(forKey: interfaceID) else {
+            return isConnected
+        }
+
+        closeDevice(openedDevice)
+
+        // A disappearing interface can take the matching key-up event with it. Releasing active
+        // synthetic keys is safer than leaving Space/Command/Option stuck while other interfaces run.
+        releaseAllHeldKeys()
+        releaseAllPendingTapKeys()
+        return isConnected
+    }
+
+    /// Compatibility entry point for callers that provide an optional device.
+    @discardableResult
+    func setRemoteDevice(_ device: IOHIDDevice?) -> Bool {
+        guard let device else {
+            disconnectAll()
+            return false
+        }
+        return addRemoteDevice(device)
+    }
+
+    /// Synchronous, terminal, and idempotent teardown used during application shutdown.
+    /// Callbacks are unregistered before devices close, then every actually-held key is released.
+    func stop() {
+        guard isAcceptingInput || !devices.isEmpty || !heldKeys.isEmpty || !pendingTapKeyUps.isEmpty else {
+            return
+        }
+
+        isAcceptingInput = false
+        disconnectAll()
+        Self.lastProcessedButton = nil
+        Self.lastProcessedTime = 0
+    }
+
+    private func disconnectAll() {
+        let openedDevices = Array(devices.values)
+        devices.removeAll()
+        for device in openedDevices {
+            closeDevice(device)
+        }
+        releaseAllHeldKeys()
+        releaseAllPendingTapKeys()
+    }
+
+    private func closeDevice(_ device: IOHIDDevice) {
+        let interfaceID = ObjectIdentifier(device)
+        IOHIDDeviceRegisterInputValueCallback(device, nil, nil)
+        if let registration = inputReportRegistrations[interfaceID] {
+            IOHIDDeviceRegisterInputReportCallback(
+                device,
+                registration.buffer,
+                registration.capacity,
+                nil,
+                nil
+            )
+            inputReportRegistrations.removeValue(forKey: interfaceID)
+            audioReportCounts.removeValue(forKey: interfaceID)
+            lastAudioReports.removeValue(forKey: interfaceID)
+        }
+        IOHIDDeviceUnscheduleFromRunLoop(
+            device,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
+        IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
+    }
+
+    private func shouldSeize(_ device: IOHIDDevice) -> Bool {
+        let usagePage = property(kIOHIDPrimaryUsagePageKey, of: device)
+        let usage = property(kIOHIDPrimaryUsageKey, of: device)
+
+        // Apple's button driver must observe the Siri transition before its audio driver can
+        // negotiate a microphone session with the remote. The side button is an element inside
+        // Consumer/0x01, not the top-level Consumer/0x04 audio collection. Keep both collections
+        // shared while continuing to seize unrelated touch/sensor interfaces.
+        return !Self.requiresSharedSystemAccess(usagePage: usagePage, usage: usage)
+    }
+
+    nonisolated static func isAudioInterface(usagePage: Int, usage: Int) -> Bool {
+        usagePage == 0x0C && usage == 0x04
+    }
+
+    nonisolated static func requiresSharedSystemAccess(usagePage: Int, usage: Int) -> Bool {
+        isAudioInterface(usagePage: usagePage, usage: usage)
+            || (usagePage == 0x0C && usage == 0x01)
+    }
+
+    fileprivate func handleInputReport(
+        result: IOReturn,
+        reportID: UInt32,
+        bytes: UnsafePointer<UInt8>?,
+        length: Int,
+        from interfaceID: ObjectIdentifier?,
+        source: String
+    ) {
+        guard isAcceptingInput,
+              result == kIOReturnSuccess,
+              let interfaceID,
+              devices[interfaceID] != nil,
+              inputReportRegistrations[interfaceID] != nil,
+              let bytes,
+              length > 0 else {
+            if result != kIOReturnSuccess {
+                rmDebug(String(format: "⚠️ Direct HID audio callback failed (IOReturn=0x%X)", result))
+            }
+            return
+        }
+
+        let data = Data(bytes: bytes, count: length)
+        let now = ProcessInfo.processInfo.systemUptime
+        if let previous = lastAudioReports[interfaceID],
+           previous.data == data,
+           now - previous.time < 0.002 {
+            return
+        }
+        lastAudioReports[interfaceID] = (data, now)
+        let count = (audioReportCounts[interfaceID] ?? 0) + 1
+        audioReportCounts[interfaceID] = count
+        if count == 1 || count % 50 == 0 {
+            let preview = data.prefix(24).map { String(format: "%02X", $0) }.joined(separator: " ")
+            rmDebug("🎙 HID audio report: count=\(count) source=\(source) id=0x\(String(reportID, radix: 16, uppercase: true)) length=\(length) preview=\(preview)")
+        }
+        microphoneBridgeManager?.handleDirectHIDAudioReport(
+            reportID: reportID,
+            data: data
+        )
+    }
+
+    fileprivate func handleInputValue(_ value: IOHIDValue, from interfaceID: ObjectIdentifier?) {
+        guard isAcceptingInput else { return }
+        if let interfaceID, devices[interfaceID] == nil {
+            // The callback was queued just before this exact interface was removed or closed.
+            return
+        }
+
         let element = IOHIDValueGetElement(value)
+        if let interfaceID,
+           inputReportRegistrations[interfaceID] != nil {
+            let bytes = IOHIDValueGetBytePtr(value)
+            handleInputReport(
+                result: kIOReturnSuccess,
+                reportID: UInt32(IOHIDElementGetReportID(element)),
+                bytes: bytes,
+                length: IOHIDValueGetLength(value),
+                from: interfaceID,
+                source: "value"
+            )
+            return
+        }
         let usagePage = IOHIDElementGetUsagePage(element)
         let usage = IOHIDElementGetUsage(element)
         let intValue = IOHIDValueGetIntegerValue(value)
 
-        let identified = identifyButton(page: usagePage, usage: usage)
-        rmDebug(String(format: "🎮 HID event: page=0x%X usage=0x%X value=%d → %@",
-                       usagePage, usage, intValue, identified ?? "<unmapped>"))
-        guard let buttonName = identified else { return }
-
-        onButtonActivity?()
+        let identified = Self.identifyButton(page: usagePage, usage: usage)
+        rmDebug(String(
+            format: "🎮 HID event: page=0x%X usage=0x%X value=%d → %@",
+            usagePage, usage, intValue, identified ?? "<unmapped>"
+        ))
+        guard let buttonName = identified, buttonName != "select" else { return }
 
         // Collapse mirrored-interface duplicates: only proceed on a real state transition.
-        let isPressed = (intValue == 1)
+        let isPressed = intValue != 0
         if buttonState[buttonName] == isPressed {
             return
         }
@@ -111,76 +455,30 @@ class RemoteInputHandler {
             VolumeRevertGuard.shared.armFromRemoteButton()
         }
 
-        // First key-down after connection: skip so the connect handshake doesn't fire an action.
-        if intValue == 1 && isFirstPressAfterConnection {
-            isFirstPressAfterConnection = false
-            return
+        if isPressed {
+            Self.lastProcessedButton = buttonName
+            Self.lastProcessedTime = mach_absolute_time()
         }
 
-        // Select is the trackpad click — handled separately for click/drag semantics.
-        if buttonName == "select" {
-            handleSelectButton(pressed: intValue == 1)
-            return
-        }
-
-        let pressed = (intValue == 1)
-
-        // Debounce only on press — release just closes an existing hold.
-        if pressed {
-            RemoteInputHandler.lastProcessedButton = buttonName
-            RemoteInputHandler.lastProcessedTime = mach_absolute_time()
-        }
+        microphoneBridgeManager?.handleButton(button: buttonName, pressed: isPressed)
 
         let action = menuBarManager?.getMapping(for: buttonName) ?? ButtonAction.none
-        if pressed {
+        if isPressed {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
-        executeAction(action, button: buttonName, pressed: pressed)
+        executeAction(action, button: buttonName, pressed: isPressed)
     }
-    
-    private func handleSelectButton(pressed: Bool) {
-        if pressed && !isSelectPressed {
-            isSelectPressed = true
-            isDragging = false
-            selectPressTime = mach_absolute_time()
-            cursorController.isClickActive = true
-            
-            // Start drag after threshold
-            DispatchQueue.main.asyncAfter(deadline: .now() + clickThreshold) { [weak self] in
-                guard let self = self, self.isSelectPressed && !self.isDragging else { return }
-                print("🔘 Select button: Drag started")
-                self.isDragging = true
-                self.cursorController.isDragging = true
-                self.cursorController.mouseDown()
-            }
-        } else if !pressed && isSelectPressed {
-            isSelectPressed = false
-            
-            if isDragging {
-                print("🔘 Select button: Drag ended")
-                cursorController.isDragging = false
-                cursorController.mouseUp()
-            } else {
-                print("🔘 Select button: Click")
-                cursorController.performClick()
-            }
-            isDragging = false
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.cursorController.isClickActive = false
-            }
-        }
-    }
-    
+
     // MARK: - Button Identification
-    
-    private func identifyButton(page: UInt32, usage: UInt32) -> String? {
+
+    /// Pure internal mapping so tests can verify that unknown vendor-defined usages are ignored.
+    nonisolated static func identifyButton(page: UInt32, usage: UInt32) -> String? {
         switch (page, usage) {
         // Generic Desktop Page (0x01)
         case (0x01, 0x86): return "menu"          // System Menu Main
         case (0x01, 0x40): return "menu"          // Menu (alternative)
-        
-        // Consumer Page (0x0C)  
+
+        // Consumer Page (0x0C)
         case (0x0C, 0x04): return "siri"          // Siri button (actual)
         case (0x0C, 0x60): return "tv"            // TV button (actual)
         case (0x0C, 0x80): return "select"        // Selection
@@ -195,101 +493,207 @@ class RemoteInputHandler {
         case (0x0C, 0x40): return "menu"          // Menu
         case (0x0C, 0x30): return "power"         // Power
         case (0x0C, 0x20): return "mute"          // Mute (some remotes)
-        
+
         // Button Page (0x09)
         case (0x09, 0x01): return "select"        // Button 1
-        
-        // Apple Vendor Page (0xFF00) - Siri button
-        case (0xFF00, 0x01): return "siri"        // Siri button
-        case (0xFF00, 0x02): return "siri"        // Siri button (alternative)
-        case (0xFF00, 0x03): return "siri"        // Siri button (alternative)
-        case (0xFF00, _): return "siri"           // Any Apple vendor usage = likely Siri
-        
+
+        // Apple Vendor Page (0xFF00). Only usages observed for Siri are accepted; never map
+        // the whole vendor page because it can contain unrelated sensors and controls.
+        case (0xFF00, 0x01): return "siri"
+        case (0xFF00, 0x02): return "siri"
+        case (0xFF00, 0x03): return "siri"
+
         // Telephony Page (0x0B) - sometimes used for Siri
         case (0x0B, 0x21): return "siri"          // Flash
         case (0x0B, 0x2F): return "siri"          // Phone Mute
-        
+
         default: return nil
         }
     }
-    
+
     // MARK: - Action Execution
-    
+
     private func executeAction(_ action: ButtonAction, button: String, pressed: Bool) {
-        if action.requiresHold {
-            handleHoldAction(action, button: button, pressed: pressed)
+        // Always release the key captured for this physical button before consulting its current
+        // mapping. This covers a mapping change from a hold action to a tap/no-op mid-press.
+        guard pressed else {
+            releaseHeldKey(for: button)
             return
         }
-        // Tap actions fire once, on press only.
-        guard pressed else { return }
+
+        if action.requiresHold {
+            beginHoldAction(action, button: button)
+            return
+        }
+
         switch action {
         case .none:
             break
         case .enterKey:
             sendKey(kVK_Return)
+        case .shiftEnter:
+            sendKey(kVK_Return, flags: .maskShift)
+        case .backspace:
+            sendKey(kVK_Delete)
         case .upKey:
             sendKey(kVK_UpArrow)
         case .downKey:
             sendKey(kVK_DownArrow)
+        case .leftKey:
+            sendKey(kVK_LeftArrow)
+        case .rightKey:
+            sendKey(kVK_RightArrow)
         case .escKey:
             sendKey(kVK_Escape)
         case .ctrlC:
             sendKey(kVK_ANSI_C, flags: .maskControl)
         case .spaceKey, .rightCmd, .rightOpt:
-            break // handled by handleHoldAction
-        case .trackpadClick:
-            cursorController.performClick()
+            break // handled above
         }
     }
 
-    /// Press/release a virtual key mirroring the HID press duration (push-to-talk).
-    private func handleHoldAction(_ action: ButtonAction, button: String, pressed: Bool) {
+    /// Press a virtual key and retain its exact specification until this HID button is released.
+    private func beginHoldAction(_ action: ButtonAction, button: String) {
         let spec: (keyCode: Int, flags: CGEventFlags)
         switch action {
-        case .spaceKey: spec = (kVK_Space,        [])
+        case .spaceKey: spec = (kVK_Space, [])
         case .rightCmd: spec = (kVK_RightCommand, .maskCommand)
-        case .rightOpt: spec = (kVK_RightOption,  .maskAlternate)
+        case .rightOpt: spec = (kVK_RightOption, .maskAlternate)
         default: return
         }
 
-        if pressed {
-            // Defensive: if a prior release was missed, close the stale hold before opening a new one.
-            if let stale = heldKeys.removeValue(forKey: button) {
-                postKey(keyCode: stale.keyCode, flags: [], keyDown: false)
-            }
-            postKey(keyCode: spec.keyCode, flags: spec.flags, keyDown: true)
-            heldKeys[button] = spec
-        } else {
-            guard let held = heldKeys.removeValue(forKey: button) else { return }
-            postKey(keyCode: held.keyCode, flags: [], keyDown: false)
-        }
+        // Defensive: close a stale hold before opening another for the same physical button.
+        releaseHeldKey(for: button)
+        postKey(keyCode: spec.keyCode, flags: spec.flags, keyDown: true)
+        heldKeys[button] = spec
     }
 
-    /// Called on device removal to avoid stuck modifiers if the remote disconnects mid-hold.
+    private func releaseHeldKey(for button: String) {
+        guard let held = heldKeys.removeValue(forKey: button) else { return }
+        postKey(keyCode: held.keyCode, flags: [], keyDown: false)
+    }
+
     private func releaseAllHeldKeys() {
-        for (_, held) in heldKeys {
+        for held in heldKeys.values {
             postKey(keyCode: held.keyCode, flags: [], keyDown: false)
         }
         heldKeys.removeAll()
         buttonState.removeAll()
     }
 
+    private func releaseAllPendingTapKeys() {
+        for pending in pendingTapKeyUps.values {
+            postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false)
+        }
+        pendingTapKeyUps.removeAll()
+    }
+
+    private func property(_ key: String, of device: IOHIDDevice) -> Int {
+        IOHIDDeviceGetProperty(device, key as CFString) as? Int ?? 0
+    }
+
     private func postKey(keyCode: Int, flags: CGEventFlags, keyDown: Bool) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let event = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(keyCode), keyDown: keyDown)
+        let source = CGEventSource(stateID: .hidSystemState)
+        let event = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: CGKeyCode(keyCode),
+            keyDown: keyDown
+        )
         event?.flags = flags
         event?.post(tap: .cghidEventTap)
     }
 
     private func sendKey(_ keyCode: Int, flags: CGEventFlags = []) {
         postKey(keyCode: keyCode, flags: flags, keyDown: true)
-        usleep(10000)
-        postKey(keyCode: keyCode, flags: flags, keyDown: false)
+        let eventID = UUID()
+        pendingTapKeyUps[eventID] = (keyCode, flags)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            guard let self,
+                  let pending = self.pendingTapKeyUps.removeValue(forKey: eventID) else {
+                return
+            }
+            self.postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false)
+        }
     }
 }
 
-// C callback
-private func inputValueCallback(context: UnsafeMutableRawPointer?, result: IOReturn, sender: UnsafeMutableRawPointer?, value: IOHIDValue) {
-    guard let context = context else { return }
-    Unmanaged<RemoteInputHandler>.fromOpaque(context).takeUnretainedValue().handleInputValue(value)
+// MARK: - C callback
+
+private struct CallbackValue: @unchecked Sendable {
+    let value: IOHIDValue
+}
+
+private func inputValueCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    value: IOHIDValue
+) {
+    guard let context else { return }
+    let handler = Unmanaged<RemoteInputHandler>.fromOpaque(context).takeUnretainedValue()
+    let interfaceID: ObjectIdentifier?
+    if let sender {
+        let device = Unmanaged<IOHIDDevice>.fromOpaque(sender).takeUnretainedValue()
+        interfaceID = ObjectIdentifier(device)
+    } else {
+        interfaceID = nil
+    }
+    let callbackValue = CallbackValue(value: value)
+    // HID devices are scheduled on the main run loop in addRemoteDevice().
+    MainActor.assumeIsolated {
+        handler.handleInputValue(callbackValue.value, from: interfaceID)
+    }
+}
+
+private func inputReportCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    type: IOHIDReportType,
+    reportID: UInt32,
+    report: UnsafeMutablePointer<UInt8>,
+    reportLength: CFIndex
+) {
+    guard type == kIOHIDReportTypeInput, let context else { return }
+    let handler = Unmanaged<RemoteInputHandler>.fromOpaque(context).takeUnretainedValue()
+    let interfaceID: ObjectIdentifier?
+    if let sender {
+        let device = Unmanaged<IOHIDDevice>.fromOpaque(sender).takeUnretainedValue()
+        interfaceID = ObjectIdentifier(device)
+    } else {
+        interfaceID = nil
+    }
+    MainActor.assumeIsolated {
+        handler.handleInputReport(
+            result: result,
+            reportID: reportID,
+            bytes: UnsafePointer(report),
+            length: reportLength,
+            from: interfaceID,
+            source: "report"
+        )
+    }
+}
+
+private func featureEnableCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    type: IOHIDReportType,
+    reportID: UInt32,
+    report: UnsafeMutablePointer<UInt8>,
+    reportLength: CFIndex
+) {
+    guard let context else { return }
+    let request = Unmanaged<RemoteInputHandler.FeatureEnableRequest>
+        .fromOpaque(context)
+        .takeRetainedValue()
+    MainActor.assumeIsolated {
+        request.handler?.handleFeatureEnableResult(
+            result,
+            usagePage: request.usagePage,
+            usage: request.usage,
+            variant: request.variant
+        )
+    }
 }

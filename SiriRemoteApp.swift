@@ -1,6 +1,6 @@
 //
 //  SiriRemoteApp.swift
-//  HyperVibe
+//  VibeRemote
 //
 //  Menu bar application for controlling Mac with Siri Remote
 //
@@ -10,21 +10,27 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     
     private var statusItem: NSStatusItem!
     private var menuBarManager: MenuBarManager!
+    private var microphoneBridgeManager: MicrophoneBridgeManager!
+    private var bluetoothAccessManager: BluetoothAccessManager!
+    private var remoteHIDChannel: RemoteHIDChannel?
     private var remoteDetector: RemoteDetector?
     private var remoteInputHandler: RemoteInputHandler?
     private var mediaKeyInterceptor: MediaKeyInterceptor?
-    private var touchHandler: TouchHandler?
+    private var consumedRemoteMediaButtons: Set<String> = []
+    private var microphoneHealthTimer: Timer?
+    private var inputAccessPollTimer: Timer?
+    private var controlAccessPollTimer: Timer?
+    private var hidDetectionStarted = false
+    private var mediaKeyInterceptorStarted = false
+    private var didCleanUp = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🚀 HyperVibe starting...")
-
-        // Bluetooth AVRCP play/pause signals bypass cghidEventTap and reach com.apple.rcd
-        // directly, which launches Music.app. Suspend rcd for this session; restored on exit.
-        RCDControl.suspend()
+        print("🚀 VibeRemote starting...")
 
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
@@ -38,53 +44,92 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.isVisible = true
         
         // Initialize menu bar manager
-        menuBarManager = MenuBarManager(statusItem: statusItem)
+        microphoneBridgeManager = MicrophoneBridgeManager()
+        bluetoothAccessManager = BluetoothAccessManager()
+        menuBarManager = MenuBarManager(statusItem: statusItem, microphoneBridgeManager: microphoneBridgeManager)
+        remoteHIDChannel = RemoteHIDChannel(microphoneBridgeManager: microphoneBridgeManager)
         
-        // Check accessibility permissions
-        checkAccessibilityPermissions()
-        
-        // Initialize controllers
-        let cursorController = CursorController()
-
         remoteInputHandler = RemoteInputHandler(
-            cursorController: cursorController,
-            menuBarManager: menuBarManager
+            menuBarManager: menuBarManager,
+            microphoneBridgeManager: microphoneBridgeManager
         )
         
-        // Start touch handler for trackpad (before remote detection so we can wire the callback)
-        touchHandler = TouchHandler(cursorController: cursorController)
-        touchHandler?.scrollScale = menuBarManager.scrollSpeed.scale
-        touchHandler?.onSwipe = { [weak menuBarManager] direction in
-            menuBarManager?.executeSwipe(direction)
-        }
-        touchHandler?.start()
-        remoteInputHandler?.onButtonActivity = { [weak self] in
-            self?.touchHandler?.tryReconnectTrackpad()
-        }
-        
         // Start remote detection
-        remoteDetector = RemoteDetector { [weak self] device in
-            DispatchQueue.main.async {
-                self?.remoteInputHandler?.setRemoteDevice(device)
-                self?.menuBarManager.updateConnectionStatus(connected: device != nil)
+        remoteDetector = RemoteDetector(
+            deviceCallback: { [weak self] event in
+                guard let self else { return }
+
+                let inputReady: Bool
+                switch event {
+                case .added(let device):
+                    self.remoteHIDChannel?.considerHIDDevice(device)
+                    inputReady = self.remoteInputHandler?.addRemoteDevice(device) ?? false
+                    self.menuBarManager.updateBluetoothConnectionStatus(connected: true)
+                case .removed(let device):
+                    inputReady = self.remoteInputHandler?.removeRemoteDevice(device) ?? false
+                    self.menuBarManager.updateBluetoothConnectionStatus(connected: inputReady)
+                }
+                self.menuBarManager.updateRemoteInputState(inputReady ? .ready : .waitingForRemote)
+            },
+            stateCallback: { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.menuBarManager.updateRemoteInputState(.waitingForRemote)
+                    self.startMediaKeyInterceptorIfNeeded()
+                case .failed(let result):
+                    self.hidDetectionStarted = false
+                    self.menuBarManager.updateRemoteInputState(
+                        result == kIOReturnNotPermitted ? .permissionRequired : .unavailable
+                    )
+                }
+            }
+        )
+
+        menuBarManager.setInputAccessRequestHandler { [weak self] in
+            self?.requestInputMonitoringAccess()
+        }
+        menuBarManager.setControlAccessRequestHandler { [weak self] in
+            self?.requestAccessibilityAccess()
+        }
+        menuBarManager.setBluetoothAccessRequestHandler { [weak self] in
+            self?.bluetoothAccessManager.requestAccess()
+        }
+        menuBarManager.setStatusRefreshHandler { [weak self] in
+            self?.refreshPermissionStates()
+        }
+        bluetoothAccessManager.onStateChanged = { [weak self] state in
+            self?.menuBarManager.updateBluetoothAccessState(state)
+            if state == .allowed {
+                self?.remoteHIDChannel?.startIfAuthorized()
             }
         }
-        remoteDetector?.startDetection()
-        
-        // Request Input Monitoring so media key tap works in both CLI and .app
-        if #available(macOS 10.15, *) {
-            if !CGPreflightListenEventAccess() {
-                CGRequestListenEventAccess()
-            }
-        }
-        
-        // Start media key interceptor
+        menuBarManager.updateBluetoothAccessState(bluetoothAccessManager.state)
+        remoteHIDChannel?.startIfAuthorized()
+
+        // Configure the media-key interceptor now, but only start it after Input Monitoring
+        // access is confirmed. Requesting permission is an explicit menu action.
         mediaKeyInterceptor = MediaKeyInterceptor()
-        mediaKeyInterceptor?.onMediaKey = { [weak self] keyType in
+        mediaKeyInterceptor?.onMediaKey = { [weak self] keyType, isPressed in
             guard let self = self else { return false }
-            return self.handleInterceptedMediaKey(keyType)
+            return self.handleInterceptedMediaKey(keyType, isPressed: isPressed)
         }
-        mediaKeyInterceptor?.start()
+        refreshInputMonitoringAccess()
+        refreshAccessibilityAccess()
+        VolumeRevertGuard.shared.prewarm()
+        microphoneBridgeManager.prepareAtLaunch()
+        microphoneHealthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.microphoneBridgeManager.maintainBridgeHealth()
+                self?.refreshPermissionStates()
+                self?.menuBarManager.refresh()
+            }
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard menuBarManager != nil else { return }
+        refreshPermissionStates()
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -100,11 +145,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cleanup()
     }
     
+    @MainActor
     private func cleanup() {
-        touchHandler?.stop()
+        guard !didCleanUp else { return }
+        didCleanUp = true
+
+        microphoneHealthTimer?.invalidate()
+        microphoneHealthTimer = nil
+        inputAccessPollTimer?.invalidate()
+        inputAccessPollTimer = nil
+        controlAccessPollTimer?.invalidate()
+        controlAccessPollTimer = nil
+
+        // Stop new HID callbacks first, then synchronously close every opened interface and
+        // release the keys actually held by RemoteInputHandler before the process terminates.
         remoteDetector?.stopDetection()
+        remoteInputHandler?.stop()
+        remoteHIDChannel?.stop()
         mediaKeyInterceptor?.stop()
-        RCDControl.restore()
+        VolumeRevertGuard.shared.stop()
+        microphoneBridgeManager?.stop()
+        consumedRemoteMediaButtons.removeAll()
     }
     
     // MARK: - Media Key Handling
@@ -124,7 +185,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return Double(nanos) / 1_000_000_000.0
     }
     
-    private func handleInterceptedMediaKey(_ keyType: MediaKeyInterceptor.MediaKeyType) -> Bool {
+    @MainActor
+    private func handleInterceptedMediaKey(_ keyType: MediaKeyInterceptor.MediaKeyType, isPressed: Bool) -> Bool {
         let buttonName: String
         switch keyType {
         case .playPause:  buttonName = "playPause"
@@ -135,89 +197,139 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .mute:       buttonName = "mute"
         }
 
-        // Debounce: if the HID path just handled this button, don't double-fire.
+        if !isPressed {
+            if consumedRemoteMediaButtons.remove(buttonName) != nil {
+                return true
+            }
+            return false
+        }
+
+        // Only consume media-key events that match a just-seen Siri Remote HID event.
+        // Keyboard media keys also arrive here, but they do not have this HID marker.
         if RemoteInputHandler.lastProcessedButton == buttonName {
             let timeSinceLastProcess = Self.machDeltaToSeconds(from: RemoteInputHandler.lastProcessedTime)
-            if timeSinceLastProcess < 0.2 {
+            if timeSinceLastProcess < 0.35 {
+                consumedRemoteMediaButtons.insert(buttonName)
                 return true
             }
         }
 
-        let action = menuBarManager.getMapping(for: buttonName)
-        if action != .none {
-            menuBarManager.executeAction(action.rawValue)
-        }
-        // Always consume — no action in this app corresponds to a system media key anymore,
-        // so we never want macOS's default media handler to fire.
-        return true
+        return false
     }
     
     // MARK: - Permissions
-    
-    private func checkAccessibilityPermissions() {
-        // macOS will show its own prompt when needed
-        // No need for redundant custom alert
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-    }
-}
 
-/// Suspends `com.apple.rcd` (Remote Control Daemon) for the user's GUI launchd domain while
-/// HyperVibe is running. rcd is what reacts to Bluetooth AVRCP play signals by launching
-/// Music.app — a channel that bypasses HID seize and the cghidEventTap entirely. `bootout`
-/// only affects this login session; restored on clean exit, and on next login either way.
-enum RCDControl {
-    private static let plistPath = "/System/Library/LaunchAgents/com.apple.rcd.plist"
-    private static var suspended = false
-
-    static func suspend() {
-        let domain = "gui/\(getuid())"
-        let service = "\(domain)/com.apple.rcd"
-        guard isLoaded(service: service) else {
-            print("ℹ️ com.apple.rcd not loaded; skipping suspend")
+    private func refreshInputMonitoringAccess() {
+        guard #available(macOS 10.15, *) else {
+            startHIDDetectionIfNeeded()
             return
         }
-        let (status, err) = run(["bootout", service])
-        if status == 0 {
-            suspended = true
-            print("🔇 com.apple.rcd suspended (Music won't auto-launch from BT remote)")
-        } else {
-            print("⚠️ Could not suspend com.apple.rcd (launchctl exit=\(status)): \(err)")
+        guard CGPreflightListenEventAccess() else {
+            if !hidDetectionStarted {
+                menuBarManager.updateRemoteInputState(.permissionRequired)
+            }
+            return
+        }
+
+        inputAccessPollTimer?.invalidate()
+        inputAccessPollTimer = nil
+        startHIDDetectionIfNeeded()
+    }
+
+    private func requestInputMonitoringAccess() {
+        guard #available(macOS 10.15, *) else {
+            startHIDDetectionIfNeeded()
+            return
+        }
+
+        rmDebug("🔐 Input Monitoring access requested from menu")
+        menuBarManager.updateRemoteInputState(.starting)
+        let granted = CGRequestListenEventAccess()
+        rmDebug("🔐 Input Monitoring request result: \(granted ? "granted" : "not granted")")
+        if granted {
+            startHIDDetectionIfNeeded()
+            return
+        }
+
+        // Once macOS has recorded a denial, CGRequestListenEventAccess() returns false
+        // without showing another dialog. Because this method only runs after an explicit
+        // menu click, take the user directly to the Input Monitoring pane instead.
+        if let settingsURL = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        ) {
+            let opened = NSWorkspace.shared.open(settingsURL)
+            rmDebug("🔐 Open Input Monitoring settings: \(opened ? "success" : "failed")")
+        }
+
+        // The system may require the user to finish the change in System Settings. Polling
+        // only checks the result; it never reissues the permission request or another prompt.
+        inputAccessPollTimer?.invalidate()
+        inputAccessPollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshInputMonitoringAccess()
+            }
+        }
+        menuBarManager.updateRemoteInputState(.permissionRequired)
+    }
+
+    private func refreshAccessibilityAccess() {
+        let trusted = AXIsProcessTrusted()
+        menuBarManager.updateRemoteControlState(trusted ? .ready : .permissionRequired)
+        if trusted {
+            controlAccessPollTimer?.invalidate()
+            controlAccessPollTimer = nil
         }
     }
 
-    static func restore() {
-        guard suspended else { return }
-        let domain = "gui/\(getuid())"
-        let (status, err) = run(["bootstrap", domain, plistPath])
-        if status == 0 {
-            print("🔊 com.apple.rcd restored")
-        } else {
-            print("⚠️ Could not restore com.apple.rcd (launchctl exit=\(status)): \(err) — next login will re-register it")
-        }
-        suspended = false
+    private func refreshPermissionStates() {
+        menuBarManager.updateBluetoothAccessState(bluetoothAccessManager.state)
+        refreshInputMonitoringAccess()
+        refreshAccessibilityAccess()
     }
 
-    private static func isLoaded(service: String) -> Bool {
-        let (status, _) = run(["print", service], captureStderr: false)
-        return status == 0
+    private func requestAccessibilityAccess() {
+        rmDebug("🔐 Accessibility access requested from menu")
+        menuBarManager.updateRemoteControlState(.starting)
+
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let trusted = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+        rmDebug("🔐 Accessibility request result: \(trusted ? "granted" : "not granted")")
+        if trusted {
+            refreshAccessibilityAccess()
+            return
+        }
+
+        // A previous denial suppresses the system prompt. The user explicitly selected the
+        // menu item, so opening this pane is intentional rather than an automatic launch action.
+        if let settingsURL = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) {
+            let opened = NSWorkspace.shared.open(settingsURL)
+            rmDebug("🔐 Open Accessibility settings: \(opened ? "success" : "failed")")
+        }
+
+        controlAccessPollTimer?.invalidate()
+        controlAccessPollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAccessibilityAccess()
+            }
+        }
+        menuBarManager.updateRemoteControlState(.permissionRequired)
     }
 
-    private static func run(_ args: [String], captureStderr: Bool = true) -> (Int32, String) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        proc.arguments = args
-        let errPipe = Pipe()
-        proc.standardOutput = Pipe()
-        proc.standardError = captureStderr ? errPipe : Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            let errData = captureStderr ? errPipe.fileHandleForReading.readDataToEndOfFile() : Data()
-            let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return (proc.terminationStatus, errStr)
-        } catch {
-            return (-1, "\(error)")
+    private func startHIDDetectionIfNeeded() {
+        guard !hidDetectionStarted else { return }
+        hidDetectionStarted = true
+        menuBarManager.updateRemoteInputState(.starting)
+        remoteDetector?.startDetection()
+    }
+
+    private func startMediaKeyInterceptorIfNeeded() {
+        guard !mediaKeyInterceptorStarted else { return }
+        guard mediaKeyInterceptor?.start() == true else {
+            print("⚠️ Media-key interception unavailable even though HID access is granted")
+            return
         }
+        mediaKeyInterceptorStarted = true
     }
 }

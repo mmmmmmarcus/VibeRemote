@@ -1,6 +1,6 @@
 //
 //  RemoteDetector.swift
-//  HyperVibe
+//  VibeRemote
 //
 //  Detects Siri Remote via IOKit HID
 //
@@ -9,214 +9,292 @@ import Foundation
 import IOKit
 import IOKit.hid
 
-/// Append diagnostic line to /tmp/hypervibe.log (unified-log redacts NSLog under hardened runtime).
-func rmDebug(_ msg: String) {
-    let line = "\(Date()) \(msg)\n"
-    if let data = line.data(using: .utf8) {
-        let path = "/tmp/hypervibe.log"
-        if let fh = FileHandle(forWritingAtPath: path) {
-            fh.seekToEndOfFile()
-            fh.write(data)
-            try? fh.close()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: path))
+let vibeRemoteLogPath: String = {
+    let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library", isDirectory: true)
+    return libraryURL
+        .appendingPathComponent("Logs/VibeRemote", isDirectory: true)
+        .appendingPathComponent("viberemote.log")
+        .path
+}()
+
+private let rmLogQueue = DispatchQueue(label: "com.viberemote.log", qos: .utility)
+private let rmLogMaximumBytes: UInt64 = 1_048_576
+
+/// Append diagnostics asynchronously to a private, size-bounded user log.
+func rmDebug(_ message: String) {
+    let line = "\(Date()) \(message)\n"
+    rmLogQueue.async {
+        guard let data = line.data(using: .utf8) else { return }
+        let fileManager = FileManager.default
+        let logURL = URL(fileURLWithPath: vibeRemoteLogPath)
+        let directoryURL = logURL.deletingLastPathComponent()
+        try? fileManager.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        let attributes = try? fileManager.attributesOfItem(atPath: logURL.path)
+        let size = attributes?[.size] as? UInt64 ?? 0
+        if size >= rmLogMaximumBytes {
+            let rotatedURL = logURL.appendingPathExtension("1")
+            try? fileManager.removeItem(at: rotatedURL)
+            try? fileManager.moveItem(at: logURL, to: rotatedURL)
         }
+
+        if !fileManager.fileExists(atPath: logURL.path) {
+            _ = fileManager.createFile(
+                atPath: logURL.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
+        }
+
+        guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
     }
 }
 
-class RemoteDetector {
-    private var manager: IOHIDManager?
-    private var deviceCallback: ((IOHIDDevice?) -> Void)?
-    private var currentDevice: IOHIDDevice?
-    private var connectedDeviceCount = 0
-    // Track devices by vendorID:productID combination
-    // A single physical Siri Remote may expose multiple HID interfaces, but we only want to process one
-    private var processedDeviceKeys: Set<String> = []
-    private let processingQueue = DispatchQueue(label: "com.hypervibe.deviceProcessing")
-    
-    private let appleVendorID: Int = 0x004C
-    
-    // Known Siri Remote / Apple TV Remote product IDs
-    private let knownProductIDs: [Int] = [
-        0x0221, 0x0255, 0x0266, 0x0267, 0x0269,
-        0x0C4E, 0x0C4F, 0x030D, 0x030E
-    ]
-    
-    init(deviceCallback: @escaping (IOHIDDevice?) -> Void) {
-        self.deviceCallback = deviceCallback
+/// IOHIDManager callbacks are scheduled on the main run loop, so all detector state lives on
+/// the main actor. This also makes shutdown deterministic: after `stopDetection()` returns,
+/// queued callbacks can observe `isDetecting == false` but cannot mutate cleared state.
+@MainActor
+final class RemoteDetector {
+    enum DeviceEvent {
+        case added(IOHIDDevice)
+        case removed(IOHIDDevice)
     }
-    
-    func startDetection() {
-        rmDebug(String(format: "🛰 starting HID detection (vendor=0x%X)", appleVendorID))
-        manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard let manager = manager else {
-            rmDebug("⚠️ IOHIDManagerCreate returned nil")
-            return
-        }
 
-        // SiriMote uses IOHIDManagerSetDeviceMatchingMultiple with per-interface dicts.
-        // The Siri Remote A1513 exposes 3 HID interfaces (consumer, game controls, vendor),
-        // and the singular variant with vendor-only matching does not enumerate them on
-        // recent macOS BLE HID stacks.
+    enum DetectionState {
+        case ready
+        case failed(IOReturn)
+    }
+
+    private var manager: IOHIDManager?
+    private var deviceCallback: ((DeviceEvent) -> Void)?
+    private var stateCallback: ((DetectionState) -> Void)?
+    private var trackedInterfaces: [ObjectIdentifier: IOHIDDevice] = [:]
+    private var isDetecting = false
+    private var generation: UInt64 = 0
+
+    private let appleVendorID: Int = 0x004C
+
+    // Known Siri Remote / Apple TV Remote product IDs. Product names take precedence because
+    // Apple has reused IDs in nearby accessory families (0x0269 is a Magic Mouse on this Mac).
+    private nonisolated static let knownProductIDs: Set<Int> = [
+        0x0221, 0x0255, 0x0266, 0x0267, 0x026D,
+        0x0C4E, 0x0C4F, 0x030D, 0x030E, 0x0314, 0x0315,
+    ]
+
+    init(
+        deviceCallback: @escaping (DeviceEvent) -> Void,
+        stateCallback: ((DetectionState) -> Void)? = nil
+    ) {
+        self.deviceCallback = deviceCallback
+        self.stateCallback = stateCallback
+    }
+
+    func startDetection() {
+        guard !isDetecting else { return }
+
+        generation &+= 1
+        let startGeneration = generation
+        rmDebug(String(format: "🛰 starting HID detection (vendor=0x%X)", appleVendorID))
+
+        let manager = IOHIDManagerCreate(
+            kCFAllocatorDefault,
+            IOOptionBits(kIOHIDOptionsTypeNone)
+        )
+        self.manager = manager
+
         let matchingDicts: [[String: Any]] = [
             [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x0C],   // Consumer Page
-            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x0D],   // Digitizer / Game Controls
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x0B],   // Telephony Page
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x0D],   // Digitizer / auxiliary buttons
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x20],   // Sensor reports on Gen-3 Siri Remote
             [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0xFF00], // Apple vendor-defined
-            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x01],   // Generic Desktop (kept for keyboards/trackpads)
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0xFF01], // Apple vendor-defined
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0xFF02], // Apple vendor-defined
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x01],   // Generic Desktop
+            [kIOHIDVendorIDKey: appleVendorID, kIOHIDPrimaryUsagePageKey: 0x09],   // Button Page
         ]
         IOHIDManagerSetDeviceMatchingMultiple(manager, matchingDicts as CFArray)
 
-        IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceAddedCallback, Unmanaged.passUnretained(self).toOpaque())
-        IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemovedCallback, Unmanaged.passUnretained(self).toOpaque())
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceAddedCallback, context)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemovedCallback, context)
 
         let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         guard openResult == kIOReturnSuccess else {
             rmDebug(String(format: "⚠️ IOHIDManagerOpen failed (IOReturn=0x%X)", openResult))
+            IOHIDManagerRegisterDeviceMatchingCallback(manager, nil, nil)
+            IOHIDManagerRegisterDeviceRemovalCallback(manager, nil, nil)
+            self.manager = nil
+            stateCallback?(.failed(openResult))
             return
         }
-        rmDebug("🛰 IOHIDManagerOpen success")
 
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+        isDetecting = true
+        rmDebug("🛰 IOHIDManagerOpen success")
+        stateCallback?(.ready)
+        IOHIDManagerScheduleWithRunLoop(
+            manager,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.enumerateAllDevices()
+            guard let self,
+                  self.isDetecting,
+                  self.generation == startGeneration else { return }
+            self.enumerateAllDevices()
         }
     }
-    
+
     func stopDetection() {
-        if let manager = manager {
-            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+        guard isDetecting || manager != nil || !trackedInterfaces.isEmpty else { return }
+
+        isDetecting = false
+        generation &+= 1
+
+        if let manager {
+            // Clear callbacks before unscheduling and closing so no new callback can capture self.
+            IOHIDManagerRegisterDeviceMatchingCallback(manager, nil, nil)
+            IOHIDManagerRegisterDeviceRemovalCallback(manager, nil, nil)
+            IOHIDManagerUnscheduleFromRunLoop(
+                manager,
+                CFRunLoopGetMain(),
+                CFRunLoopMode.commonModes.rawValue
+            )
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
             self.manager = nil
         }
-        currentDevice = nil
-        processedDeviceKeys.removeAll()
-        connectedDeviceCount = 0
-        deviceCallback?(nil)
+
+        trackedInterfaces.removeAll()
     }
-    
+
     private func enumerateAllDevices() {
-        guard let manager = manager,
+        guard isDetecting,
+              let manager,
               let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
             rmDebug("🛰 IOHIDManagerCopyDevices returned nil/empty (TCC block or matching mismatch)")
             return
         }
+
         rmDebug("🛰 enumeration found \(deviceSet.count) HID device(s) matching filter")
         for device in deviceSet {
-            let v = IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int ?? -1
-            let p = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int ?? -1
-            let n = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "?"
-            let pup = IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? Int ?? -1
-            let pu  = IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsageKey as CFString) as? Int ?? -1
-            rmDebug(String(format: "🛰 candidate vendor=0x%X product=0x%X usagePage=0x%X usage=0x%X name=%@",
-                           v, p, pup, pu, n))
-            if isSiriRemote(device) {
-                handleDeviceAdded(device)
-            }
+            let vendorID = property(kIOHIDVendorIDKey, of: device, default: -1)
+            let productID = property(kIOHIDProductIDKey, of: device, default: -1)
+            let name = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "?"
+            let usagePage = property(kIOHIDPrimaryUsagePageKey, of: device, default: -1)
+            let usage = property(kIOHIDPrimaryUsageKey, of: device, default: -1)
+            rmDebug(String(
+                format: "🛰 candidate vendor=0x%X product=0x%X usagePage=0x%X usage=0x%X name=%@",
+                vendorID, productID, usagePage, usage, name
+            ))
+            handleDeviceAdded(device)
         }
     }
-    
+
     private func isSiriRemote(_ device: IOHIDDevice) -> Bool {
-        guard let vendorID = IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int,
-              vendorID == appleVendorID else { return false }
-        
-        if let productID = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int,
-           knownProductIDs.contains(productID) {
-            return true
-        }
-        
-        if let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String {
+        Self.matchesSiriRemote(
+            vendorID: property(kIOHIDVendorIDKey, of: device, default: -1),
+            productID: property(kIOHIDProductIDKey, of: device, default: -1),
+            productName: IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String
+        )
+    }
+
+    nonisolated static func matchesSiriRemote(
+        vendorID: Int,
+        productID: Int,
+        productName: String?
+    ) -> Bool {
+        guard vendorID == 0x004C else { return false }
+
+        if let productName, !productName.isEmpty {
             let name = productName.lowercased()
+            // A concrete product name is stronger evidence than a numeric ID. In particular,
+            // never seize a mouse, keyboard, or trackpad because an ID overlaps an old list.
             return name.contains("remote") || name.contains("siri") || name.contains("apple tv")
         }
-        
-        return false
+
+        return knownProductIDs.contains(productID)
     }
-    
-    func handleDeviceAdded(_ device: IOHIDDevice) {
-        guard isSiriRemote(device) else { return }
-        
-        // Get device properties (safe to read from any thread)
-        let vendorID = IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int ?? 0
-        let productID = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int ?? 0
-        
-        // Create a key based on vendor+product to group all HID interfaces from the same physical device
-        // A single Siri Remote may expose multiple HID interfaces (buttons, touch, etc.)
-        // but they all share the same vendor and product ID
-        let deviceKey = "\(vendorID):\(productID)"
-        
-        // Use a serialized queue to prevent race conditions when processing devices
-        processingQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            let shouldLog: Bool
-            if !self.processedDeviceKeys.contains(deviceKey) {
-                // First time seeing this vendor+product combination - log it
-                self.processedDeviceKeys.insert(deviceKey)
-                self.connectedDeviceCount += 1
-                shouldLog = true
-            } else {
-                // Already seen this vendor+product - skip logging but still process the device
-                shouldLog = false
-            }
-            
-            // Always set currentDevice to the latest device (for tracking)
-            self.currentDevice = device
-            
-            // Only log once per physical device (vendor+product combination)
-            if shouldLog {
-                let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
-                print("✅ Siri Remote connected: \(productName) (Vendor: 0x\(String(vendorID, radix: 16, uppercase: true)), Product: 0x\(String(productID, radix: 16, uppercase: true)))")
-            }
-            
-            // Always pass the device to the callback - RemoteInputHandler needs all HID interfaces
-            DispatchQueue.main.async {
-                self.deviceCallback?(device)
-            }
+
+    fileprivate func handleDeviceAdded(_ device: IOHIDDevice) {
+        guard isDetecting, isSiriRemote(device) else { return }
+
+        let interfaceID = ObjectIdentifier(device)
+        guard trackedInterfaces[interfaceID] == nil else { return }
+
+        let wasDisconnected = trackedInterfaces.isEmpty
+        trackedInterfaces[interfaceID] = device
+
+        if wasDisconnected {
+            let vendorID = property(kIOHIDVendorIDKey, of: device, default: 0)
+            let productID = property(kIOHIDProductIDKey, of: device, default: 0)
+            let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
+            print("✅ Siri Remote connected: \(productName) (Vendor: 0x\(String(vendorID, radix: 16, uppercase: true)), Product: 0x\(String(productID, radix: 16, uppercase: true)))")
+        }
+
+        deviceCallback?(.added(device))
+    }
+
+    fileprivate func handleDeviceRemoved(_ device: IOHIDDevice) {
+        guard isDetecting, isSiriRemote(device) else { return }
+
+        let interfaceID = ObjectIdentifier(device)
+        guard trackedInterfaces.removeValue(forKey: interfaceID) != nil else { return }
+
+        // Notify the input handler about the exact interface that disappeared. It decides
+        // connection status from interfaces it actually opened, rather than from enumeration.
+        deviceCallback?(.removed(device))
+
+        if trackedInterfaces.isEmpty {
+            let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
+            print("❌ Siri Remote disconnected: \(productName)")
         }
     }
-    
-    func handleDeviceRemoved(_ device: IOHIDDevice) {
-        guard isSiriRemote(device) else { return }
-        
-        // Get device properties (safe to read from any thread)
-        let vendorID = IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int ?? 0
-        let productID = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int ?? 0
-        
-        // Create the same key based on vendor+product
-        let deviceKey = "\(vendorID):\(productID)"
-        
-        // Use a serialized queue to prevent race conditions
-        processingQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            // Only process removal if we've seen this device before
-            guard self.processedDeviceKeys.contains(deviceKey) else { return }
-            
-            self.processedDeviceKeys.remove(deviceKey)
-            self.connectedDeviceCount = max(0, self.connectedDeviceCount - 1)
-            
-            if self.connectedDeviceCount == 0 {
-                let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
-                print("❌ Siri Remote disconnected: \(productName)")
-                self.currentDevice = nil
-                DispatchQueue.main.async {
-                    self.deviceCallback?(nil)
-                }
-            }
-        }
+
+    private func property(_ key: String, of device: IOHIDDevice, default defaultValue: Int) -> Int {
+        IOHIDDeviceGetProperty(device, key as CFString) as? Int ?? defaultValue
     }
 }
 
-// C callbacks
-private func deviceAddedCallback(context: UnsafeMutableRawPointer?, result: IOReturn, sender: UnsafeMutableRawPointer?, device: IOHIDDevice) {
-    guard let context = context else { return }
-    let detector = Unmanaged<RemoteDetector>.fromOpaque(context).takeUnretainedValue()
-    detector.handleDeviceAdded(device)
+// MARK: - C callbacks
+
+private struct CallbackDevice: @unchecked Sendable {
+    let value: IOHIDDevice
 }
 
-private func deviceRemovedCallback(context: UnsafeMutableRawPointer?, result: IOReturn, sender: UnsafeMutableRawPointer?, device: IOHIDDevice) {
-    guard let context = context else { return }
+private func deviceAddedCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    device: IOHIDDevice
+) {
+    guard let context else { return }
     let detector = Unmanaged<RemoteDetector>.fromOpaque(context).takeUnretainedValue()
-    detector.handleDeviceRemoved(device)
+    let callbackDevice = CallbackDevice(value: device)
+    // The IOHID manager is scheduled on the main run loop in startDetection().
+    MainActor.assumeIsolated {
+        detector.handleDeviceAdded(callbackDevice.value)
+    }
+}
+
+private func deviceRemovedCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    device: IOHIDDevice
+) {
+    guard let context else { return }
+    let detector = Unmanaged<RemoteDetector>.fromOpaque(context).takeUnretainedValue()
+    let callbackDevice = CallbackDevice(value: device)
+    MainActor.assumeIsolated {
+        detector.handleDeviceRemoved(callbackDevice.value)
+    }
 }

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: Concurrency diagnostics
+        run: swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
+      - name: Validate scripts and metadata
+        run: |
+          bash -n build.sh create_app_bundle.sh
+          plutil -lint VibeRemote.entitlements

@@ -1,46 +1,100 @@
 #!/bin/bash
 
-# Creates a proper macOS app bundle structure
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
-APP_NAME="HyperVibe"
+APP_NAME="VibeRemote"
 APP_BUNDLE="${APP_NAME}.app"
+ENTITLEMENTS="${APP_NAME}.entitlements"
+ICON_SOURCE="${APP_NAME}.icon"
+ICON_PNG="${APP_NAME}AppIcon.png"
+ICON_FILE="${APP_NAME}.icns"
+BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.viberemote.app}"
+APP_VERSION="${APP_VERSION:-0.2.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
+SIGNING_MODE="${SIGNING_MODE:-local}"
+INCLUDE_VOICE_HELPER="${INCLUDE_VOICE_HELPER:-1}"
 
-if [ ! -f "$APP_NAME" ]; then
-    echo "Error: $APP_NAME executable not found."
-    echo "Please build first with: ./build.sh"
+case "$SIGNING_MODE" in
+    local)
+        signing_identity="-"
+        ;;
+    developer|release)
+        signing_identity="${CODESIGN_IDENTITY:-}"
+        if [ -z "$signing_identity" ]; then
+            echo "Error: CODESIGN_IDENTITY is required for SIGNING_MODE=$SIGNING_MODE."
+            exit 1
+        fi
+        if ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "$signing_identity"; then
+            echo "Error: signing identity is not available: $signing_identity"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Error: SIGNING_MODE must be local, developer, or release."
+        exit 1
+        ;;
+esac
+
+if [ "$SIGNING_MODE" = "release" ] && [ -z "${NOTARY_PROFILE:-}" ]; then
+    echo "Error: NOTARY_PROFILE is required for release signing."
+    exit 1
+fi
+if [ ! -f "$ENTITLEMENTS" ]; then
+    echo "Error: required entitlements file is missing: $ENTITLEMENTS"
     exit 1
 fi
 
-BINARY_NAME="$APP_NAME"
+./build.sh
 
 echo "Creating app bundle: $APP_BUNDLE"
+rm -rf "$APP_BUNDLE"
+mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
+cp "$APP_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 
-# Create bundle structure
-mkdir -p "${APP_BUNDLE}/Contents/MacOS"
-mkdir -p "${APP_BUNDLE}/Contents/Resources"
-
-# Copy executable
-cp "$BINARY_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
-
-# Copy icon if it exists
-if [ -f "HyperVibe.icns" ]; then
-    cp "HyperVibe.icns" "${APP_BUNDLE}/Contents/Resources/HyperVibe.icns"
-    echo "Icon added to app bundle"
-elif [ -f "SiriRemote.icns" ]; then
-    cp "SiriRemote.icns" "${APP_BUNDLE}/Contents/Resources/HyperVibe.icns"
-    echo "Icon added to app bundle"
+icon_png=""
+if [ -f "$ICON_PNG" ]; then
+    icon_png="$ICON_PNG"
+elif [ -f "${ICON_SOURCE}/Assets/remote 2.png" ]; then
+    icon_png="${ICON_SOURCE}/Assets/remote 2.png"
 fi
 
-# Copy menu bar icon resources
-if [ -d "Resources" ]; then
-    cp Resources/MenuBarIcon*.png "${APP_BUNDLE}/Contents/Resources/" 2>/dev/null || true
-    echo "Menu bar icons added to app bundle"
+if [ -n "$icon_png" ]; then
+    echo "Generating app icon from: $icon_png"
+    iconset="${APP_BUNDLE}/Contents/Resources/${APP_NAME}.iconset"
+    mkdir -p "$iconset"
+    sips -z 16 16 "$icon_png" --out "${iconset}/icon_16x16.png" >/dev/null
+    sips -z 32 32 "$icon_png" --out "${iconset}/icon_16x16@2x.png" >/dev/null
+    sips -z 32 32 "$icon_png" --out "${iconset}/icon_32x32.png" >/dev/null
+    sips -z 64 64 "$icon_png" --out "${iconset}/icon_32x32@2x.png" >/dev/null
+    sips -z 128 128 "$icon_png" --out "${iconset}/icon_128x128.png" >/dev/null
+    sips -z 256 256 "$icon_png" --out "${iconset}/icon_128x128@2x.png" >/dev/null
+    sips -z 256 256 "$icon_png" --out "${iconset}/icon_256x256.png" >/dev/null
+    sips -z 512 512 "$icon_png" --out "${iconset}/icon_256x256@2x.png" >/dev/null
+    sips -z 512 512 "$icon_png" --out "${iconset}/icon_512x512.png" >/dev/null
+    sips -z 1024 1024 "$icon_png" --out "${iconset}/icon_512x512@2x.png" >/dev/null
+    iconutil -c icns "$iconset" -o "${APP_BUNDLE}/Contents/Resources/$ICON_FILE"
+    rm -rf "$iconset"
+else
+    echo "Error: no app icon source was found."
+    exit 1
 fi
 
-# Create proper Info.plist with all required keys
-echo "Creating Info.plist..."
+voice_resources="${APP_BUNDLE}/Contents/Resources/SiriRemoteVoiceControl"
+voice_bridge_binary="VibeRemoteVoiceBridge"
+if [ "$INCLUDE_VOICE_HELPER" = "1" ] && [ -x "$voice_bridge_binary" ]; then
+    mkdir -p "$voice_resources"
+    cp "$voice_bridge_binary" "$voice_resources/"
+    chmod 755 "$voice_resources/$voice_bridge_binary"
+elif [ "$INCLUDE_VOICE_HELPER" = "1" ]; then
+    echo "Error: the microphone bridge helper was not built."
+    exit 1
+else
+    echo "Voice helper excluded from this bundle."
+fi
+
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,21 +105,19 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<key>CFBundleExecutable</key>
 	<string>$APP_NAME</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.hypervibe.app</string>
+	<string>$BUNDLE_IDENTIFIER</string>
+	<key>CFBundleIconFile</key>
+	<string>$ICON_FILE</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$APP_NAME</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>CFBundleVersion</key>
-	<string>1.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
-	<key>CFBundleIconFile</key>
-	<string>HyperVibe</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 HyperVibe Contributors</string>
+	<string>$APP_VERSION</string>
+	<key>CFBundleVersion</key>
+	<string>$BUILD_NUMBER</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>LSUIElement</key>
@@ -73,34 +125,49 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>HyperVibe needs Bluetooth access to connect to your Siri Remote trackpad.</string>
+	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>HyperVibe needs Bluetooth access to connect to your Siri Remote trackpad.</string>
+	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
 </dict>
 </plist>
 EOF
 
-# Make executable
-chmod +x "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
+plutil -lint "${APP_BUNDLE}/Contents/Info.plist" "$ENTITLEMENTS"
+chmod 755 "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 
-# Sign with hardened runtime + entitlements. Required on modern macOS (14+) for
-# IOHIDManager to deliver Bluetooth HID devices like the Siri Remote to the app.
-# Ad-hoc (`--sign -`) is used; for distribution, swap in a Developer ID identity.
-if [ -f "HyperVibe.entitlements" ]; then
-    echo "Signing with hardened runtime + entitlements..."
-    codesign --force --options=runtime \
-        --entitlements "HyperVibe.entitlements" \
-        --sign - \
-        "${APP_BUNDLE}"
-    codesign -dvv "${APP_BUNDLE}" 2>&1 | grep -E "(flags|Identifier)" || true
+timestamp_args=(--timestamp=none)
+if [ "$signing_identity" != "-" ]; then
+    timestamp_args=(--timestamp)
 fi
 
-echo ""
-echo "✓ App bundle created: $APP_BUNDLE"
-echo ""
-echo "You can now:"
-echo "  1. Double-click $APP_BUNDLE to run it"
-echo "  2. Or run: open $APP_BUNDLE"
-echo ""
-echo "Note: You'll need to grant Accessibility permissions in:"
-echo "  System Settings → Privacy & Security → Accessibility"
+helper="${voice_resources}/VibeRemoteVoiceBridge"
+if [ -f "$helper" ]; then
+    if [ "$signing_identity" != "-" ]; then
+        codesign --force --options runtime "${timestamp_args[@]}" --sign "$signing_identity" "$helper"
+    else
+        codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$helper"
+    fi
+fi
+
+codesign --force --options runtime \
+    --entitlements "$ENTITLEMENTS" \
+    "${timestamp_args[@]}" \
+    --sign "$signing_identity" \
+    "$APP_BUNDLE"
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+
+if [ "$SIGNING_MODE" = "release" ]; then
+    archive_path=".build/${APP_NAME}-notarization.zip"
+    rm -f "$archive_path"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$archive_path"
+    xcrun notarytool submit "$archive_path" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP_BUNDLE"
+    xcrun stapler validate "$APP_BUNDLE"
+    spctl --assess --type execute --verbose=4 "$APP_BUNDLE"
+    rm -f "$archive_path"
+elif [ "$SIGNING_MODE" = "developer" ]; then
+    echo "Developer-signed build created without notarization. Use SIGNING_MODE=release for distribution."
+fi
+
+echo "App bundle created: $ROOT_DIR/$APP_BUNDLE"
+echo "Run it with: open '$ROOT_DIR/$APP_BUNDLE'"

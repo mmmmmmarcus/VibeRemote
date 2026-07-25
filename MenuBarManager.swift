@@ -1,217 +1,195 @@
 //
 //  MenuBarManager.swift
-//  HyperVibe
+//  VibeRemote
 //
-//  Manages the menu bar icon and menu
+//  Manages the menu bar icon and button mapping menu.
 //
 
 import AppKit
-import Carbon.HIToolbox
 
-// Button actions that can be assigned
-enum ButtonAction: String, CaseIterable {
+enum ButtonAction: String, CaseIterable, Sendable {
     case enterKey = "Enter: Submit prompt"
+    case shiftEnter = "Shift + Enter: Newline"
+    case backspace = "Backspace: Delete"
     case upKey = "Up: Navigate Up"
     case downKey = "Down: Navigate Down"
+    case leftKey = "Left: Navigate Left"
+    case rightKey = "Right: Navigate Right"
     case escKey = "Esc: Navigate Back"
     case ctrlC = "Control + C: Cancel Prompt"
-    case spaceKey = "Space: Claude Voice Dictation"
+    case spaceKey = "Space: Voice Dictation"
     case rightCmd = "Right Command: 3rd-party Voice Dictation"
     case rightOpt = "Right Option: 3rd-party Voice Dictation"
-    case trackpadClick = "Mouse Click"
     case none = "None"
 
-    /// Push-to-talk dictation needs the virtual key held for the full press duration.
-    /// Only a subset of HID buttons emit reliable release events, so these actions are
-    /// only offered for hold-capable buttons.
     var requiresHold: Bool {
         switch self {
-        case .spaceKey, .rightCmd, .rightOpt: return true
-        default: return false
+        case .spaceKey, .rightCmd, .rightOpt:
+            return true
+        default:
+            return false
         }
     }
 }
 
-/// HID buttons whose driver emits both press (value=1) and release (value=0) — verified via /tmp/hypervibe.log.
-/// menu/tv/select are excluded: menu/tv are press-only on the Siri Remote, select is handled separately for click/drag.
-let holdCapableButtons: Set<String> = ["playPause", "volumeUp", "volumeDown", "siri"]
-
-/// Trackpad swipe directions (single-finger flicks). Detection happens in TouchHandler;
-/// execution is dispatched here so mappings live alongside button mappings.
-enum SwipeDirection: String, CaseIterable {
-    case up, down, left, right
+/// Single source of truth for the fixed button-to-action mapping and hold support.
+/// Mappings are hardcoded and no longer user-customizable; this stays the one place
+/// that defines them and lets SwiftPM tests verify key uniqueness and hold validity.
+struct RemoteButtonDescriptor: Equatable, Sendable {
+    let key: String
+    let label: String
+    let defaultAction: ButtonAction
+    let supportsHold: Bool
 }
 
-/// Action a swipe can trigger. Slash-command cases type the raw value (without Enter — user
-/// presses Enter themselves). `leftArrow`/`rightArrow` send virtual arrow keys instead of text.
-/// `init` is a Swift keyword so the case name is backtick-escaped; rawValue "/init" is what displays.
-enum SwipeAction: String, CaseIterable {
-    // Priority order: direction-matched arrow (filtered per submenu), then Mode Switching,
-    // then ultrathink, then slash commands alphabetically, None last.
-    case leftArrow     = "Left: Navigate Left"
-    case rightArrow    = "Right: Navigate Right"
-    case modeSwitch    = "Mode Switching (Shift + Tab)"
-    case ultrathink    = "ultrathink"
-    case btw           = "/btw"
-    case compact       = "/compact"
-    case config        = "/config"
-    case context       = "/context"
-    case effort        = "/effort"
-    case `init`        = "/init"
-    case model         = "/model"
-    case remoteControl = "/remote-control"
-    case schedule      = "/schedule"
-    case tasks         = "/tasks"
-    case usage         = "/usage"
-    case none          = "None"
-}
+// Fixed Siri Remote mapping (not user-editable):
+// - Volume Up/Down  → arrow Up/Down (navigation)
+// - Back / Menu     → Backspace
+// - TV              → Shift+Enter (newline; the convention most agent apps use)
+// - Play/Pause      → Enter (submit)
+// - Siri            → Space (held; drives voice dictation and the mic bridge)
+let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
+    RemoteButtonDescriptor(key: "menu", label: "Menu Button", defaultAction: .backspace, supportsHold: false),
+    RemoteButtonDescriptor(key: "back", label: "Back Button", defaultAction: .backspace, supportsHold: false),
+    RemoteButtonDescriptor(key: "tv", label: "TV Button", defaultAction: .shiftEnter, supportsHold: false),
+    RemoteButtonDescriptor(key: "siri", label: "Siri Button", defaultAction: .spaceKey, supportsHold: true),
+    RemoteButtonDescriptor(key: "playPause", label: "Play/Pause Button", defaultAction: .enterKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "volumeUp", label: "Volume Up", defaultAction: .upKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "volumeDown", label: "Volume Down", defaultAction: .downKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "mute", label: "Mute Button", defaultAction: .none, supportsHold: false),
+    RemoteButtonDescriptor(key: "power", label: "Power Button", defaultAction: .none, supportsHold: false),
+    RemoteButtonDescriptor(key: "nextTrack", label: "Next Track", defaultAction: .rightKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "prevTrack", label: "Previous Track", defaultAction: .leftKey, supportsHold: false),
+]
 
-// Scroll speed options
-enum ScrollSpeed: String, CaseIterable {
-    case slow = "Slow"
-    case medium = "Medium"
-    case fast = "Fast"
-    
-    var scale: CGFloat {
+enum RemoteInputState: Equatable, Sendable {
+    case permissionRequired
+    case starting
+    case waitingForRemote
+    case ready
+    case unavailable
+
+    var menuTitle: String {
         switch self {
-        case .slow: return 150.0
-        case .medium: return 300.0
-        case .fast: return 500.0
+        case .permissionRequired: return "Input: Permission Required..."
+        case .starting: return "Input: Starting..."
+        case .waitingForRemote: return "Input: Waiting for Remote"
+        case .ready: return "Input: Ready"
+        case .unavailable: return "Input: Unavailable"
         }
     }
 }
 
-class MenuBarManager {
-    
+enum RemoteControlState: Equatable, Sendable {
+    case permissionRequired
+    case starting
+    case ready
+
+    var menuTitle: String {
+        switch self {
+        case .permissionRequired: return "Control: Permission Required..."
+        case .starting: return "Control: Checking Permission..."
+        case .ready: return "Control: Ready"
+        }
+    }
+}
+
+@MainActor
+final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private let statusMenuItem: NSMenuItem
-    
-    // Button mappings (stored in UserDefaults)
-    private var buttonMappings: [String: ButtonAction] = [:]
+    private var diagnosticsMenu = NSMenu()
+    private let microphoneBridgeManager: MicrophoneBridgeManager
+    private let remoteBatteryReader = RemoteBatteryReader()
+    /// Fixed, non-customizable button-to-action map built from `remoteButtonDescriptors`.
+    /// Every button except the Siri button is locked to its descriptor default; the Siri
+    /// button stays user-customizable (see `siriButtonAction`).
+    private static let fixedButtonActions: [String: ButtonAction] = Dictionary(
+        uniqueKeysWithValues: remoteButtonDescriptors.map { ($0.key, $0.defaultAction) }
+    )
+    private static let siriButtonKey = "siri"
+    private static let siriButtonDefaultsKey = "siriButtonAction"
+    private static let siriButtonDefaultAction: ButtonAction =
+        remoteButtonDescriptors.first { $0.key == siriButtonKey }?.defaultAction ?? .spaceKey
+    /// The one remaining customizable mapping, persisted across launches.
+    private var siriButtonAction: ButtonAction = MenuBarManager.loadSiriButtonAction()
+    private var remoteConnected = false
+    private var bluetoothAccessState: BluetoothAccessState = .notDetermined
+    private var remoteInputState: RemoteInputState = .permissionRequired
+    private var remoteControlState: RemoteControlState = .permissionRequired
+    private var requestBluetoothAccessHandler: (() -> Void)?
+    private var requestInputAccessHandler: (() -> Void)?
+    private var requestControlAccessHandler: (() -> Void)?
+    private var statusRefreshHandler: (() -> Void)?
+    private var remoteBatteryPercent: Int?
+    private var batteryRefreshInFlight = false
+    private var lastBatteryRefreshAt: Date?
+    private let batteryRefreshInterval: TimeInterval = 300
+    private var cachedDiagnostics: MicrophoneBridgeDiagnostics?
+    private var diagnosticsRefreshInFlight = false
+    private var pendingDiagnosticsCallbacks: [(MicrophoneBridgeDiagnostics) -> Void] = []
+    private let diagnosticsCacheInterval: TimeInterval = 30
 
-    // Swipe gesture mappings (stored in UserDefaults under "swipeMappings").
-    private var swipeMappings: [SwipeDirection: SwipeAction] = [:]
-
-    private static let defaultSwipeMappings: [SwipeDirection: SwipeAction] = [
-        .up:    .usage,
-        .down:  .compact,
-        .left:  .model,
-        .right: .modeSwitch,
-    ]
-
-    // Scroll speed (used for trackpad scroll scale; no menu, native multitouch)
-    private(set) var scrollSpeed: ScrollSpeed = .medium
-
-    /// Set by app delegate so menu bar can delegate media actions to MediaController.
-    var mediaController: MediaController?
-
-    init(statusItem: NSStatusItem) {
+    init(statusItem: NSStatusItem, microphoneBridgeManager: MicrophoneBridgeManager) {
         self.statusItem = statusItem
+        self.microphoneBridgeManager = microphoneBridgeManager
         self.menu = NSMenu()
         self.statusMenuItem = NSMenuItem(title: "Status: Disconnected", action: nil, keyEquivalent: "")
-        
-        loadMappings()
-        loadSwipeMappings()
+        super.init()
+
+        diagnosticsMenu.delegate = self
         setupMenuBar()
     }
-    
-    private func loadMappings() {
-        // Default mappings (only used on first launch / after schema upgrade)
-        let defaultMappings: [String: ButtonAction] = [
-            "playPause": .enterKey,
-            "menu": .escKey,
-            "select": .trackpadClick,
-            "volumeUp": .upKey,
-            "volumeDown": .downKey,
-            "siri": .spaceKey,
-            "tv": .ctrlC
-        ]
 
-        // Schema version bumps:
-        //   v3: old media-key actions removed — drop all saved button mappings
-        //   v4: "select" default changed from .enterKey to .trackpadClick — reset just that entry
-        let currentSchema = 4
-        let savedSchema = UserDefaults.standard.integer(forKey: "buttonMappingsSchema")
-        if savedSchema < 3 {
-            UserDefaults.standard.removeObject(forKey: "buttonMappings")
-        } else if savedSchema < 4 {
-            // Targeted migration: reset "select" so the new default applies, preserve others.
-            if var saved = UserDefaults.standard.dictionary(forKey: "buttonMappings") as? [String: String] {
-                saved.removeValue(forKey: "select")
-                UserDefaults.standard.set(saved, forKey: "buttonMappings")
-            }
-        }
-        if savedSchema < currentSchema {
-            UserDefaults.standard.set(currentSchema, forKey: "buttonMappingsSchema")
-        }
-
-        if let saved = UserDefaults.standard.dictionary(forKey: "buttonMappings") as? [String: String] {
-            for (button, actionRaw) in saved {
-                if let action = ButtonAction(rawValue: actionRaw) {
-                    buttonMappings[button] = action
-                }
-            }
-            for (button, action) in defaultMappings {
-                if buttonMappings[button] == nil {
-                    buttonMappings[button] = action
-                }
-            }
-            // Defensive: if a hold-required action got persisted against a tap-only button, reset to none.
-            for (button, action) in buttonMappings where action.requiresHold && !holdCapableButtons.contains(button) {
-                buttonMappings[button] = ButtonAction.none
-            }
-        } else {
-            buttonMappings = defaultMappings
-            saveMappings()
-        }
-    }
-    
-    private func saveMappings() {
-        var toSave: [String: String] = [:]
-        for (button, action) in buttonMappings {
-            toSave[button] = action.rawValue
-        }
-        UserDefaults.standard.set(toSave, forKey: "buttonMappings")
-    }
-    
-    /// Procedurally draw the menu-bar icon — a walkie-talkie glyph mirroring the
-    /// Figma reference (36-unit viewBox: antenna + body with display + speaker
-    /// holes via even-odd fill). 2× centered scale matches the menu-bar reading
-    /// size; overflow clips at the canvas edges by design.
-    private static func makeWaveIcon() -> NSImage {
+    /// Draws the menu-bar remote glyph. When `paused` is true, a small pause badge is
+    /// notched into the bottom-right corner to signal that the microphone bridge is
+    /// enabled but not currently running. The image stays a template so macOS keeps
+    /// tinting it for light/dark menu bars; the badge is rendered as tinted disc with the
+    /// two pause bars punched out as transparent negative space.
+    private static func makeRemoteIcon(paused: Bool = false) -> NSImage {
         let pt: CGFloat = 18
         let image = NSImage(size: NSSize(width: pt, height: pt), flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             let s = rect.width
-
-            ctx.translateBy(x: s / 2, y: s / 2)
-            ctx.scaleBy(x: 2, y: 2)
-            ctx.translateBy(x: -s / 2, y: -s / 2)
-
             ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
 
-            let antenna = CGRect(x: 0.5260 * s, y: 0.1944 * s,
-                                 width: 0.0638 * s, height: 0.1594 * s)
-            let body    = CGRect(x: 0.3348 * s, y: 0.3538 * s,
-                                 width: 0.3187 * s, height: 0.4462 * s)
-            let display = CGRect(x: 0.3986 * s, y: 0.6406 * s,
-                                 width: 0.1911 * s, height: 0.0956 * s)
-            let speakerR: CGFloat = 0.0956 * s
-            let speaker = CGRect(x: 0.4942 * s - speakerR, y: 0.5131 * s - speakerR,
-                                 width: 2 * speakerR, height: 2 * speakerR)
+            let body = CGRect(x: 0.34 * s, y: 0.12 * s, width: 0.32 * s, height: 0.76 * s)
+            let ring = CGRect(x: 0.39 * s, y: 0.18 * s, width: 0.22 * s, height: 0.22 * s)
+            let siri = CGRect(x: 0.69 * s, y: 0.36 * s, width: 0.08 * s, height: 0.18 * s)
 
             let path = CGMutablePath()
-            path.addPath(CGPath(roundedRect: antenna,
-                                cornerWidth: 0.0278 * s, cornerHeight: 0.0278 * s, transform: nil))
-            path.addPath(CGPath(roundedRect: body,
-                                cornerWidth: 0.0556 * s, cornerHeight: 0.0556 * s, transform: nil))
-            path.addPath(CGPath(roundedRect: display,
-                                cornerWidth: 0.0278 * s, cornerHeight: 0.0278 * s, transform: nil))
-            path.addEllipse(in: speaker)
-
+            path.addPath(CGPath(roundedRect: body, cornerWidth: 0.12 * s, cornerHeight: 0.12 * s, transform: nil))
+            path.addEllipse(in: ring)
+            path.addPath(CGPath(roundedRect: siri, cornerWidth: 0.04 * s, cornerHeight: 0.04 * s, transform: nil))
             ctx.addPath(path)
-            ctx.fillPath(using: .evenOdd)
+            ctx.fillPath()
+
+            if paused {
+                let cx = 0.72 * s
+                let cy = 0.74 * s
+                let badgeR = 0.23 * s
+                let moatR = badgeR + 0.05 * s
+
+                // Notch a transparent moat so the badge reads as a separate element even
+                // where it overlaps the remote body.
+                ctx.setBlendMode(.clear)
+                ctx.fillEllipse(in: CGRect(x: cx - moatR, y: cy - moatR, width: 2 * moatR, height: 2 * moatR))
+
+                // Solid (tinted) badge disc.
+                ctx.setBlendMode(.normal)
+                ctx.fillEllipse(in: CGRect(x: cx - badgeR, y: cy - badgeR, width: 2 * badgeR, height: 2 * badgeR))
+
+                // Two pause bars punched out of the disc.
+                ctx.setBlendMode(.clear)
+                let barW = 0.06 * s
+                let barH = 0.18 * s
+                let gap = 0.05 * s
+                let barY = cy - barH / 2
+                ctx.fill(CGRect(x: cx - gap / 2 - barW, y: barY, width: barW, height: barH))
+                ctx.fill(CGRect(x: cx + gap / 2, y: barY, width: barW, height: barH))
+                ctx.setBlendMode(.normal)
+            }
             return true
         }
         image.isTemplate = true
@@ -219,301 +197,474 @@ class MenuBarManager {
     }
 
     private func setupMenuBar() {
-        // Configure the button (the visible icon in menu bar)
-        guard let button = statusItem.button else {
-            return
-        }
-        
-        button.image = Self.makeWaveIcon()
+        guard let button = statusItem.button else { return }
+        button.image = Self.makeRemoteIcon()
         button.title = ""
-        
+
         rebuildMenu()
         statusItem.menu = menu
     }
-    
+
+    /// Reflects microphone-bridge health in the menu-bar glyph: a pause badge appears
+    /// whenever the bridge is not running — with the app open, the bridge is always
+    /// meant to be running.
+    private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
+        statusItem.button?.image = Self.makeRemoteIcon(paused: !microphoneStatus.running)
+    }
+
     private func rebuildMenu() {
         menu.removeAllItems()
-        
-        // Title
-        let titleItem = NSMenuItem(title: "Siri Remote", action: nil, keyEquivalent: "")
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // Status
+
+        let microphoneStatus = microphoneBridgeManager.menuStatus()
+        updateStatusIcon(microphoneStatus: microphoneStatus)
+
+        // Permissions appear only while something still needs granting, pinned to the top.
+        let bluetoothNeeded = bluetoothAccessState != .allowed
+        let missingPermissionCount = (inputAccessIsReady ? 0 : 1)
+            + (remoteControlState == .ready ? 0 : 1)
+            + (bluetoothNeeded ? 1 : 0)
+        if missingPermissionCount > 0 {
+            let permissionsItem = NSMenuItem(
+                title: "Permissions Required (\(missingPermissionCount))...",
+                action: nil,
+                keyEquivalent: ""
+            )
+            permissionsItem.submenu = buildPermissionsMenu(
+                includeBluetooth: bluetoothNeeded,
+                onlyRequired: true
+            )
+            menu.addItem(permissionsItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        statusMenuItem.title = remoteSummaryTitle()
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
-        
         menu.addItem(NSMenuItem.separator())
-        
-        // Button Mappings submenu
-        let mappingsItem = NSMenuItem(title: "Button Mappings", action: nil, keyEquivalent: "")
-        let mappingsSubmenu = NSMenu()
-        
-        let buttons = [
-            ("select", "Trackpad Click"),
-            ("menu", "Menu Button"),
-            ("tv", "TV Button"),
-            ("siri", "Siri Button"),
-            ("playPause", "Play/Pause Button"),
-            ("volumeUp", "Volume Up"),
-            ("volumeDown", "Volume Down"),
-        ]
-        
-        for (key, label) in buttons {
-            let buttonItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
-            let actionSubmenu = NSMenu()
-            let canHold = holdCapableButtons.contains(key)
 
+        // Only the Siri button remains user-customizable; all other buttons are fixed.
+        if let siriDescriptor = remoteButtonDescriptors.first(where: { $0.key == Self.siriButtonKey }) {
+            let siriItem = NSMenuItem(title: "Siri Button Action", action: nil, keyEquivalent: "")
+            let siriSubmenu = NSMenu()
             for action in ButtonAction.allCases {
-                // Voice-dictation actions require press+release tracking; hide them on tap-only buttons.
-                if action.requiresHold && !canHold { continue }
-                // Mouse Click is only meaningful for the trackpad click button.
-                if action == .trackpadClick && key != "select" { continue }
-
-                let actionItem = NSMenuItem(title: action.rawValue, action: #selector(changeMapping(_:)), keyEquivalent: "")
+                if action.requiresHold && !siriDescriptor.supportsHold { continue }
+                let actionItem = NSMenuItem(
+                    title: action.rawValue,
+                    action: #selector(changeSiriButtonAction(_:)),
+                    keyEquivalent: ""
+                )
                 actionItem.target = self
-                actionItem.representedObject = (key, action)
-
-                if buttonMappings[key] == action {
-                    actionItem.state = .on
-                }
-
-                actionSubmenu.addItem(actionItem)
+                actionItem.representedObject = action
+                actionItem.state = siriButtonAction == action ? .on : .off
+                siriSubmenu.addItem(actionItem)
             }
-
-            buttonItem.submenu = actionSubmenu
-            mappingsSubmenu.addItem(buttonItem)
+            siriItem.submenu = siriSubmenu
+            menu.addItem(siriItem)
+            menu.addItem(NSMenuItem.separator())
         }
-        
-        mappingsItem.submenu = mappingsSubmenu
-        menu.addItem(mappingsItem)
 
-        // Swipe Gestures submenu
-        let swipeItem = NSMenuItem(title: "Swipe Gestures", action: nil, keyEquivalent: "")
-        let swipeSubmenu = NSMenu()
-        let swipes: [(SwipeDirection, String)] = [
-            (.up,    "Swipe Up"),
-            (.down,  "Swipe Down"),
-            (.left,  "Swipe Left"),
-            (.right, "Swipe Right"),
-        ]
-        for (direction, label) in swipes {
-            let dirItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
-            let actionsMenu = NSMenu()
-            for action in SwipeAction.allCases {
-                // Each arrow-key action only appears on its matching swipe direction.
-                if action == .leftArrow  && direction != .left  { continue }
-                if action == .rightArrow && direction != .right { continue }
-
-                let actionItem = NSMenuItem(title: action.rawValue, action: #selector(changeSwipeMapping(_:)), keyEquivalent: "")
-                actionItem.target = self
-                actionItem.representedObject = (direction, action)
-                if swipeMappings[direction] == action {
-                    actionItem.state = .on
-                }
-                actionsMenu.addItem(actionItem)
-            }
-            dirItem.submenu = actionsMenu
-            swipeSubmenu.addItem(dirItem)
-        }
-        swipeItem.submenu = swipeSubmenu
-        menu.addItem(swipeItem)
-
+        // Microphone controls live directly in the top-level menu.
+        addMicrophoneSection(status: microphoneStatus, to: menu)
         menu.addItem(NSMenuItem.separator())
 
-        // Quit
+        let diagnosticsItem = NSMenuItem(title: "Diagnostics", action: nil, keyEquivalent: "")
+        // A submenu may still be retained by the menu item AppKit just removed.
+        // Reusing that NSMenu immediately raises "already a submenu" during rapid
+        // device/status refreshes, so each rebuild gets a fresh menu instance.
+        diagnosticsMenu.delegate = nil
+        diagnosticsMenu = NSMenu()
+        diagnosticsMenu.delegate = self
+        showDiagnosticsPlaceholder("Open to Load Diagnostics")
+        diagnosticsItem.submenu = diagnosticsMenu
+        menu.addItem(diagnosticsItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let refreshItem = NSMenuItem(title: "Refresh Status", action: #selector(refreshMenu), keyEquivalent: "")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
-    
-    @objc private func changeMapping(_ sender: NSMenuItem) {
-        guard let (buttonKey, action) = sender.representedObject as? (String, ButtonAction) else {
-            return
-        }
-        buttonMappings[buttonKey] = action
-        saveMappings()
-        rebuildMenu()
+
+    private var inputAccessIsReady: Bool {
+        remoteInputState == .ready || remoteInputState == .waitingForRemote
     }
 
-    @objc private func changeSwipeMapping(_ sender: NSMenuItem) {
-        guard let (direction, action) = sender.representedObject as? (SwipeDirection, SwipeAction) else {
-            return
-        }
-        swipeMappings[direction] = action
-        saveSwipeMappings()
-        rebuildMenu()
-    }
-    
-    func updateConnectionStatus(connected: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.statusMenuItem.title = connected ? "Status: Connected ✓" : "Status: Disconnected"
-            self.statusItem.button?.appearsDisabled = !connected
-        }
-    }
-    
-    func getMapping(for button: String) -> ButtonAction {
-        return buttonMappings[button] ?? .none
-    }
-    
-    // Map HID codes to button names
-    private let hidCodeToButton: [String: String] = [
-        "0x000C:0x00CD": "playPause",    // Play/Pause
-        "0x000C:0x00B5": "nextTrack",    // Next (not a physical button but for mapping)
-        "0x000C:0x00B6": "prevTrack",    // Previous (not a physical button but for mapping)
-        "0x000C:0x00E9": "volumeUp",     // Volume Up
-        "0x000C:0x00EA": "volumeDown",   // Volume Down
-        "0x0001:0x0086": "menu",         // Menu button (System Menu Main)
-        "0x000C:0x0080": "select",       // Select button
-        "0x000C:0x0040": "menu",         // Menu (alternate)
-        "0x000C:0x0223": "menu",         // Home
-        "0x000C:0x0224": "back",         // Back
-    ]
-    
-    /// Get the action name for a given HID code (for event interception)
-    func getMappingForHIDCode(_ hidCode: String) -> String? {
-        guard let buttonName = hidCodeToButton[hidCode],
-              let action = buttonMappings[buttonName] else {
-            return nil
-        }
-        return action.rawValue
-    }
-    
-    private func loadSwipeMappings() {
-        if let saved = UserDefaults.standard.dictionary(forKey: "swipeMappings") as? [String: String] {
-            for (dirRaw, actionRaw) in saved {
-                if let dir = SwipeDirection(rawValue: dirRaw),
-                   let act = SwipeAction(rawValue: actionRaw) {
-                    swipeMappings[dir] = act
+    private func buildPermissionsMenu(includeBluetooth: Bool, onlyRequired: Bool) -> NSMenu {
+        let submenu = NSMenu()
+
+        if includeBluetooth {
+            switch bluetoothAccessState {
+            case .allowed:
+                if !onlyRequired {
+                    addDisabledItem("Bluetooth Audio: Ready", to: submenu)
                 }
+            case .notDetermined:
+                addActionItem("Allow Bluetooth Audio...", action: #selector(requestBluetoothAccess), to: submenu)
+            case .denied:
+                addActionItem("Bluetooth Audio: Open Settings...", action: #selector(requestBluetoothAccess), to: submenu)
+            case .restricted:
+                addDisabledItem("Bluetooth Audio: Restricted", to: submenu)
             }
         }
-        // Fill any missing directions with defaults.
-        for (dir, act) in Self.defaultSwipeMappings where swipeMappings[dir] == nil {
-            swipeMappings[dir] = act
+
+        if inputAccessIsReady {
+            if !onlyRequired {
+                addDisabledItem("Button Input: Ready", to: submenu)
+            }
+        } else {
+            switch remoteInputState {
+            case .starting:
+                addDisabledItem("Button Input: Checking...", to: submenu)
+            case .unavailable:
+                addDisabledItem("Button Input: Unavailable", to: submenu)
+            case .permissionRequired:
+                addActionItem("Allow Button Input...", action: #selector(requestInputAccess), to: submenu)
+            case .waitingForRemote, .ready:
+                break
+            }
+        }
+
+        if remoteControlState == .ready {
+            if !onlyRequired {
+                addDisabledItem("Keyboard Control: Ready", to: submenu)
+            }
+        } else if remoteControlState == .starting {
+            addDisabledItem("Keyboard Control: Checking...", to: submenu)
+        } else {
+            addActionItem("Allow Keyboard Control...", action: #selector(requestControlAccess), to: submenu)
+        }
+
+        return submenu
+    }
+
+    /// Microphone controls rendered directly into the top-level menu: one status line and
+    /// one Start/Restart action. There is no mode toggle or stop action — with the app
+    /// open, the bridge is always meant to be running.
+    private func addMicrophoneSection(status: MicrophoneBridgeStatus, to menu: NSMenu) {
+        addDisabledItem("Microphone: \(status.running ? "Running" : "Stopped")", to: menu)
+        if let error = status.lastError {
+            let item = NSMenuItem(title: "Needs Attention: \(truncate(error, max: 72))", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.indentationLevel = 1
+            menu.addItem(item)
+        }
+
+        let startItemTitle = status.running ? "Restart Bridge" : "Start Bridge"
+        let startItem = NSMenuItem(title: startItemTitle, action: #selector(startMicrophoneBridge), keyEquivalent: "")
+        startItem.target = self
+        startItem.indentationLevel = 1
+        menu.addItem(startItem)
+
+        // Only surface the install link while the virtual audio device is actually missing.
+        if status.outputDeviceName == nil {
+            let installItem = NSMenuItem(
+                title: "Install BlackHole...",
+                action: #selector(openVirtualAudioDriverPage),
+                keyEquivalent: ""
+            )
+            installItem.target = self
+            installItem.indentationLevel = 1
+            menu.addItem(installItem)
         }
     }
 
-    private func saveSwipeMappings() {
-        var toSave: [String: String] = [:]
-        for (dir, act) in swipeMappings {
-            toSave[dir.rawValue] = act.rawValue
+    /// Compact diagnostics: the handful of facts that answer "is it working, and if not, why".
+    /// Copy Diagnostics still exports the full detailed report for debugging.
+    private func renderDiagnosticsMenu(_ diagnostics: MicrophoneBridgeDiagnostics) {
+        let submenu = diagnosticsMenu
+        submenu.removeAllItems()
+
+        addDisabledItem("Bridge: \(diagnostics.bridgeRunning ? "Running" : "Stopped")", to: submenu)
+        addDisabledItem("Remote: \(diagnostics.remoteAddress ?? "Not detected")", to: submenu)
+        addDisabledItem("Output Device: \(diagnostics.outputDeviceName ?? "Missing")", to: submenu)
+        addDisabledItem("Default Input: \(diagnostics.defaultInputDeviceName ?? "Unknown")", to: submenu)
+        addDisabledItem(
+            "Voice Sessions: \(diagnostics.helperVoiceStartedCount) started, \(diagnostics.helperVoiceEndedCount) ended",
+            to: submenu
+        )
+
+        if !diagnostics.blockingIssues.isEmpty {
+            submenu.addItem(NSMenuItem.separator())
+            addDisabledItem("Blocking Issues:", to: submenu)
+            for issue in diagnostics.blockingIssues.prefix(4) {
+                addDisabledItem("- \(truncate(issue, max: 82))", to: submenu)
+            }
         }
-        UserDefaults.standard.set(toSave, forKey: "swipeMappings")
+        if let error = diagnostics.lastError {
+            submenu.addItem(NSMenuItem.separator())
+            addDisabledItem("Last Error: \(truncate(error, max: 82))", to: submenu)
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+
+        let copyItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
+        copyItem.target = self
+        submenu.addItem(copyItem)
+
+        let appLogItem = NSMenuItem(title: "Open App Log", action: #selector(openAppLog), keyEquivalent: "")
+        appLogItem.target = self
+        appLogItem.isEnabled = diagnostics.appLogAge != "missing"
+        submenu.addItem(appLogItem)
+
+        let refreshItem = NSMenuItem(title: "Refresh Diagnostics", action: #selector(refreshDiagnosticsMenu), keyEquivalent: "")
+        refreshItem.target = self
+        submenu.addItem(refreshItem)
     }
 
-    func getSwipeMapping(for direction: SwipeDirection) -> SwipeAction {
-        return swipeMappings[direction] ?? .none
+    private func showDiagnosticsPlaceholder(_ title: String) {
+        diagnosticsMenu.removeAllItems()
+        addDisabledItem(title, to: diagnosticsMenu)
     }
 
-    /// Execute the action bound to a swipe direction. Slash-command actions type text
-    /// (no Enter — user presses Enter themselves). Arrow/modifier actions send key events.
-    func executeSwipe(_ direction: SwipeDirection) {
-        let action = swipeMappings[direction] ?? SwipeAction.none
-        switch action {
-        case .none:
-            break
-        case .leftArrow:
-            sendKey(kVK_LeftArrow)
-        case .rightArrow:
-            sendKey(kVK_RightArrow)
-        case .modeSwitch:
-            sendKey(kVK_Tab, flags: .maskShift)
-        case .btw, .schedule, .ultrathink:
-            // Trailing space: user typically continues with an argument or prose.
-            typeString(action.rawValue + " ")
-        case .compact, .config, .context, .effort, .`init`,
-             .model, .remoteControl, .tasks, .usage:
-            // No trailing space: these commands stand alone or open an interactive picker.
-            typeString(action.rawValue)
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === diagnosticsMenu else { return }
+        if let cachedDiagnostics {
+            renderDiagnosticsMenu(cachedDiagnostics)
+        } else {
+            showDiagnosticsPlaceholder("Loading Diagnostics...")
+        }
+        requestDiagnostics(force: false)
+    }
+
+    private func requestDiagnostics(
+        force: Bool,
+        completion: ((MicrophoneBridgeDiagnostics) -> Void)? = nil
+    ) {
+        let cacheIsFresh = cachedDiagnostics.map {
+            Date().timeIntervalSince($0.generatedAt) < diagnosticsCacheInterval
+        } ?? false
+        if !force, cacheIsFresh, let cachedDiagnostics {
+            completion?(cachedDiagnostics)
+            return
+        }
+
+        if let completion {
+            pendingDiagnosticsCallbacks.append(completion)
+        }
+        guard !diagnosticsRefreshInFlight else { return }
+
+        diagnosticsRefreshInFlight = true
+        if cachedDiagnostics == nil {
+            showDiagnosticsPlaceholder("Loading Diagnostics...")
+        }
+
+        microphoneBridgeManager.diagnosticsAsync { [weak self] diagnostics in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.cachedDiagnostics = diagnostics
+                self.diagnosticsRefreshInFlight = false
+                self.renderDiagnosticsMenu(diagnostics)
+                let callbacks = self.pendingDiagnosticsCallbacks
+                self.pendingDiagnosticsCallbacks.removeAll()
+                callbacks.forEach { $0(diagnostics) }
+            }
         }
     }
 
-    /// Post the given string as a single keyboard event via `keyboardSetUnicodeString`.
-    /// Works across terminals and most text fields; bypasses layout-specific key codes.
-    private func typeString(_ s: String) {
-        let utf16 = Array(s.utf16)
-        let count = utf16.count
-        guard count > 0 else { return }
-        utf16.withUnsafeBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return }
-            let src = CGEventSource(stateID: .hidSystemState)
-            let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
-            down?.keyboardSetUnicodeString(stringLength: count, unicodeString: base)
-            down?.post(tap: .cghidEventTap)
-            usleep(5000)
-            let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
-            up?.keyboardSetUnicodeString(stringLength: count, unicodeString: base)
-            up?.post(tap: .cghidEventTap)
+    @objc private func refreshDiagnosticsMenu() {
+        requestDiagnostics(force: true)
+    }
+
+    private func addDisabledItem(_ title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func addActionItem(_ title: String, action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+    }
+
+
+    private func truncate(_ value: String, max: Int) -> String {
+        guard value.count > max else { return value }
+        let index = value.index(value.startIndex, offsetBy: max)
+        return String(value[..<index]) + "..."
+    }
+
+
+    @objc private func startMicrophoneBridge() {
+        cachedDiagnostics = nil
+        if bluetoothAccessState != .allowed {
+            requestBluetoothAccessHandler?()
+        }
+        microphoneBridgeManager.restartAsync { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.rebuildMenu()
+            }
         }
     }
 
-    /// Execute an action by name
-    func executeAction(_ actionName: String) {
-        guard let action = ButtonAction(rawValue: actionName) else { return }
+    @objc private func openVirtualAudioDriverPage() {
+        microphoneBridgeManager.openVirtualAudioDriverPage()
+        rebuildMenu()
+    }
 
-        switch action {
-        case .none:
-            break
-        case .enterKey:
-            sendKey(kVK_Return)
-        case .upKey:
-            sendKey(kVK_UpArrow)
-        case .downKey:
-            sendKey(kVK_DownArrow)
-        case .escKey:
-            sendKey(kVK_Escape)
-        case .ctrlC:
-            sendKey(kVK_ANSI_C, flags: .maskControl)
-        case .spaceKey:
-            sendKey(kVK_Space)
-        case .rightCmd:
-            sendModifierTap(kVK_RightCommand, flag: .maskCommand)
-        case .rightOpt:
-            sendModifierTap(kVK_RightOption, flag: .maskAlternate)
-        case .trackpadClick:
-            performClick()
+    @objc private func refreshMenu() {
+        cachedDiagnostics = nil
+        statusRefreshHandler?()
+        refreshRemoteBattery(force: true)
+        rebuildMenu()
+    }
+
+    @objc private func copyDiagnostics() {
+        requestDiagnostics(force: false) { diagnostics in
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(diagnostics.copyText, forType: .string)
         }
     }
 
-    private func performClick() {
-        let pos = NSEvent.mouseLocation
-        let screenH = NSScreen.main?.frame.height ?? 0
-        let cgPos = CGPoint(x: pos.x, y: screenH - pos.y)
-
-        let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: cgPos, mouseButton: .left)
-        let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: cgPos, mouseButton: .left)
-        down?.post(tap: .cghidEventTap)
-        usleep(10000)
-        up?.post(tap: .cghidEventTap)
+    @objc private func openAppLog() {
+        microphoneBridgeManager.openAppLog()
     }
 
-    private func sendKey(_ keyCode: Int, flags: CGEventFlags = []) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(keyCode), keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(keyCode), keyDown: false)
-        down?.flags = flags
-        up?.flags = flags
-        down?.post(tap: .cghidEventTap)
-        usleep(10000)
-        up?.post(tap: .cghidEventTap)
+    func refresh() {
+        refreshRemoteBattery()
+        rebuildMenu()
     }
 
-    /// Tap a modifier key alone (e.g. Right Command) — used to trigger push-to-talk dictation.
-    private func sendModifierTap(_ keyCode: Int, flag: CGEventFlags) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(keyCode), keyDown: true)
-        down?.flags = flag
-        down?.post(tap: .cghidEventTap)
-        usleep(10000)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(keyCode), keyDown: false)
-        up?.flags = []
-        up?.post(tap: .cghidEventTap)
+    func setBluetoothAccessRequestHandler(_ handler: @escaping () -> Void) {
+        requestBluetoothAccessHandler = handler
     }
-    
+
+    func setInputAccessRequestHandler(_ handler: @escaping () -> Void) {
+        requestInputAccessHandler = handler
+    }
+
+    func setControlAccessRequestHandler(_ handler: @escaping () -> Void) {
+        requestControlAccessHandler = handler
+    }
+
+    func setStatusRefreshHandler(_ handler: @escaping () -> Void) {
+        statusRefreshHandler = handler
+    }
+
+    func updateBluetoothConnectionStatus(connected: Bool) {
+        let wasConnected = remoteConnected
+        remoteConnected = connected
+        if !connected {
+            remoteBatteryReader.cancel()
+            remoteBatteryPercent = nil
+            lastBatteryRefreshAt = nil
+            batteryRefreshInFlight = false
+        }
+        statusMenuItem.title = remoteSummaryTitle()
+        rebuildMenu()
+        if connected {
+            refreshRemoteBattery(force: !wasConnected || remoteBatteryPercent == nil)
+        }
+    }
+
+    func updateRemoteInputState(_ state: RemoteInputState) {
+        guard remoteInputState != state else { return }
+        remoteInputState = state
+        rebuildMenu()
+    }
+
+    func updateRemoteControlState(_ state: RemoteControlState) {
+        guard remoteControlState != state else { return }
+        remoteControlState = state
+        rebuildMenu()
+    }
+
+    func updateBluetoothAccessState(_ state: BluetoothAccessState) {
+        guard bluetoothAccessState != state else { return }
+        bluetoothAccessState = state
+        if !state.allowsBatteryLookup {
+            remoteBatteryReader.cancel()
+            remoteBatteryPercent = nil
+            lastBatteryRefreshAt = nil
+            batteryRefreshInFlight = false
+        }
+        rebuildMenu()
+        if state.allowsBatteryLookup, remoteConnected {
+            refreshRemoteBattery(force: true)
+        }
+    }
+
+    private func remoteSummaryTitle() -> String {
+        if remoteConnected {
+            if let remoteBatteryPercent {
+                return "Remote: Connected · Battery \(remoteBatteryPercent)%"
+            }
+            return "Remote: Connected"
+        }
+        if !inputAccessIsReady {
+            return "Remote: Setup Required"
+        }
+        return "Remote: Not Connected"
+    }
+
+    private func refreshRemoteBattery(force: Bool = false) {
+        guard remoteConnected,
+              bluetoothAccessState.allowsBatteryLookup,
+              !batteryRefreshInFlight else { return }
+        if !force,
+           let lastBatteryRefreshAt,
+           Date().timeIntervalSince(lastBatteryRefreshAt) < batteryRefreshInterval {
+            return
+        }
+
+        batteryRefreshInFlight = true
+        remoteBatteryReader.readBatteryPercent { [weak self] percent in
+            guard let self = self else { return }
+            self.batteryRefreshInFlight = false
+            guard self.remoteConnected else {
+                self.rebuildMenu()
+                return
+            }
+            self.lastBatteryRefreshAt = Date()
+            if let percent {
+                self.remoteBatteryPercent = percent
+            }
+            self.rebuildMenu()
+        }
+    }
+
+    func getMapping(for button: String) -> ButtonAction {
+        if button == Self.siriButtonKey {
+            return siriButtonAction
+        }
+        return Self.fixedButtonActions[button] ?? .none
+    }
+
+    private static func loadSiriButtonAction() -> ButtonAction {
+        guard let raw = UserDefaults.standard.string(forKey: siriButtonDefaultsKey),
+              let action = ButtonAction(rawValue: raw) else {
+            return siriButtonDefaultAction
+        }
+        return action
+    }
+
+    private func setSiriButtonAction(_ action: ButtonAction) {
+        siriButtonAction = action
+        UserDefaults.standard.set(action.rawValue, forKey: Self.siriButtonDefaultsKey)
+        rebuildMenu()
+    }
+
+    @objc private func changeSiriButtonAction(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? ButtonAction else { return }
+        setSiriButtonAction(action)
+    }
+
+    @objc private func requestInputAccess() {
+        requestInputAccessHandler?()
+    }
+
+    @objc private func requestBluetoothAccess() {
+        requestBluetoothAccessHandler?()
+    }
+
+    @objc private func requestControlAccess() {
+        requestControlAccessHandler?()
+    }
+
     @objc private func quitApp() {
         NSStatusBar.system.removeStatusItem(statusItem)
         NSApp.terminate(nil)

@@ -1,6 +1,7 @@
 # Build artifacts
-Remotastic
-Remotastic.app/
+VibeRemote
+VibeRemoteVoiceBridge
+VibeRemote.app/
 
 # Xcode
 .swiftpm/
