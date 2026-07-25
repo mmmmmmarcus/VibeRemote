@@ -9,13 +9,15 @@ platform behavior that is easy to break.
 VibeRemote is an experimental macOS **menu-bar app** (`LSUIElement`, no dock
 icon) that:
 
-- Maps Apple Siri Remote buttons to keyboard/media actions.
+- Maps Apple Siri Remote buttons to keyboard actions, aimed at driving AI agent apps
+  (arrows, Enter, Shift+Enter, Backspace, bullet-list control, app switching).
 - Shows the paired remote's connection and battery state.
-- Optionally **bridges the Siri Remote microphone** into a virtual audio device
-  (BlackHole 2ch / Soundflower) so the remote can be used as a system mic.
+- **Bridges the Siri Remote microphone** into its own virtual audio device
+  ("VibeRemote") so the remote can be used as a system mic.
 
-It is a two-executable SwiftPM package plus shell scripts that assemble and sign
-a `.app` bundle. There is no Xcode project file.
+It is a three-executable SwiftPM package (app, voice bridge, privileged helper) plus a
+shared library target and shell scripts that build the audio driver and assemble/sign the
+`.app` bundle. There is no Xcode project file.
 
 ## Repository layout
 
@@ -32,11 +34,15 @@ a `.app` bundle. There is no Xcode project file.
 | `MediaKeyInterceptor.swift` | Intercepts system media keys the remote emits. |
 | `SystemVolume.swift` | CoreAudio volume read/set + revert guard. |
 | `MicrophoneBridgeManager.swift` | Orchestrates the mic bridge (both engines). The largest and most delicate file. |
-| `VoiceBridgeHelper/main.swift` | **Separate executable** (`VibeRemoteVoiceBridge`): parses HCI/HID records, Opus-decodes, plays into BlackHole. |
+| `VoiceBridgeHelper/main.swift` | **Separate executable** (`VibeRemoteVoiceBridge`): parses HCI/HID records, Opus-decodes, plays into the virtual audio device. |
+| `PrivilegedHelper/main.swift` | **Separate executable** (`VibeRemoteHelper`): root LaunchDaemon registered via `SMAppService`; performs privileged work over XPC. |
+| `HelperProtocol/HelperProtocol.swift` | Library target shared by the app and daemon: the XPC contract and shared identifiers. |
+| `PrivilegedHelperClient.swift` | App-side registration/status/XPC calls for the daemon. |
 | `Vendor/SiriRemoteVoiceControl/` | Prebuilt legacy helper binaries (compatibility fallbacks). |
-| `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enve logic; no hardware). |
-| `build.sh` | SwiftPM build → universal `VibeRemote` + `VibeRemoteVoiceBridge` binaries. |
-| `create_app_bundle.sh` | Runs `build.sh`, assembles `.app`, generates icon, signs, optionally notarizes. |
+| `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
+| `build.sh` | SwiftPM build → universal `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
+| `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
+| `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `VibeRemote.entitlements` | Only `com.apple.security.device.bluetooth`. |
 
 ## Build, run, test
@@ -47,6 +53,9 @@ Always build through SwiftPM / the scripts — never hand-invoke `swiftc`.
 # Fast host-only build while iterating
 ARCHS="$(uname -m)" ./build.sh
 
+# Audio driver (only needed when it changes; output is gitignored)
+./build_audio_driver.sh
+
 # Full universal signed bundle (what actually gets installed)
 ./create_app_bundle.sh                 # ad-hoc signed (local "-")
 open VibeRemote.app
@@ -55,6 +64,10 @@ open VibeRemote.app
 swift test
 swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
 ```
+
+`AudioDriver/` and the built binaries are gitignored, so a fresh clone bundles no driver and
+no helper until those scripts run; the app degrades gracefully (falls back to an existing
+BlackHole/Soundflower device and to admin prompts).
 
 **Prefer the Developer ID signing command when installing for real testing.**
 Ad-hoc signatures change every build, which revokes the app's Accessibility /
@@ -80,6 +93,28 @@ CI (`.github/workflows/ci.yml`, `macos-15`) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
 the entitlements. Keep all of these green.
 
+## Button mappings and hold behavior
+
+Mappings are **fixed by design** — `remoteButtonDescriptors` in `MenuBarManager.swift` is the
+single source of truth. Only the **Siri button** is user-customizable (persisted under the
+`siriButtonAction` default); everything else is hardcoded and has no menu UI.
+
+Current intent: clickpad arrows → arrow keys, clickpad center → Enter, Back/Menu →
+Backspace, TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
+the Codex/Claude desktop client to the front, Power → Enter, volume keys → bullet-list
+control, Siri → held Space. The mute button is currently unmapped and free.
+
+**The remote reports one press and one release with no repeats in between.** Key repeat and
+tap/long-press are therefore synthesized in `RemoteInputHandler`:
+
+- `beginRepeating` drives auto-repeat (Backspace, arrows) with a safety tick cap in case a
+  release event is ever dropped.
+- `beginTapOrLongPress` distinguishes a tap from a hold (volume-up: tap indents, long-press
+  starts a bullet). Timers are torn down on release and on disconnect.
+- An earlier attempt tracked bullet-list "context" to decide between `- ` and Tab. It was
+  unreliable (any manual typing or focus change desynced it) and was replaced by this
+  deterministic tap/hold model. Don't reintroduce blind state tracking of editor content.
+
 ## Microphone bridge — critical architecture notes
 
 This is where almost all the subtlety lives. The bridge runs as a pipeline:
@@ -87,8 +122,8 @@ This is where almost all the subtlety lives. The bridge runs as a pipeline:
 ```
 Siri Remote (Opus audio, HID report 0xFA / ATT "1B 35" voice frames, emitted ONLY while the Siri button is held)
   → capture layer  → stdin of VibeRemoteVoiceBridge (user session)
-  → SiriRemotePacketParser → OpusDecoder → AVAudioEngine → BlackHole 2ch
-  → BlackHole loopback appears as a system audio *input*
+  → SiriRemotePacketParser → OpusDecoder → AVAudioEngine → "VibeRemote" virtual device
+  → that device's loopback appears as a system audio *input*
 ```
 
 There are **two capture engines**, selected at runtime:
@@ -149,19 +184,88 @@ few seconds).
   payload, enable byte `0xAF`, report ID `0xFA`. Cross-checked against
   https://github.com/azais-corentin/siri-remote.
 
-### Input mode (`Hold Siri Button` vs `Continuous Input`)
+### No mode toggles
 
-Because the firmware gates the mic, `Continuous` cannot make audio flow without
-a button hold. It only: (1) auto-starts the bridge on launch, (2) keeps the
-BlackHole player node open between sessions, (3) plays buffers unconditionally
-rather than only between `.started`/`.ended`. Treat the name as somewhat
-misleading; do not describe it as hands-free capture.
+There is no microphone mode and no input mode. With the app open the bridge is always
+meant to be running, and the output stream stays warm for the bridge's lifetime (one
+`Start`/`Restart` action, no `Stop`). Earlier builds had `MicrophoneMode` and
+`MicrophoneInputMode` enums; both were removed because the firmware gates the mic to
+physical Siri-button holds, so a "continuous" mode could not do what its name implied.
+
+## The virtual audio device
+
+The bridge plays into a virtual CoreAudio device. We ship our own: `AudioDriver/
+VibeRemoteAudio.driver`, built by `build_audio_driver.sh` from upstream BlackHole with
+VibeRemote branding (device, driver, and manufacturer all report "VibeRemote"). Users
+never see the word BlackHole.
+
+- The driver is **GPL-3.0** (a BlackHole derivative). Keep `THIRD_PARTY_NOTICES.md`
+  accurate; anyone distributing a build with it owes the corresponding source.
+- Device detection order is `VibeRemote` → `BlackHole 2ch` → `Soundflower (2ch)`, kept in
+  sync between `MicrophoneBridgeManager.supportedOutputDeviceNames` and the hardcoded list
+  in `VoiceBridgeHelper/main.swift`.
+- **A freshly installed virtual device can come up attenuated** (observed at 0.47), which
+  buries speech under the noise floor and looks exactly like "the bridge runs but there is
+  no input level". `raiseInputVolumeIfNeeded` forces unity on every bridge start — do not
+  remove it.
+- `installAudioDriver()` installs it into `/Library/Audio/Plug-Ins/HAL` and restarts
+  coreaudiod, preferring the privileged helper and falling back to one admin prompt.
+
+## Privileged helper (`SMAppService`)
+
+`VibeRemoteHelper` is a root LaunchDaemon that exists so the user authorizes once instead
+of typing a password on every bridge start. The app registers it with
+`SMAppService.daemon(plistName:)`; the user approves it in System Settings › Login Items &
+Extensions; afterwards the app drives it over XPC.
+
+Bundle layout is dictated by `SMAppService` and easy to get wrong:
+
+- executable at `Contents/MacOS/VibeRemoteHelper`
+- plist at `Contents/Library/LaunchDaemons/com.viberemote.helper.plist`, whose `Label`
+  matches the filename, with `BundleProgram` relative to the app bundle and `MachServices`
+  naming the same Mach service the daemon listens on
+- the helper must be signed **before** the enclosing app (nested code first)
+
+**Security invariants — this process is root:**
+
+- `listener(_:shouldAcceptNewConnection:)` validates every peer against a code requirement
+  (our bundle id + Team ID). Never accept a connection without that check.
+- Privileged file operations validate their source too (`bundleIsTrusted`), so root can only
+  copy code we signed into system directories.
+- The audit token is read via KVC because `NSXPCConnection` exposes it privately; the pid
+  fallback is less precise, so keep the token path.
+
+When adding a capability: extend `HelperProtocol`, bump `HelperConstants.version`, and
+remember an already-approved daemon keeps running the **old** binary until re-registered.
+
+## Dead ends — do not re-litigate
+
+Each of these was investigated to a firm conclusion. Re-attempting them wastes a lot of
+time, so read this first.
+
+- **Trackpad as a mouse: not possible while we read buttons.** Touch coordinates are only
+  available through the private MultitouchSupport framework, and that framework returns
+  **zero touch frames whenever any process holds the remote's HID interfaces open** — which
+  we must do to read buttons. Verified exhaustively: stopping the app yields 447 touch
+  events, running it yields 0; leaving the digitizer unseized, and not opening it at all,
+  both still yield 0. Touch does **not** arrive over any HID input report either (a report
+  callback on every interface captured only 3-byte `0xFB` button masks). Same wall applies
+  to the projects this was modeled on (couchvox / goatremote / sirimote), which use the same
+  framework.
+- **Gyroscope/motion: hardware does not have it.** 2nd/3rd-gen Siri Remotes dropped the
+  accelerometer and gyroscope. The two Sensor-page (`0x20`) HID interfaces handshake but
+  never emit data. Only the 1st-gen remote had an IMU.
+- **Replacing PacketLogger: no public API.** Live HCI capture on macOS is only available
+  through Apple's PacketLogger and its private, undocumented mechanism. Bundling Apple's
+  binary is not redistributable; reverse-engineering the private path is fragile. The
+  dependency stays.
 
 ## Diagnostics & logs
 
 - App log: `~/Library/Logs/VibeRemote/viberemote.log` (via `rmDebug`,
   size-bounded). Emoji-prefixed lines: `📡` GATT, `🔒` HID seize/listen,
   `🎮` button events, `🎙` audio listener, `🔊` volume guard.
+- Privileged helper log: `/var/log/viberemote-helper.log` (daemon stdout/stderr).
 - Bridge runtime dir (0700, private):
   `~/Library/Application Support/VibeRemote/MicrophoneBridge/`
   — `voice-helper.log` (decode progress), `packetlogger.log`, `packets.log`

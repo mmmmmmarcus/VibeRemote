@@ -802,8 +802,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     /// Installs the bundled VibeRemote audio driver into the system HAL plug-in directory and
-    /// restarts coreaudiod so the device appears immediately. Requires one administrator
-    /// authorization; the driver then persists across launches.
+    /// restarts coreaudiod so the device appears immediately. Prefers the privileged helper so
+    /// no administrator prompt is needed; falls back to a one-off authorization otherwise.
     func installAudioDriver(completion: (@Sendable (Bool, String?) -> Void)? = nil) {
         workQueue.async { [weak self] in
             guard let self else { return }
@@ -811,6 +811,30 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 let message = "The bundled VibeRemote audio driver is missing from this build."
                 self.setLastError(message)
                 DispatchQueue.main.async { completion?(false, message) }
+                return
+            }
+
+            if PrivilegedHelperClient.shared.state == .ready {
+                PrivilegedHelperClient.shared.installAudioDriver(fromPath: source) { [weak self] succeeded, message in
+                    guard let self else { return }
+                    if succeeded {
+                        self.appendAppLog("Installed the VibeRemote audio driver via the helper")
+                        self.workQueue.async {
+                            Thread.sleep(forTimeInterval: 2.0)
+                            let installed = self.preferredOutputDeviceName() != nil
+                            if installed { self.clearLastError() }
+                            DispatchQueue.main.async {
+                                completion?(installed, installed ? nil : "The driver was installed but no virtual audio device appeared yet.")
+                            }
+                        }
+                        return
+                    }
+                    // The helper is registered but could not do the work; surface why rather
+                    // than silently falling back to a password prompt.
+                    let failure = message ?? "The VibeRemote helper could not install the audio driver."
+                    self.setLastError(failure)
+                    DispatchQueue.main.async { completion?(false, failure) }
+                }
                 return
             }
 

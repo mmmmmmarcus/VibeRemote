@@ -360,7 +360,22 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
 
         // A prominent double-height banner pinned to the top when the bridge cannot run.
-        // Setting up the audio device comes first: the bridge needs it to play into.
+        // The helper comes first: approving it once removes the password prompts that the
+        // remaining setup steps would otherwise raise.
+        let helperState = PrivilegedHelperClient.shared.state
+        if helperState.needsUserAction {
+            menu.addItem(makeBanner(
+                symbolName: "lock.shield.fill",
+                text: helperState == .awaitingApproval ? "Approve VibeRemote Helper" : "One-time setup required",
+                buttonTitle: helperState == .awaitingApproval ? "Open Settings" : "Set Up",
+                buttonAction: helperState == .awaitingApproval
+                    ? #selector(openHelperSettings)
+                    : #selector(registerPrivilegedHelper)
+            ))
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        // Setting up the audio device comes next: the bridge needs it to play into.
         if microphoneStatus.outputDeviceName == nil {
             menu.addItem(makeBanner(
                 symbolName: "speaker.badge.exclamationmark.fill",
@@ -491,6 +506,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             submenu.addItem(NSMenuItem.separator())
         }
 
+        let helperDescription: String
+        switch PrivilegedHelperClient.shared.state {
+        case .ready: helperDescription = "Approved"
+        case .awaitingApproval: helperDescription = "Waiting for approval"
+        case .notRegistered: helperDescription = "Not set up"
+        case .unsupported: helperDescription = "Unavailable (needs macOS 13+)"
+        }
+        addInfoItem("Helper: \(helperDescription)", to: submenu)
+
         if let diagnostics {
             addInfoItem("Remote: \(diagnostics.remoteAddress ?? "Not detected")", to: submenu)
             addInfoItem("Output Device: \(diagnostics.outputDeviceName ?? "Missing")", to: submenu)
@@ -614,6 +638,29 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 self?.rebuildMenu()
             }
         }
+    }
+
+    @objc private func registerPrivilegedHelper() {
+        switch PrivilegedHelperClient.shared.register() {
+        case .success(let state):
+            rebuildMenu()
+            if state == .awaitingApproval, #available(macOS 13.0, *) {
+                // macOS shows the request in System Settings; take the user straight there.
+                PrivilegedHelperClient.shared.openLoginItemsSettings()
+            }
+        case .failure(let error):
+            rebuildMenu()
+            let alert = NSAlert()
+            alert.messageText = "Setup Failed"
+            alert.informativeText = "VibeRemote could not register its helper: \(error.localizedDescription)"
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    @objc private func openHelperSettings() {
+        guard #available(macOS 13.0, *) else { return }
+        PrivilegedHelperClient.shared.openLoginItemsSettings()
     }
 
     @objc private func installAudioDriver() {

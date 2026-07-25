@@ -95,6 +95,46 @@ else
     echo "Voice helper excluded from this bundle."
 fi
 
+# Bundle the privileged helper daemon and its launchd plist. SMAppService requires the
+# executable in Contents/MacOS and the plist in Contents/Library/LaunchDaemons, with the
+# plist's Label matching its filename and BundleProgram pointing at the executable.
+helper_daemon_binary="VibeRemoteHelper"
+helper_daemon_label="com.viberemote.helper"
+if [ "${INCLUDE_PRIVILEGED_HELPER:-1}" = "1" ] && [ -x "$helper_daemon_binary" ]; then
+    cp "$helper_daemon_binary" "${APP_BUNDLE}/Contents/MacOS/$helper_daemon_binary"
+    chmod 755 "${APP_BUNDLE}/Contents/MacOS/$helper_daemon_binary"
+    mkdir -p "${APP_BUNDLE}/Contents/Library/LaunchDaemons"
+    cat > "${APP_BUNDLE}/Contents/Library/LaunchDaemons/${helper_daemon_label}.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${helper_daemon_label}</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/${helper_daemon_binary}</string>
+	<key>MachServices</key>
+	<dict>
+		<key>${helper_daemon_label}</key>
+		<true/>
+	</dict>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>${BUNDLE_IDENTIFIER}</string>
+	</array>
+	<key>StandardOutPath</key>
+	<string>/var/log/viberemote-helper.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/viberemote-helper.log</string>
+</dict>
+</plist>
+PLIST
+    plutil -lint "${APP_BUNDLE}/Contents/Library/LaunchDaemons/${helper_daemon_label}.plist"
+    echo "Bundled privileged helper: $helper_daemon_binary"
+elif [ "${INCLUDE_PRIVILEGED_HELPER:-1}" = "1" ]; then
+    echo "Note: $helper_daemon_binary not built; the app will fall back to admin prompts."
+fi
+
 # Bundle the VibeRemote virtual audio driver so the app can install it itself. Build it
 # with ./build_audio_driver.sh; bundles without it fall back to an existing BlackHole or
 # Soundflower device and hide the in-app install action.
@@ -164,6 +204,13 @@ fi
 bundled_driver="${APP_BUNDLE}/Contents/Resources/VibeRemoteAudio.driver"
 if [ -d "$bundled_driver" ]; then
     codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$bundled_driver"
+fi
+
+bundled_helper="${APP_BUNDLE}/Contents/MacOS/VibeRemoteHelper"
+if [ -f "$bundled_helper" ]; then
+    codesign --force --options runtime "${timestamp_args[@]}" \
+        --identifier "com.viberemote.helper" \
+        --sign "$signing_identity" "$bundled_helper"
 fi
 
 codesign --force --options runtime \

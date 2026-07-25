@@ -7,11 +7,22 @@ let package = Package(
     platforms: [.macOS(.v11)],
     products: [
         .executable(name: "VibeRemote", targets: ["VibeRemote"]),
-        .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"])
+        .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"]),
+        .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
     ],
     targets: [
+        .target(
+            name: "HelperProtocol",
+            path: "HelperProtocol"
+        ),
+        .executableTarget(
+            name: "VibeRemoteHelper",
+            dependencies: ["HelperProtocol"],
+            path: "PrivilegedHelper"
+        ),
         .executableTarget(
             name: "VibeRemote",
+            dependencies: ["HelperProtocol"],
             path: ".",
             exclude: [
                 "build.sh",
@@ -24,6 +35,11 @@ let package = Package(
                 "VibeRemote.icon",
                 "Vendor",
                 "VoiceBridgeHelper",
+                "PrivilegedHelper",
+                "HelperProtocol",
+                "AudioDriver",
+                "build_audio_driver.sh",
+                "AGENTS.md",
                 "Tests",
                 "README.md",
                 "LICENSE",
@@ -35,6 +51,7 @@ let package = Package(
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
                 "MicrophoneBridgeManager.swift",
+                "PrivilegedHelperClient.swift",
                 "RemoteBatteryReader.swift",
                 "RemoteHIDChannel.swift",
                 "RemoteDetector.swift",
