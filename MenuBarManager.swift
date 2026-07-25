@@ -171,9 +171,11 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let badged = NSImage(size: size, flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             symbol.draw(in: rect)
+            // The symbol bitmap is a tight canvas: anything past its edges is clipped, so
+            // the disc must sit tangent to the corner, never overhang it.
             let r = size.width * 0.34
-            let cx = size.width - r * 0.85
-            let cy = r * 0.85
+            let cx = size.width - r
+            let cy = r
 
             // Notch a transparent moat so the badge reads as a separate element.
             ctx.setBlendMode(.clear)
@@ -352,7 +354,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
 
         // With no remote connected there is nothing to control, so show only a notice
-        // (same banner style, no button) and Quit — Status and Siri mapping are hidden.
+        // (same banner style, no button) and Quit — Debug and Siri mapping are hidden.
         guard remoteConnected else {
             menu.addItem(makeBanner(symbolName: "exclamationmark.triangle.fill", text: "Remote disconnected"))
             menu.addItem(NSMenuItem.separator())
@@ -401,11 +403,11 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         // At-a-glance lines rendered directly in the top level. Bridge run state is already
         // conveyed by the menu-bar icon and the stopped banner, so this row is a fixed
-        // "Status" entry that opens the detailed diagnostics submenu.
+        // "Debug" entry that opens the detailed diagnostics submenu.
         addInfoItem("Bluetooth: \(remoteConnected ? "Connected" : "Not Connected")", to: menu)
         addInfoItem("Battery: \(remoteBatteryPercent.map { "\($0)%" } ?? "Unknown")", to: menu)
 
-        let bridgeItem = NSMenuItem(title: "Status", action: nil, keyEquivalent: "")
+        let bridgeItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
         // A submenu may still be retained by the menu item AppKit just removed.
         // Reusing that NSMenu immediately raises "already a submenu" during rapid
         // device/status refreshes, so each rebuild gets a fresh menu instance.
