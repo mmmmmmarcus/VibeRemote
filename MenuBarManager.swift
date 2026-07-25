@@ -213,16 +213,22 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         statusItem.menu = menu
     }
 
-    /// Reflects microphone-bridge health in the menu-bar glyph: a pause badge appears
-    /// whenever the bridge is not running — with the app open, the bridge is always
-    /// meant to be running.
+    /// Badges the menu-bar glyph whenever something needs attention: the remote is
+    /// disconnected, or the bridge is not running.
     private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
-        statusItem.button?.image = Self.makeRemoteIcon(paused: !microphoneStatus.running)
+        let needsAttention = !remoteConnected || !microphoneStatus.running
+        statusItem.button?.image = Self.makeRemoteIcon(paused: needsAttention)
     }
 
-    /// A double-height menu row shown while the bridge is stopped: a pause glyph, a
-    /// "Bridge is stopped" label, and a Start button on the trailing edge.
-    private func makeBridgeStoppedBanner() -> NSMenuItem {
+    /// A double-height banner row: an SF Symbol glyph, a bold label, and an optional
+    /// trailing action button. Used for both the stopped-bridge and disconnected-remote
+    /// notices so they share one look.
+    private func makeBanner(
+        symbolName: String,
+        text: String,
+        buttonTitle: String? = nil,
+        buttonAction: Selector? = nil
+    ) -> NSMenuItem {
         let item = NSMenuItem()
         let rowHeight: CGFloat = 44
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight))
@@ -231,38 +237,45 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        icon.image = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "Bridge stopped")?
+        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: text)?
             .withSymbolConfiguration(symbolConfig)
         icon.contentTintColor = .systemOrange
 
-        let label = NSTextField(labelWithString: "Bridge is stopped")
+        let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.textColor = .labelColor
 
-        let button = NSButton(title: "Start", target: self, action: #selector(startMicrophoneBridge))
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .rounded
-        button.controlSize = .regular
-
         container.addSubview(icon)
         container.addSubview(label)
-        container.addSubview(button)
 
-        NSLayoutConstraint.activate([
+        var constraints = [
             icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
             icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 18),
             icon.heightAnchor.constraint(equalToConstant: 18),
-
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ]
 
-            button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 12),
-        ])
+        if let buttonTitle, let buttonAction {
+            let button = NSButton(title: buttonTitle, target: self, action: buttonAction)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .rounded
+            button.controlSize = .regular
+            container.addSubview(button)
+            constraints += [
+                button.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+                button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 12),
+            ]
+        } else {
+            constraints.append(
+                label.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -14)
+            )
+        }
 
+        NSLayoutConstraint.activate(constraints)
         item.view = container
         return item
     }
@@ -273,14 +286,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let microphoneStatus = microphoneBridgeManager.menuStatus()
         updateStatusIcon(microphoneStatus: microphoneStatus)
 
-        // A prominent double-height banner pinned to the very top while the bridge is
-        // stopped. It disappears the moment the bridge is running.
-        if !microphoneStatus.running {
-            menu.addItem(makeBridgeStoppedBanner())
-            menu.addItem(NSMenuItem.separator())
-        }
-
         // Permissions appear only while something still needs granting, pinned to the top.
+        // A missing permission is the real reason the remote won't connect, so it takes
+        // precedence over the disconnected notice below.
         let bluetoothNeeded = bluetoothAccessState != .allowed
         let missingPermissionCount = (inputAccessIsReady ? 0 : 1)
             + (remoteControlState == .ready ? 0 : 1)
@@ -296,6 +304,29 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 onlyRequired: true
             )
             menu.addItem(permissionsItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        // With no remote connected there is nothing to control, so show only a notice
+        // (same banner style, no button) and Quit — Status and Siri mapping are hidden.
+        guard remoteConnected else {
+            menu.addItem(makeBanner(symbolName: "exclamationmark.triangle.fill", text: "Remote disconnected"))
+            menu.addItem(NSMenuItem.separator())
+            let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+            quitItem.target = self
+            menu.addItem(quitItem)
+            return
+        }
+
+        // A prominent double-height banner pinned to the top while the bridge is stopped.
+        // It disappears the moment the bridge is running.
+        if !microphoneStatus.running {
+            menu.addItem(makeBanner(
+                symbolName: "pause.circle.fill",
+                text: "Bridge is stopped",
+                buttonTitle: "Start",
+                buttonAction: #selector(startMicrophoneBridge)
+            ))
             menu.addItem(NSMenuItem.separator())
         }
 
