@@ -9,6 +9,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
+import IOBluetooth
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -23,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mediaKeyInterceptor: MediaKeyInterceptor?
     private var consumedRemoteMediaButtons: Set<String> = []
     private var microphoneHealthTimer: Timer?
+    private var bluetoothConnectNotification: IOBluetoothUserNotification?
+    private var bluetoothBridgeRecoveryTimer: Timer?
+    private var initialBluetoothConnections: Set<String> = []
+    private var initialBluetoothConnectionTimer: Timer?
     private var inputAccessPollTimer: Timer?
     private var controlAccessPollTimer: Timer?
     private var hidDetectionStarted = false
@@ -102,10 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.menuBarManager.updateBluetoothAccessState(state)
             if state == .allowed {
                 self?.remoteHIDChannel?.startIfAuthorized()
+                self?.startBluetoothConnectionMonitoringIfAuthorized()
             }
         }
         menuBarManager.updateBluetoothAccessState(bluetoothAccessManager.state)
         remoteHIDChannel?.startIfAuthorized()
+        startBluetoothConnectionMonitoringIfAuthorized()
 
         // Configure the media-key interceptor now, but only start it after Input Monitoring
         // access is confirmed. Requesting permission is an explicit menu action.
@@ -144,6 +151,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteDetector?.stopDetection()
         hidDetectionStarted = false
         startHIDDetectionIfNeeded()
+    }
+
+    /// PacketLogger can remain alive while its local HCI capture session silently stops
+    /// forwarding Siri Remote traffic after the Bluetooth controller accepts another device.
+    /// Process and HID-registry health checks cannot see that state: remote button events keep
+    /// arriving and every PID remains valid. Observe the system's connection notification and
+    /// debounce recovery until the Bluetooth stack has finished its short reconfiguration.
+    private func startBluetoothConnectionMonitoringIfAuthorized() {
+        guard bluetoothAccessManager.state == .allowed,
+              bluetoothConnectNotification == nil else { return }
+        // IOBluetooth may immediately replay devices that were already connected when the
+        // observer registered. Seed a short-lived suppression set so app launch does not cause
+        // a needless second bridge start; genuine connections after this window still recover.
+        let pairedDevices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        initialBluetoothConnections = Set(pairedDevices.compactMap { device in
+            guard device.isConnected() else { return nil }
+            return device.addressString?.lowercased()
+        })
+        initialBluetoothConnectionTimer?.invalidate()
+        initialBluetoothConnectionTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.initialBluetoothConnections.removeAll()
+                self?.initialBluetoothConnectionTimer = nil
+            }
+        }
+        let notification = IOBluetoothDevice.register(
+            forConnectNotifications: self,
+            selector: #selector(bluetoothDeviceConnected(_:device:))
+        )
+        bluetoothConnectNotification = notification
+        rmDebug(notification == nil
+            ? "⚠️ Bluetooth connection monitoring could not be registered"
+            : "📡 Bluetooth connection monitoring started")
+    }
+
+    /// IOBluetooth does not guarantee the observer selector runs on the main thread. Hop to the
+    /// main actor before touching timers; a Timer scheduled on its callback thread may never
+    /// fire because that thread has no running RunLoop.
+    @objc nonisolated private func bluetoothDeviceConnected(
+        _ notification: IOBluetoothUserNotification,
+        device: IOBluetoothDevice
+    ) {
+        let deviceDescription = device.name ?? device.addressString ?? "Unknown Bluetooth device"
+        let address = device.addressString?.lowercased()
+        Task { @MainActor [weak self] in
+            self?.handleBluetoothDeviceConnected(
+                deviceDescription: deviceDescription,
+                address: address
+            )
+        }
+    }
+
+    private func handleBluetoothDeviceConnected(deviceDescription: String, address: String?) {
+        if let address,
+           initialBluetoothConnections.remove(address) != nil {
+            rmDebug("📡 Ignoring existing Bluetooth connection replay: \(deviceDescription)")
+            return
+        }
+        rmDebug("📡 Bluetooth device connected: \(deviceDescription); scheduling PacketLogger recovery")
+
+        bluetoothBridgeRecoveryTimer?.invalidate()
+        bluetoothBridgeRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.bluetoothBridgeRecoveryTimer = nil
+                self.microphoneBridgeManager.recoverPacketLoggerAfterBluetoothConnectionAsync(
+                    deviceDescription: deviceDescription
+                )
+            }
+        }
     }
 
     /// Records the helper's state at launch, and when it is approved verifies the XPC round
@@ -188,6 +265,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         microphoneHealthTimer?.invalidate()
         microphoneHealthTimer = nil
+        bluetoothBridgeRecoveryTimer?.invalidate()
+        bluetoothBridgeRecoveryTimer = nil
+        initialBluetoothConnectionTimer?.invalidate()
+        initialBluetoothConnectionTimer = nil
+        initialBluetoothConnections.removeAll()
+        bluetoothConnectNotification?.unregister()
+        bluetoothConnectNotification = nil
         inputAccessPollTimer?.invalidate()
         inputAccessPollTimer = nil
         controlAccessPollTimer?.invalidate()

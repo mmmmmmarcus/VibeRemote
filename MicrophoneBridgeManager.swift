@@ -920,6 +920,56 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
+    /// Recovers the live PacketLogger subscription after a Bluetooth topology change. A new
+    /// connection can leave PacketLogger, tee, and the voice helper all alive while the capture
+    /// stream no longer includes Siri Remote voice frames. Restarting the capture pipeline is
+    /// the only observed recovery. Keep this automatic path prompt-free: if the approved daemon
+    /// is unavailable or stale, leave the current bridge alone and let an explicit menu restart
+    /// retain responsibility for any administrator prompt.
+    func recoverPacketLoggerAfterBluetoothConnectionAsync(deviceDescription: String) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+
+            let enginePreference = UserDefaults.standard.string(forKey: "microphoneBridgeEngine")
+            let bridgeRunning = self.isRunningLocked()
+            guard enginePreference == "packetlogger", bridgeRunning else { return }
+
+            let helperReady = PrivilegedHelperClient.shared.state == .ready
+            let helperVersion = helperReady
+                ? self.fetchPrivilegedHelperVersion(timeout: 10)
+                : nil
+            guard Self.shouldRecoverPacketLoggerAfterBluetoothConnection(
+                enginePreference: enginePreference,
+                bridgeRunning: bridgeRunning,
+                helperReady: helperReady,
+                helperVersion: helperVersion
+            ) else {
+                self.appendAppLog(
+                    "Microphone bridge automatic recovery skipped after \(deviceDescription) connected: the approved helper is unavailable or outdated"
+                )
+                return
+            }
+
+            self.appendAppLog(
+                "Microphone bridge restarting after Bluetooth device connected: \(deviceDescription)"
+            )
+            self.stopLocked()
+            self.startPacketLoggerBridgeLocked()
+        }
+    }
+
+    static func shouldRecoverPacketLoggerAfterBluetoothConnection(
+        enginePreference: String?,
+        bridgeRunning: Bool,
+        helperReady: Bool,
+        helperVersion: Int?
+    ) -> Bool {
+        enginePreference == "packetlogger"
+            && bridgeRunning
+            && helperReady
+            && (helperVersion ?? 0) >= HelperConstants.packetLoggerCaptureMinimumVersion
+    }
+
     func startAsync(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
             self?.startLocked()

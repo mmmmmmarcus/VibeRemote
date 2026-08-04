@@ -82,6 +82,40 @@ final class ModelTests: XCTestCase {
         )
     }
 
+    func testBluetoothConnectionRecoveryOnlyUsesCurrentPromptFreePacketLoggerBridge() {
+        let currentVersion = HelperConstants.packetLoggerCaptureMinimumVersion
+        XCTAssertTrue(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+            enginePreference: "packetlogger",
+            bridgeRunning: true,
+            helperReady: true,
+            helperVersion: currentVersion
+        ))
+        XCTAssertFalse(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+            enginePreference: nil,
+            bridgeRunning: true,
+            helperReady: true,
+            helperVersion: currentVersion
+        ))
+        XCTAssertFalse(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+            enginePreference: "packetlogger",
+            bridgeRunning: false,
+            helperReady: true,
+            helperVersion: currentVersion
+        ))
+        XCTAssertFalse(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+            enginePreference: "packetlogger",
+            bridgeRunning: true,
+            helperReady: false,
+            helperVersion: currentVersion
+        ))
+        XCTAssertFalse(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+            enginePreference: "packetlogger",
+            bridgeRunning: true,
+            helperReady: true,
+            helperVersion: currentVersion - 1
+        ))
+    }
+
     func testRemoteIdentityPrefersConcreteProductNameOverLegacyProductID() {
         XCTAssertTrue(RemoteDetector.matchesSiriRemote(
             vendorID: 0x004C,
