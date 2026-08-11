@@ -127,8 +127,13 @@ final class RemoteDetector {
         IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceAddedCallback, context)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemovedCallback, context)
 
+        // IOHIDManagerOpen aggregates the result of opening every matching device, so one
+        // unrelated device that refuses to open (Magic Keyboard/Trackpad on the vendor page,
+        // observed as kIOReturnUnsupported) fails the whole call. Matching callbacks and the
+        // per-device IOHIDDeviceOpen in RemoteInputHandler do not depend on this result, so
+        // only a genuine permission denial aborts detection.
         let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard openResult == kIOReturnSuccess else {
+        guard openResult != kIOReturnNotPermitted else {
             rmDebug(String(format: "⚠️ IOHIDManagerOpen failed (IOReturn=0x%X)", openResult))
             IOHIDManagerRegisterDeviceMatchingCallback(manager, nil, nil)
             IOHIDManagerRegisterDeviceRemovalCallback(manager, nil, nil)
@@ -138,7 +143,11 @@ final class RemoteDetector {
         }
 
         isDetecting = true
-        rmDebug("🛰 IOHIDManagerOpen success")
+        if openResult == kIOReturnSuccess {
+            rmDebug("🛰 IOHIDManagerOpen success")
+        } else {
+            rmDebug(String(format: "🛰 IOHIDManagerOpen partial (IOReturn=0x%X); continuing — the remote is opened per-device", openResult))
+        }
         stateCallback?(.ready)
         IOHIDManagerScheduleWithRunLoop(
             manager,

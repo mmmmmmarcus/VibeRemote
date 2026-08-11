@@ -337,7 +337,11 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         // A missing permission is the real reason the remote won't connect, so it takes
         // precedence over the disconnected notice below.
         let bluetoothNeeded = bluetoothAccessState != .allowed
-        let missingPermissionCount = (inputAccessIsReady ? 0 : 1)
+        // .unavailable means the HID manager failed to open for a non-permission reason;
+        // there is nothing to grant, so it gets its own retry banner instead of being
+        // counted here.
+        let inputPermissionNeeded = !inputAccessIsReady && remoteInputState != .unavailable
+        let missingPermissionCount = (inputPermissionNeeded ? 1 : 0)
             + (remoteControlState == .ready ? 0 : 1)
             + (bluetoothNeeded ? 1 : 0)
         if missingPermissionCount > 0 {
@@ -351,6 +355,19 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 onlyRequired: true
             )
             menu.addItem(permissionsItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        // The HID-failure banner also stays above the disconnected guard: detection is
+        // independent of the remote's connection, and retrying it must remain reachable
+        // while the remote is offline.
+        if remoteInputState == .unavailable {
+            menu.addItem(makeBanner(
+                symbolName: "exclamationmark.triangle.fill",
+                text: "Button input unavailable",
+                buttonTitle: "Retry",
+                buttonAction: #selector(retryInputDetection)
+            ))
             menu.addItem(NSMenuItem.separator())
         }
 
@@ -477,7 +494,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             case .starting:
                 addInfoItem("Button Input: Checking...", to: submenu)
             case .unavailable:
-                addInfoItem("Button Input: Unavailable", to: submenu)
+                // Not a grantable permission; the top-level retry banner owns this state.
+                if !onlyRequired {
+                    addInfoItem("Button Input: Unavailable", to: submenu)
+                }
             case .permissionRequired:
                 addActionItem("Allow Button Input...", action: #selector(requestInputAccess), to: submenu)
             case .waitingForRemote, .ready:
@@ -821,6 +841,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     @objc private func requestInputAccess() {
         requestInputAccessHandler?()
+    }
+
+    /// Retry after a HID open failure (.unavailable). Routes through the status refresh:
+    /// the delegate re-checks Input Monitoring and re-arms detection (the failed start
+    /// already cleared its started flag), so this never raises a permission prompt.
+    @objc private func retryInputDetection() {
+        remoteInputState = .starting
+        statusRefreshHandler?()
+        rebuildMenu()
     }
 
     @objc private func requestBluetoothAccess() {
