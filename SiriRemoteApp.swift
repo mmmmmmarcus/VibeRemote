@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var consumedRemoteMediaButtons: Set<String> = []
     private var microphoneHealthTimer: Timer?
     private var bluetoothConnectNotification: IOBluetoothUserNotification?
+    /// Disconnect notifications are per-device, not global: IOBluetooth has no
+    /// `registerForDisconnectNotifications` counterpart to the class-level connect observer.
+    /// Keyed by lowercased address so a reconnect replaces its own stale observer.
+    private var bluetoothDisconnectNotifications: [String: IOBluetoothUserNotification] = [:]
     private var bluetoothBridgeRecoveryTimer: Timer?
     private var initialBluetoothConnections: Set<String> = []
     private var initialBluetoothConnectionTimer: Timer?
@@ -181,9 +185,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selector: #selector(bluetoothDeviceConnected(_:device:))
         )
         bluetoothConnectNotification = notification
+        // Devices already connected never fire the connect observer, so their disconnects
+        // would otherwise go unwatched until they reconnect once.
+        for device in pairedDevices where device.isConnected() {
+            observeDisconnect(of: device)
+        }
         rmDebug(notification == nil
             ? "⚠️ Bluetooth connection monitoring could not be registered"
             : "📡 Bluetooth connection monitoring started")
+    }
+
+    /// Arms a one-shot disconnect observer for a single connected device. IOBluetooth
+    /// invalidates the notification once it fires, so the connect handler re-arms it on the
+    /// next connection.
+    private func observeDisconnect(of device: IOBluetoothDevice) {
+        guard let address = device.addressString?.lowercased() else { return }
+        bluetoothDisconnectNotifications.removeValue(forKey: address)?.unregister()
+        guard let notification = device.register(
+            forDisconnectNotification: self,
+            selector: #selector(bluetoothDeviceDisconnected(_:device:))
+        ) else {
+            rmDebug("⚠️ Could not observe disconnects for \(device.name ?? address)")
+            return
+        }
+        bluetoothDisconnectNotifications[address] = notification
     }
 
     /// IOBluetooth does not guarantee the observer selector runs on the main thread. Hop to the
@@ -196,11 +221,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let deviceDescription = device.name ?? device.addressString ?? "Unknown Bluetooth device"
         let address = device.addressString?.lowercased()
         Task { @MainActor [weak self] in
+            self?.observeDisconnect(of: device)
             self?.handleBluetoothDeviceConnected(
                 deviceDescription: deviceDescription,
                 address: address
             )
         }
+    }
+
+    /// A disconnect reconfigures the controller exactly like a connect does, and leaves the
+    /// live capture just as silent — this is why the bridge previously needed a manual restart
+    /// after unplugging a headset or walking away with a phone. Same debounced recovery.
+    @objc nonisolated private func bluetoothDeviceDisconnected(
+        _ notification: IOBluetoothUserNotification,
+        device: IOBluetoothDevice
+    ) {
+        let deviceDescription = device.name ?? device.addressString ?? "Unknown Bluetooth device"
+        let address = device.addressString?.lowercased()
+        Task { @MainActor [weak self] in
+            self?.handleBluetoothDeviceDisconnected(
+                deviceDescription: deviceDescription,
+                address: address
+            )
+        }
+    }
+
+    private func handleBluetoothDeviceDisconnected(deviceDescription: String, address: String?) {
+        if let address {
+            // The notification is spent once it fires; the connect handler re-arms it.
+            bluetoothDisconnectNotifications.removeValue(forKey: address)
+            // A device that disconnects before the launch replay window closes never had its
+            // connect recovery run, so drop its suppression entry with it.
+            initialBluetoothConnections.remove(address)
+        }
+        rmDebug("📡 Bluetooth device disconnected: \(deviceDescription); scheduling PacketLogger recovery")
+        scheduleBridgeRecovery(reason: "\(deviceDescription) disconnected")
     }
 
     private func handleBluetoothDeviceConnected(deviceDescription: String, address: String?) {
@@ -210,14 +265,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         rmDebug("📡 Bluetooth device connected: \(deviceDescription); scheduling PacketLogger recovery")
+        scheduleBridgeRecovery(reason: "\(deviceDescription) connected")
+    }
 
+    /// Coalesces bursts of topology changes into one restart. A single user action routinely
+    /// produces several notifications (a keyboard and trackpad waking together, a headset
+    /// bringing up its profiles one at a time), and each restart costs a couple of seconds of
+    /// capture.
+    private func scheduleBridgeRecovery(reason: String) {
         bluetoothBridgeRecoveryTimer?.invalidate()
         bluetoothBridgeRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.bluetoothBridgeRecoveryTimer = nil
                 self.microphoneBridgeManager.recoverPacketLoggerAfterBluetoothConnectionAsync(
-                    deviceDescription: deviceDescription
+                    deviceDescription: reason
                 )
             }
         }
@@ -272,6 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         initialBluetoothConnections.removeAll()
         bluetoothConnectNotification?.unregister()
         bluetoothConnectNotification = nil
+        for notification in bluetoothDisconnectNotifications.values {
+            notification.unregister()
+        }
+        bluetoothDisconnectNotifications.removeAll()
         inputAccessPollTimer?.invalidate()
         inputAccessPollTimer = nil
         controlAccessPollTimer?.invalidate()

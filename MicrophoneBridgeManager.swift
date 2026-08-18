@@ -920,13 +920,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    /// Recovers the live PacketLogger subscription after a Bluetooth topology change. A new
-    /// connection can leave PacketLogger, tee, and the voice helper all alive while the capture
-    /// stream no longer includes Siri Remote voice frames. Restarting the capture pipeline is
-    /// the only observed recovery. Keep this automatic path prompt-free: if the approved daemon
-    /// is unavailable or stale, leave the current bridge alone and let an explicit menu restart
-    /// retain responsibility for any administrator prompt.
-    func recoverPacketLoggerAfterBluetoothConnectionAsync(deviceDescription: String) {
+    /// Recovers the live PacketLogger subscription after a Bluetooth topology change — a device
+    /// connecting or disconnecting. Either one can leave PacketLogger, tee, and the voice helper
+    /// all alive while the capture stream no longer includes Siri Remote voice frames. Restarting
+    /// the capture pipeline is the only observed recovery. Keep this automatic path prompt-free:
+    /// if the approved daemon is unavailable or stale, leave the current bridge alone and let an
+    /// explicit menu restart retain responsibility for any administrator prompt.
+    func recoverPacketLoggerAfterBluetoothConnectionAsync(deviceDescription reason: String) {
         workQueue.async { [weak self] in
             guard let self else { return }
 
@@ -945,13 +945,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 helperVersion: helperVersion
             ) else {
                 self.appendAppLog(
-                    "Microphone bridge automatic recovery skipped after \(deviceDescription) connected: the approved helper is unavailable or outdated"
+                    "Microphone bridge automatic recovery skipped after \(reason): the approved helper is unavailable or outdated"
                 )
                 return
             }
 
             self.appendAppLog(
-                "Microphone bridge restarting after Bluetooth device connected: \(deviceDescription)"
+                "Microphone bridge restarting after Bluetooth change: \(reason)"
             )
             self.stopLocked()
             self.startPacketLoggerBridgeLocked()

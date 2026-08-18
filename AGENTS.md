@@ -190,6 +190,19 @@ few seconds).
   `AVAudioPlayerNode` scheduleBuffer completion callback — it deadlocks. Stops
   go through `stopPlayerSafely()` on a dedicated control queue. This is why
   "works once then silent after re-press" happened before.
+- **`AVAudioEngine` stops itself on any audio-hardware reconfiguration and never
+  restarts.** Connecting or disconnecting a Bluetooth headset is exactly that (it
+  adds/removes CoreAudio devices), which is why the bridge went silent whenever
+  earbuds came or went. The failure is invisible from every angle that was being
+  checked: `scheduleBuffer` keeps accepting buffers, `player.isPlaying` keeps
+  reporting true, and the helper's "Decoded audio packets" counter keeps climbing
+  — that counter only proves the Opus decoder ran, never that anything rendered.
+  `VirtualAudioOutput` observes `.AVAudioEngineConfigurationChange` and rebuilds a
+  fresh engine pinned to the re-resolved device. Two things this must keep doing:
+  starting an engine is *itself* a configuration change, so a quiet window plus an
+  `isRunning` check is what stops the handler feeding itself (an unguarded version
+  rebuilt 21 times in 4 seconds); and the rebuild stops only the outgoing *engine*,
+  never the outgoing player node, because stopping a player is the deadlock below.
 - On start the helper skips PacketLogger's buffered replay (records older than
   launch) so a stale prior session is not re-decoded into the output device.
 - Audio format: Opus CELT-only, 48 kHz mono, 960 samples/frame, 99-byte HID
@@ -209,6 +222,15 @@ start is guaranteed silent (Direct HID engine, or PacketLogger engine with the a
 helper daemon current). Anything that would raise an administrator prompt stays behind
 the explicit `Start`/`Restart` menu action — app launch must never surprise the user
 with a password dialog.
+
+### Bluetooth topology changes
+
+`IOBluetoothDevice` offers a class-level `register(forConnectNotifications:)` but has **no
+disconnect counterpart** — disconnects must be registered per device, one object at a time.
+Missing that is why the bridge used to need a manual restart after a headset disconnected:
+nothing in the app observed it. `AppDelegate` now arms a one-shot disconnect observer on
+every device as it connects (plus everything already connected at startup, which never fires
+the connect observer), and both edges run the same debounced `scheduleBridgeRecovery`.
 
 ### The HID watchdog (silent re-enumeration)
 
