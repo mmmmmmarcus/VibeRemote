@@ -166,13 +166,71 @@ private final class OpusDecoder {
 }
 
 private final class VirtualAudioOutput {
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    private let format: AVAudioFormat
+    /// Guards `engine`/`player`, which the rebuild path replaces wholesale while the read
+    /// loop is enqueueing into them.
+    private let lock = NSLock()
+    /// Rebuilds run here so a burst of audio-hardware changes cannot overlap, and so the
+    /// retry backoff never blocks the decode loop.
+    private let controlQueue = DispatchQueue(label: "com.viberemote.voicebridge.audioControl")
+    private var engine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
+    private var rebuildInFlight = false
+    /// Starting an engine is itself an audio-hardware configuration change, so a rebuild
+    /// re-posts the very notification that triggered it. Without this quiet window the
+    /// handler feeds itself and rebuilds dozens of times per second.
+    private var quietUntil = Date.distantPast
+    /// Liveness probe for the case the notification cannot cover: an engine that reports
+    /// `isRunning` but has stopped advancing its render clock is not rendering anything.
+    private var lastRenderSampleTime: AVAudioFramePosition = -1
+    private var stalledEnqueues = 0
+    private var configurationObserver: NSObjectProtocol?
 
     init(format: AVAudioFormat) throws {
+        self.format = format
+        lock.lock()
+        defer { lock.unlock() }
+        try buildLocked()
+        // AVAudioEngine stops itself whenever the audio hardware is reconfigured, and a
+        // Bluetooth headset connecting or disconnecting is exactly that: it adds or removes
+        // CoreAudio devices. Nothing restarts the engine on its own, and the failure is
+        // completely silent — scheduleBuffer keeps accepting buffers, player.isPlaying keeps
+        // reporting true, and the decode counter keeps climbing while nothing is rendered
+        // into the virtual device. Rebuilding on this notification is mandatory for an
+        // engine that is meant to stay warm for the whole session.
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.handleConfigurationChange()
+        }
+    }
+
+    private func handleConfigurationChange() {
+        lock.lock()
+        let selfInflicted = rebuildInFlight || Date() < quietUntil
+        let running = engine.isRunning
+        lock.unlock()
+        guard !selfInflicted else { return }
+        // A configuration change that did not stop the engine needs no rebuild; the stall
+        // probe in `enqueue` still covers an engine that keeps running without rendering.
+        guard !running else { return }
+        rebuild(reason: "the audio hardware was reconfigured")
+    }
+
+    deinit {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
+    }
+
+    /// Builds a fresh engine pinned to the virtual device. The device is re-resolved by name
+    /// every time, because a CoreAudio reconfiguration can hand the same device a new ID.
+    private func buildLocked() throws {
         let (deviceID, deviceName) = try preferredOutputDevice()
-        let outputNode = engine.outputNode
-        guard let audioUnit = outputNode.audioUnit else {
+        let newEngine = AVAudioEngine()
+        guard let audioUnit = newEngine.outputNode.audioUnit else {
             throw BridgeError.audioFormat
         }
         var selectedDevice = deviceID
@@ -186,34 +244,127 @@ private final class VirtualAudioOutput {
         )
         guard status == noErr else { throw BridgeError.audioDeviceSelection(status) }
 
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        player.volume = 0.75
-        try engine.start()
+        let newPlayer = AVAudioPlayerNode()
+        newEngine.attach(newPlayer)
+        newEngine.connect(newPlayer, to: newEngine.mainMixerNode, format: format)
+        newPlayer.volume = 0.75
+        try newEngine.start()
         // Keep the player node running for the lifetime of the bridge ("keep stream
         // warm"). The Siri Remote firmware already gates the microphone to physical
         // button holds, so leaving the node warm only removes per-press start-up
         // latency; it never stops between sessions and thus can never deadlock on a
         // stop issued from a scheduleBuffer completion callback.
-        player.play()
+        newPlayer.play()
+
+        let previousEngine = engine
+        engine = newEngine
+        player = newPlayer
+        // Only the engine is stopped, never the outgoing player node: stopping a player is
+        // the documented deadlock in this file, and stopping its engine already tears the
+        // node down. Buffers still scheduled on the old node are abandoned by design.
+        previousEngine.stop()
+        lastRenderSampleTime = -1
+        stalledEnqueues = 0
+        quietUntil = Date().addingTimeInterval(1.5)
         log("Output device set to: \(deviceName)")
     }
 
-    func voiceStarted() {
-        if !player.isPlaying {
-            player.play()
+    /// Rebuilds off the caller's thread, retrying because the virtual device can be briefly
+    /// absent while CoreAudio settles after a device is added or removed.
+    private func rebuild(reason: String) {
+        lock.lock()
+        if rebuildInFlight {
+            lock.unlock()
+            return
+        }
+        rebuildInFlight = true
+        lock.unlock()
+
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            var rebuilt = false
+            for attempt in 1...5 {
+                self.lock.lock()
+                do {
+                    try self.buildLocked()
+                    rebuilt = true
+                } catch {
+                    log("Audio engine rebuild attempt \(attempt) failed: \(error.localizedDescription)")
+                }
+                self.lock.unlock()
+                if rebuilt { break }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            self.lock.lock()
+            self.rebuildInFlight = false
+            self.lock.unlock()
+            log(rebuilt
+                ? "Audio engine rebuilt after \(reason)"
+                : "Audio engine could not be rebuilt after \(reason); the bridge is silent")
         }
     }
 
+    func voiceStarted() {
+        restartIfStopped()
+    }
+
     func enqueue(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let engine = self.engine
+        let player = self.player
+        lock.unlock()
+
+        // Backstop for any reconfiguration that does not post the notification. Dropping the
+        // frames decoded during a rebuild costs 20 ms each and beats scheduling them into an
+        // engine that will never render them.
+        guard engine.isRunning else {
+            rebuild(reason: "the audio engine was found stopped")
+            return
+        }
         if !player.isPlaying {
             player.play()
+        }
+        if stalledRenderClock(of: player) {
+            rebuild(reason: "the audio engine stopped advancing its render clock")
+            return
         }
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: nil)
     }
 
     func voiceEnded() {
         // The output stream stays warm between voice sessions; nothing to tear down.
+    }
+
+    /// True once half a second of frames have been handed to a player whose render clock has
+    /// not moved. One frame is 20 ms, so this tolerates ordinary jitter and still reacts well
+    /// inside a single button hold.
+    private func stalledRenderClock(of player: AVAudioPlayerNode) -> Bool {
+        guard let renderTime = player.lastRenderTime, renderTime.isSampleTimeValid else {
+            return false
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if renderTime.sampleTime != lastRenderSampleTime {
+            lastRenderSampleTime = renderTime.sampleTime
+            stalledEnqueues = 0
+            return false
+        }
+        stalledEnqueues += 1
+        return stalledEnqueues >= 25
+    }
+
+    private func restartIfStopped() {
+        lock.lock()
+        let engine = self.engine
+        let player = self.player
+        lock.unlock()
+        guard engine.isRunning else {
+            rebuild(reason: "the audio engine was found stopped")
+            return
+        }
+        if !player.isPlaying {
+            player.play()
+        }
     }
 }
 
