@@ -60,9 +60,15 @@ enum ButtonAction: String, CaseIterable, Sendable {
     }
 
     var actionDescription: String {
-        self == .slashOrModifier
-            ? "Skill Picker: $ in ChatGPT / Codex, / in Claude; Hold: Modifier"
-            : rawValue
+        switch self {
+        case .slashOrModifier:
+            return "Skill Picker: $ in ChatGPT / Codex, / in Claude; Hold: Modifier"
+        case .bulletIndent:
+            return "Codex: create a list or indent the current item"
+        case .bulletOutdent:
+            return "Codex: outdent or remove the current list item"
+        default: return rawValue
+        }
     }
 }
 

@@ -5,6 +5,24 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
+    func testConnectionInputGateIsPerRemoteAndExtendsAcrossInterfaces() {
+        var gate = RemoteConnectionInputGate()
+        gate.arm(deviceKey: "old", now: 10)
+        XCTAssertTrue(gate.isBlocked(deviceKey: "old", now: 11.99))
+        XCTAssertFalse(gate.isBlocked(deviceKey: "new", now: 11))
+
+        // A second interface belonging to the same physical remote arrives later.
+        gate.arm(deviceKey: "old", now: 11.5)
+        XCTAssertTrue(gate.isBlocked(deviceKey: "old", now: 13.49))
+        XCTAssertFalse(gate.isBlocked(deviceKey: "old", now: 13.5))
+
+        gate.arm(deviceKey: "old", now: 20)
+        gate.arm(deviceKey: "new", now: 20.5)
+        gate.removeAll()
+        XCTAssertFalse(gate.isBlocked(deviceKey: "old", now: 20.6))
+        XCTAssertFalse(gate.isBlocked(deviceKey: "new", now: 20.6))
+    }
+
     func testVolumeSuppressionCoversHoldReleaseAndMissingRelease() {
         var state = RemoteVolumeSuppression()
         let start = Date(timeIntervalSince1970: 100)
@@ -130,6 +148,8 @@ final class ModelTests: XCTestCase {
         controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: .glassTouchSurface))
         frame.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let oldControls = descendants(frame).compactMap { $0 as? NSPopUpButton }
+        XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), Set(["back", "select", "tv", "siri", "playPause", "volumeUp", "volumeDown"]))
         let tv = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "tv" })
         let playPause = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "playPause" })
         XCTAssertEqual(tv.titleOfSelectedItem, ButtonAction.shiftEnterOrModifier.settingsTitle)
@@ -144,7 +164,8 @@ final class ModelTests: XCTestCase {
         // Optional offscreen render for visual comparison. It never orders a window
         // onto the user's desktop or starts any HID/audio services.
         if let output = ProcessInfo.processInfo.environment["VIBEREMOTE_SETTINGS_RENDER"] {
-            controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt))
+            for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: generation))
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                 window.appearance = NSAppearance(named: appearance)
                 frame.layoutSubtreeIfNeeded()
@@ -154,12 +175,27 @@ final class ModelTests: XCTestCase {
                     frame.cacheDisplay(in: frame.bounds, to: bitmap)
                 }
                 let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                try png.write(to: URL(fileURLWithPath: "\(output)-\(name).png"))
+                try png.write(to: URL(fileURLWithPath: "\(output)-\(generation == .glassTouchSurface ? "first" : "new")-\(name).png"))
+            }
             }
         }
         window.close()
         XCTAssertTrue(controller.window === window)
         XCTAssertFalse(window.isReleasedWhenClosed)
+    }
+
+    func testSettingsArtworkAndButtonLayoutsRemainGenerationSpecific() throws {
+        let old = RemoteSettingsLayout(generation: .glassTouchSurface)
+        let newer = RemoteSettingsLayout(generation: .aluminumClickpad)
+        XCTAssertNotEqual(old.resourceName, newer.resourceName)
+        for layout in [old, newer] {
+            XCTAssertNotNil(SettingsAssets.bundle.url(forResource: layout.resourceName, withExtension: "png"))
+        }
+        XCTAssertEqual(old.left.map(\.key), ["back", "siri", "playPause"])
+        XCTAssertEqual(old.right.map(\.key), ["select", "tv", "volumeUp", "volumeDown"])
+        XCTAssertEqual(old.left.map(\.centerY), Array(old.right.dropFirst()).map(\.centerY))
+        XCTAssertTrue(newer.left.contains { $0.key == "mute" })
+        XCTAssertTrue(newer.right.contains { $0.key == "power" })
     }
 
     func testSettingsNeverShowAStaleBatteryAsAConnection() {

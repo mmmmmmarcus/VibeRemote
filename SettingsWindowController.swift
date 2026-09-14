@@ -32,6 +32,34 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
     }
 }
 
+/// Coordinates are measured from the top of each generation's 398-point artwork.
+/// Keep images and callouts together: hiding new-remote buttons is not an old layout.
+struct RemoteSettingsLayout {
+    struct Callout: Identifiable {
+        let key: String
+        let centerY: CGFloat
+        var id: String { key }
+    }
+    let resourceName: String
+    let artworkWidth: CGFloat
+    let left: [Callout]
+    let right: [Callout]
+
+    init(generation: RemoteGeneration) {
+        if generation == .glassTouchSurface {
+            resourceName = "SiriRemoteFirstGeneration"
+            artworkWidth = 123
+            left = [.init(key: "back", centerY: 149), .init(key: "siri", centerY: 201), .init(key: "playPause", centerY: 252)]
+            right = [.init(key: "select", centerY: 70), .init(key: "tv", centerY: 149), .init(key: "volumeUp", centerY: 201), .init(key: "volumeDown", centerY: 252)]
+        } else {
+            resourceName = "SiriRemote"
+            artworkWidth = 104
+            left = [.init(key: "back", centerY: 146), .init(key: "playPause", centerY: 192), .init(key: "mute", centerY: 238)]
+            right = [.init(key: "power", centerY: 18), .init(key: "siri", centerY: 82), .init(key: "tv", centerY: 144), .init(key: "volumeUp", centerY: 186), .init(key: "volumeDown", centerY: 236)]
+        }
+    }
+}
+
 extension ButtonAction {
     var settingsTitle: String {
         switch self {
@@ -70,7 +98,7 @@ private final class RemoteSettingsModel: ObservableObject {
 /// Retained after closing: repeated menu clicks bring the same window forward. A
 /// standard AppKit window/toolbar hosts SwiftUI content without changing LSUIElement.
 @MainActor
-final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
+final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
     private static let resetIdentifier = NSToolbarItem.Identifier("VibeRemote.ResetSettings")
     private let model: RemoteSettingsModel
     private let setSiriAction: (ButtonAction) -> Void
@@ -92,6 +120,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
             defer: false
         )
         super.init(window: window)
+        window.delegate = self
         window.title = "Vibe Remote"
         window.identifier = NSUserInterfaceItemIdentifier("VibeRemote.Settings")
         window.isReleasedWhenClosed = false
@@ -117,11 +146,18 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
     required init?(coder: NSCoder) { nil }
 
     func show() {
+        NSApp.setActivationPolicy(.regular)
         showWindow(nil)
         window?.deminiaturize(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         rmDebug("⚙️ Settings window visible=\(window?.isVisible == true)")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // Keep the Dock entry while minimized so it can restore Settings, but return
+        // to menu-bar-only operation when the retained settings window is closed.
+        NSApp.setActivationPolicy(.accessory)
     }
 
     func update(_ snapshot: RemoteSettingsSnapshot) {
@@ -164,41 +200,19 @@ private struct RemoteSettingsView: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
 
-    // The annotation rows follow the physical buttons in the supplied photograph.
-    // Flowing columns preserve native control widths; only the artwork is cropped in
-    // its view, leaving the downloaded source image unchanged.
+    private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: model.snapshot.generation) }
+
     var body: some View {
         VStack(spacing: 36) {
             HStack(alignment: .top, spacing: 0) {
-                VStack(spacing: 0) {
-                    Spacer().frame(height: 128)
-                    mapping("back", side: .left)
-                    Spacer().frame(height: 10)
-                    mapping("playPause", side: .left)
-                    Spacer().frame(height: 10)
-                    mapping("mute", side: .left)
-                    Spacer(minLength: 0)
-                }
-                .frame(height: 398)
-
-                RemoteArtwork()
-                    .frame(width: 104, height: 398)
-                    .accessibilityLabel("Siri Remote")
-                    .help("Clickpad: arrow keys. Press the center for Enter. Hold the side Siri button while speaking.")
-
-                VStack(spacing: 0) {
-                    mapping("power", side: .right)
-                    Spacer().frame(height: 28)
-                    mapping("siri", side: .right)
-                    Spacer().frame(height: 26)
-                    mapping("tv", side: .right)
-                    Spacer().frame(height: 6)
-                    mapping("volumeUp", side: .right)
-                    Spacer().frame(height: 14)
-                    mapping("volumeDown", side: .right)
-                    Spacer(minLength: 0)
-                }
-                .frame(height: 398)
+                callouts(layout.left, side: .left)
+                RemoteArtwork(generation: model.snapshot.generation)
+                    .frame(width: layout.artworkWidth, height: 398)
+                    .accessibilityLabel(model.snapshot.generation.displayName)
+                    .help(model.snapshot.generation == .glassTouchSurface
+                          ? "Press the touch surface for Enter. Hold the microphone button below Menu while speaking."
+                          : "Clickpad: arrow keys. Press the center for Enter. Hold the side Siri button while speaking.")
+                callouts(layout.right, side: .right)
             }
             .padding(.top, 40)
 
@@ -218,6 +232,17 @@ private struct RemoteSettingsView: View {
     }
 
     private enum Side { case left, right }
+
+    private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(items) { item in
+                mapping(item.key, side: side)
+                    .offset(y: item.centerY - 18)
+            }
+        }
+        .frame(width: 236, height: 398, alignment: .topLeading)
+    }
+
 
     private func mapping(_ key: String, side: Side) -> some View {
         let descriptor = remoteButtonDescriptors.first { $0.key == key }!
@@ -243,12 +268,26 @@ private struct RemoteSettingsView: View {
 /// white canvas. Native image drawing also renders reliably in offscreen previews.
 @MainActor
 private struct RemoteArtwork: NSViewRepresentable {
+    let generation: RemoteGeneration
     func makeNSView(context: Context) -> ArtworkView { ArtworkView() }
-    func updateNSView(_ nsView: ArtworkView, context: Context) {}
+    func updateNSView(_ nsView: ArtworkView, context: Context) {
+        nsView.configure(generation: generation)
+    }
 
     final class ArtworkView: NSView {
-        private let image: NSImage? = SettingsAssets.bundle.url(forResource: "SiriRemote", withExtension: "png")
-            .flatMap { NSImage(contentsOf: $0) }
+        private var resourceName = ""
+        private var image: NSImage?
+        private var isFirstGeneration = false
+
+        func configure(generation: RemoteGeneration) {
+            let layout = RemoteSettingsLayout(generation: generation)
+            guard resourceName != layout.resourceName else { return }
+            resourceName = layout.resourceName
+            isFirstGeneration = generation == .glassTouchSurface
+            image = SettingsAssets.bundle.url(forResource: resourceName, withExtension: "png")
+                .flatMap { NSImage(contentsOf: $0) }
+            needsDisplay = true
+        }
 
         override var intrinsicContentSize: NSSize { NSSize(width: 104, height: 398) }
 
@@ -256,6 +295,10 @@ private struct RemoteArtwork: NSViewRepresentable {
             super.draw(dirtyRect)
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1.2, dy: 1.5), xRadius: 21, yRadius: 21).addClip()
             NSGraphicsContext.current?.imageInterpolation = .high
+            if isFirstGeneration {
+                image?.draw(in: bounds)
+                return
+            }
             image?.draw(in: NSRect(
                 x: (bounds.width - 476) / 2,
                 y: (bounds.height - 476) / 2,

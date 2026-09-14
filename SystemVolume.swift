@@ -73,6 +73,27 @@ struct RemoteVolumeSuppression {
     }
 }
 
+/// Per-physical-remote settling window. Opening one remote creates several HID interfaces;
+/// each arrival extends the same key instead of globally disabling another paired remote.
+struct RemoteConnectionInputGate {
+    private var blockedUntil: [String: TimeInterval] = [:]
+
+    mutating func arm(deviceKey: String, now: TimeInterval, duration: TimeInterval = 2) {
+        blockedUntil[deviceKey] = max(blockedUntil[deviceKey] ?? 0, now + duration)
+    }
+
+    mutating func isBlocked(deviceKey: String, now: TimeInterval) -> Bool {
+        guard let deadline = blockedUntil[deviceKey] else { return false }
+        if now < deadline { return true }
+        blockedUntil.removeValue(forKey: deviceKey)
+        return false
+    }
+
+    mutating func removeAll() {
+        blockedUntil.removeAll()
+    }
+}
+
 /// Reverts AVRCP-origin volume changes caused by the Siri Remote's volume buttons.
 ///
 /// Design: a CoreAudio listener continuously tracks system volume. It maintains a
@@ -93,6 +114,7 @@ final class VolumeRevertGuard {
 
     private var baselineVolume: Float?
     private var suppression = RemoteVolumeSuppression()
+    private var connectionSuppressedUntil = Date.distantPast
     private let settleDelay: TimeInterval = 0.15
     private var pendingSettle: DispatchWorkItem?
     private var volumeListener: AudioObjectPropertyListenerBlock?
@@ -127,8 +149,24 @@ final class VolumeRevertGuard {
         }
     }
 
+    /// A newly attached Siri Remote can replay stale AVRCP volume state before its HID
+    /// interfaces settle. Keep the already-warm baseline and reject changes throughout the
+    /// same startup window used by RemoteInputHandler.
+    func beginRemoteConnectionQuarantine(duration: TimeInterval = 2) {
+        guard isActive else { return }
+        connectionSuppressedUntil = max(connectionSuppressedUntil, Date().addingTimeInterval(duration))
+        if pendingSettle != nil, let baselineValue = baselineVolume {
+            pendingSettle?.cancel()
+            pendingSettle = nil
+            SystemVolume.set(baselineValue)
+        }
+        rmDebug("🔊 Remote connection quarantine armed for \(String(format: "%.1f", duration))s")
+    }
+
     func suppressesMediaKey(_ button: String) -> Bool {
-        isActive && suppression.contains(button, now: Date())
+        guard isActive, button == "volumeUp" || button == "volumeDown" else { return false }
+        let now = Date()
+        return now < connectionSuppressedUntil || suppression.contains(button, now: now)
     }
 
     func releaseRemoteButtons() {
@@ -143,6 +181,7 @@ final class VolumeRevertGuard {
         pendingSettle?.cancel()
         pendingSettle = nil
         suppression = RemoteVolumeSuppression()
+        connectionSuppressedUntil = .distantPast
         removeVolumeListener()
 
         if let listener = defaultOutputListener {
@@ -262,7 +301,8 @@ final class VolumeRevertGuard {
             return
         }
         let baselineStr = baselineVolume.map { String(format: "%.3f", $0) } ?? "nil"
-        let inWindow = suppression.isActive(now: Date())
+        let now = Date()
+        let inWindow = now < connectionSuppressedUntil || suppression.isActive(now: now)
         rmDebug("🔊 listener: current=\(String(format: "%.3f", current)) baseline=\(baselineStr) inGuard=\(inWindow)")
 
         // Our own revert write echoes back as a listener callback; noop when it matches.

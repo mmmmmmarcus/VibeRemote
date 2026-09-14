@@ -75,10 +75,11 @@ let package = Package(
                 "RemoteDetector.swift",
                 "RemoteGeneration.swift",
                 "RemoteInputHandler.swift",
+                "ListEditingController.swift",
                 "MediaKeyInterceptor.swift",
                 "SystemVolume.swift"
             ],
-            resources: [.copy("Resources/SiriRemote.png")],
+            resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),

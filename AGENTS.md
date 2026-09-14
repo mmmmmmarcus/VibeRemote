@@ -6,8 +6,8 @@ platform behavior that is easy to break.
 
 ## What this project is
 
-VibeRemote is an experimental macOS **menu-bar app** (`LSUIElement`, no dock
-icon) that:
+VibeRemote is an experimental macOS **menu-bar app** (`LSUIElement`, Dock icon
+shown while Settings is open) that:
 
 - Maps Apple Siri Remote buttons to keyboard actions, aimed at driving AI agent apps
   (arrows, Enter, Shift+Enter, Backspace, bullet-list control, app switching).
@@ -30,6 +30,7 @@ shared library target and shell scripts that build the audio driver and assemble
 | `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vibeRemoteLogPath` and `rmDebug`. |
 | `RemoteGeneration.swift` | Tells the 1st-gen remote from the 2nd/3rd-gen one and holds every behavioral difference between them. |
 | `RemoteInputHandler.swift` | Opens HID interfaces, maps buttons, sends synthetic key events, performs the `0xAF` input-enable Feature write. |
+| `ListEditingController.swift` | Reads the focused editor through AX and plans native list/indent commands without rewriting its text. |
 | `RemoteHIDChannel.swift` | Direct HID-over-GATT (CoreBluetooth) path — see caveats below. |
 | `RemoteBatteryReader.swift` | Battery level via IOBluetooth/CoreBluetooth. |
 | `BluetoothAccessManager.swift` | Bluetooth TCC authorization state. |
@@ -148,6 +149,29 @@ Mappings are **fixed by design** — `remoteButtonDescriptors` in `MenuBarManage
 single source of truth. Only the **Siri button** is user-customizable (persisted under the
 `siriButtonAction` default); everything else remains fixed.
 
+Every physical remote gets a two-second input quarantine when its HID interfaces open.
+`RemoteConnectionInputGate` keys it by `deviceKey`, so connecting one generation does not
+disable an already-stable remote of the other generation; later interfaces for the same
+remote extend its deadline. Suppressed HID transitions update `buttonState` but perform no
+mapping or microphone action. The same opening event arms `VolumeRevertGuard` so AVRCP/media
+volume changes that bypass HID mappings are consumed and reverted to the warm baseline.
+Do not implement this only as a delay in button dispatch: that leaves system volume exposed.
+
+The settings artwork and callout placement must support **two distinct physical
+layouts**. First generation uses the user's supplied `Resources/SiriRemoteFirstGeneration.png`:
+Menu / TV on the upper button row, microphone / volume-up on the middle row,
+Play/Pause / volume-down below, and touch-surface press = Enter. Second/third
+generation retains `Resources/SiriRemote.png` with its own Power, side-Siri and Mute
+positions. `RemoteSettingsLayout` selects both artwork and callout coordinates from
+the snapshot generation. Never reuse the aluminum photo with hidden controls as the
+first-generation layout. Both resources must be bundled; verify light/dark rendering
+and switching generations in the same settings window. Only Siri is editable in either
+layout; preserve the first-generation TV and Play/Pause composite actions.
+
+Opening Settings switches the app's activation policy to `.regular` so its Dock icon
+appears. Closing the window restores `.accessory`; minimizing keeps the Dock icon so
+the user can restore the window. Keep `LSUIElement` for menu-bar-only launch.
+
 The menu bar's **Settings…** entry opens one retained window, even with the remote
 disconnected. Only the Siri pop-up edits a mapping; the other pop-ups explain the fixed
 actions. Reset only restores the Siri mapping. Window state comes from `MenuBarManager`
@@ -171,16 +195,30 @@ tap/long-press are therefore synthesized in `RemoteInputHandler`:
 
 - `beginRepeating` drives auto-repeat (Backspace, arrows) with a safety tick cap in case a
   release event is ever dropped.
-- `beginTapOrLongPress` distinguishes a tap from a hold (volume-up: tap indents, long-press
-  starts a bullet). Timers are torn down on release and on disconnect.
+- Volume keys share one smart-list path across both remote generations. On button-down,
+  they schedule one action after a short delay; do not dispatch Cmd+Shift+8 synchronously
+  from the volume release callback because Codex drops it. `ListEditingController` reads
+  the focused Codex editor's value, selection, caret hierarchy and attributed list markers.
+  Volume-up creates a list from a paragraph or indents a list item; volume-down outdents a
+  list item (the editor removes the list at its outer edge). It invokes Codex's native
+  Cmd+Shift+8 / Tab / Shift+Tab commands so text, formatting, selection and undo remain
+  editor-owned. It never rewrites the AX value or keeps remembered list state. Composing
+  text, multi-paragraph selections, code blocks, unsupported apps, timeouts and ambiguous
+  AX results use a bounded per-focused-editor fallback because current Codex builds flatten
+  ProseMirror structure: the first volume-up creates a list, subsequent volume-up taps
+  indent it, and volume-down walks out/removes it. This fallback exists to keep short press
+  functional. A tap and a hold both fire exactly once; long press must never be required
+  for normal list use.
+- `beginTapOrLongPress` distinguishes a tap from a hold for the remaining composite
+  actions. Timers are torn down on release and on disconnect.
 - `beginModifierHold` / `resolveModifierRelease` make the mute button a tap-or-modifier
   key: a quick release types "/", a hold arms the chords in `modifierChord(for:)` (chorded
   buttons skip their normal action entirely, including auto-repeat). Concurrent presses are
   safe: the firmware reports buttons as independent HID events, verified with overlapping
   press intervals in real logs (mute held + playPause both delivered).
-- An earlier attempt tracked bullet-list "context" to decide between `- ` and Tab. It was
-  unreliable (any manual typing or focus change desynced it) and was replaced by this
-  deterministic tap/hold model. Don't reintroduce blind state tracking of editor content.
+- An earlier attempt remembered bullet-list "context" after a press. It was unreliable
+  because manual typing, cursor moves and focus changes desynchronized it. Always observe
+  the current editor at the instant of the action; do not reintroduce cached editor state.
 
 ## Microphone bridge — critical architecture notes
 

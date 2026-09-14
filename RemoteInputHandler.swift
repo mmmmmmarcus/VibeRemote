@@ -97,6 +97,8 @@ final class RemoteInputHandler {
     /// user changes that button's mapping before letting go.
     private var heldKeys: [String: (keyCode: Int, flags: CGEventFlags)] = [:]
     private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags, text: String?)] = [:]
+    private let listEditingController = ListEditingController()
+    private var connectionInputGate = RemoteConnectionInputGate()
 
     /// Last observed pressed/released state per logical button. A Siri Remote may mirror a
     /// button over multiple HID interfaces, so this collapses duplicates into one transition.
@@ -166,7 +168,13 @@ final class RemoteInputHandler {
             CFRunLoopMode.commonModes.rawValue
         )
         devices[interfaceID] = device
-        interfaceDescriptors[interfaceID] = descriptor(for: device)
+        let openedDescriptor = descriptor(for: device)
+        interfaceDescriptors[interfaceID] = openedDescriptor
+        connectionInputGate.arm(
+            deviceKey: openedDescriptor.deviceKey,
+            now: ProcessInfo.processInfo.systemUptime
+        )
+        VolumeRevertGuard.shared.beginRemoteConnectionQuarantine()
         let service = IOHIDDeviceGetService(device)
         if service != IO_OBJECT_NULL {
             var registryID: UInt64 = 0
@@ -483,6 +491,7 @@ final class RemoteInputHandler {
         }
         releaseAllHeldKeys()
         releaseAllPendingTapKeys()
+        connectionInputGate.removeAll()
         refreshGeneration()
     }
 
@@ -616,6 +625,18 @@ final class RemoteInputHandler {
 
         // Collapse mirrored-interface duplicates: only proceed on a real state transition.
         let isPressed = intValue != 0
+        if let interfaceID,
+           let deviceKey = interfaceDescriptors[interfaceID]?.deviceKey,
+           connectionInputGate.isBlocked(
+               deviceKey: deviceKey,
+               now: ProcessInfo.processInfo.systemUptime
+           ) {
+            // Remember the observed state so a held stale press cannot become a fresh action
+            // when its release lands just after the quarantine expires.
+            buttonState[buttonName] = isPressed
+            rmDebug("🛡 Connection quarantine suppressed \(buttonName) \(isPressed ? "down" : "up")")
+            return
+        }
         if buttonState[buttonName] == isPressed {
             return
         }
@@ -763,14 +784,13 @@ final class RemoteInputHandler {
         case .launchAgentClient:
             toggleAgentClient()
         case .bulletIndent:
-            // Tap = indent (Tab); long-press = turn the current line into a bullet ("- ").
-            beginTapOrLongPress(
-                button: button,
-                tap: { [weak self] in self?.sendKey(kVK_Tab) },
-                longPress: { [weak self] in self?.sendBulletMarker() }
-            )
+            // Dispatch just after the physical down event. Codex drops Cmd+Shift+8 when
+            // it is posted synchronously from the volume-button release callback; this
+            // short delay runs while an ordinary tap is still settling and fires once for
+            // both a tap and a hold.
+            scheduleListAction(.increase)
         case .bulletOutdent:
-            sendKey(kVK_Tab, flags: .maskShift)
+            scheduleListAction(.decrease)
         case .slashOrModifier:
             // Quick tap types the focused app's skill-picker trigger; holding
             // arms the button as a modifier for the chords in `modifierChord(for:)`.
@@ -984,10 +1004,15 @@ final class RemoteInputHandler {
         modifierTapActions.removeAll()
     }
 
-    /// "- " + space is the markdown input rule that turns the current line into a bullet.
-    private func sendBulletMarker() {
-        sendKey(kVK_ANSI_Minus)
-        sendKey(kVK_Space)
+    private func performListAction(_ direction: ListEditingDirection) {
+        guard let command = listEditingController.command(direction) else { return }
+        sendKey(command.key.code, flags: command.key.flags)
+    }
+
+    private func scheduleListAction(_ direction: ListEditingDirection) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.performListAction(direction)
+        }
     }
 
     /// Bundle identifiers of the agent desktop clients this remote can summon.
