@@ -64,6 +64,7 @@ let package = Package(
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
+                "SettingsWindowController.swift",
                 "MicrophoneBridgeManager.swift",
                 "PrivilegedHelperClient.swift",
                 "RemoteBatteryReader.swift",
@@ -73,6 +74,7 @@ let package = Package(
                 "MediaKeyInterceptor.swift",
                 "SystemVolume.swift"
             ],
+            resources: [.copy("Resources/SiriRemote.png")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),

@@ -7,6 +7,14 @@
 
 import AppKit
 
+enum RemoteStatusBadge: Equatable, Sendable {
+    case none, paused, disconnected
+
+    init(remoteConnected: Bool, bridgeRunning: Bool) {
+        self = !remoteConnected ? .disconnected : (bridgeRunning ? .none : .paused)
+    }
+}
+
 enum ButtonAction: String, CaseIterable, Sendable {
     case enterKey = "Enter: Submit prompt"
     case shiftEnter = "Shift + Enter: Newline"
@@ -23,6 +31,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case launchAgentClient = "Toggle Codex / Claude Desktop"
     case bulletIndent = "Bullet: New / Indent"
     case bulletOutdent = "Bullet: Outdent / Remove"
+    // Keep the persisted raw value stable for existing Siri-button assignments.
     case slashOrModifier = "Slash: Skill Picker / Hold: Modifier"
     case none = "None"
 
@@ -33,6 +42,12 @@ enum ButtonAction: String, CaseIterable, Sendable {
         default:
             return false
         }
+    }
+
+    var actionDescription: String {
+        self == .slashOrModifier
+            ? "Skill Picker: $ in ChatGPT / Codex, / in Claude; Hold: Modifier"
+            : rawValue
     }
 }
 
@@ -54,7 +69,8 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
 // - TV              → Shift+Enter (newline; the convention most agent apps use)
 // - Play/Pause      → toggle the Codex / Claude desktop client to the front
 // - Power           → Enter
-// - Mute            → tap types "/" (skill/command pickers); held it becomes a modifier:
+// - Mute            → tap opens the focused app's skill picker ($ in Codex, / otherwise);
+//                     held it becomes a modifier:
 //                     Mute+Back clears all input, Mute+Play/Pause sends Esc
 // - Siri            → Space (held; drives voice dictation and the mic bridge)
 let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
@@ -113,6 +129,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private var diagnosticsMenu = NSMenu()
+    private var settingsWindowController: SettingsWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
     /// Fixed, non-customizable button-to-action map built from `remoteButtonDescriptors`.
@@ -154,17 +171,17 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         setupMenuBar()
     }
 
-    /// The menu-bar glyph: the Apple TV remote SF Symbol, with a pause badge notched into
-    /// the bottom-right corner when `paused` (remote disconnected or bridge stopped). Falls
+    /// The menu-bar glyph: the Apple TV remote SF Symbol, with a status badge notched into
+    /// the bottom-right corner (slash for disconnected, pause for bridge stopped). Falls
     /// back to a hand-drawn remote if the symbol is unavailable (older macOS). The image
     /// stays a template so macOS keeps tinting it for light/dark menu bars.
-    private static func makeRemoteIcon(paused: Bool = false) -> NSImage {
+    static func makeRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
         guard let symbol = NSImage(systemSymbolName: "appletvremote.gen4", accessibilityDescription: "VibeRemote")?
             .withSymbolConfiguration(config) else {
-            return makeFallbackRemoteIcon(paused: paused)
+            return makeFallbackRemoteIcon(badge: badge)
         }
-        guard paused else {
+        guard badge != .none else {
             symbol.isTemplate = true
             return symbol
         }
@@ -181,6 +198,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             // Notch a transparent moat so the badge reads as a separate element.
             ctx.setBlendMode(.clear)
             ctx.fillEllipse(in: CGRect(x: cx - r * 1.2, y: cy - r * 1.2, width: r * 2.4, height: r * 2.4))
+
+            if badge == .disconnected {
+                ctx.setBlendMode(.normal)
+                drawDisconnectedBadge(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+                return true
+            }
 
             // Solid (tinted) badge disc.
             ctx.setBlendMode(.normal)
@@ -202,7 +225,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     }
 
     /// Hand-drawn remote used only when the SF Symbol is unavailable.
-    private static func makeFallbackRemoteIcon(paused: Bool = false) -> NSImage {
+    private static func makeFallbackRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
         let pt: CGFloat = 18
         let image = NSImage(size: NSSize(width: pt, height: pt), flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
@@ -220,7 +243,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             ctx.addPath(path)
             ctx.fillPath()
 
-            if paused {
+            if badge != .none {
                 let cx = 0.72 * s
                 let cy = 0.74 * s
                 let badgeR = 0.23 * s
@@ -230,6 +253,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 // where it overlaps the remote body.
                 ctx.setBlendMode(.clear)
                 ctx.fillEllipse(in: CGRect(x: cx - moatR, y: cy - moatR, width: 2 * moatR, height: 2 * moatR))
+
+                if badge == .disconnected {
+                    ctx.setBlendMode(.normal)
+                    drawDisconnectedBadge(in: CGRect(x: cx - badgeR, y: cy - badgeR, width: 2 * badgeR, height: 2 * badgeR))
+                    return true
+                }
 
                 // Solid (tinted) badge disc.
                 ctx.setBlendMode(.normal)
@@ -251,6 +280,39 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return image
     }
 
+    static let disconnectedBadgeImage: NSImage? = {
+        // alignmentRect describes typographic alignment, not visible artwork: for this
+        // symbol it is 18 x 10.5 inside an 18 x 17 canvas. Drawing that rect into a square
+        // stretches the badge at menu-bar size. Rasterize once at 4x, trim only transparent
+        // pixels, and retain the artwork's aspect ratio at every destination scale.
+        let config = NSImage.SymbolConfiguration(pointSize: 60, weight: .regular)
+        guard let slash = NSImage(systemSymbolName: "slash.circle.fill", accessibilityDescription: "Remote disconnected")?
+            .withSymbolConfiguration(config),
+              let cgImage = slash.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var minX = bitmap.pixelsWide, minY = bitmap.pixelsHigh
+        var maxX = -1, maxY = -1
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide where (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0 {
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY,
+              let trimmed = cgImage.cropping(to: CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)) else { return nil }
+        return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
+    }()
+
+    static func drawDisconnectedBadge(in rect: CGRect) {
+        guard let slash = disconnectedBadgeImage else { return }
+        let scale = min(rect.width / slash.size.width, rect.height / slash.size.height)
+        let size = NSSize(width: slash.size.width * scale, height: slash.size.height * scale)
+        let destination = NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height)
+        slash.draw(in: destination, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high.rawValue])
+    }
+
     private func setupMenuBar() {
         guard let button = statusItem.button else { return }
         button.image = Self.makeRemoteIcon()
@@ -258,13 +320,63 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         rebuildMenu()
         statusItem.menu = menu
+        setupApplicationMenu()
+    }
+
+    /// An accessory app still needs the standard keyboard menu while its settings
+    /// window is key (Cmd-comma, Cmd-W, Hide and Quit).
+    private func setupApplicationMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "VibeRemote")
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide VibeRemote", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit VibeRemote", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        appMenu.addItem(quit)
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    private var settingsSnapshot: RemoteSettingsSnapshot {
+        RemoteSettingsSnapshot(
+            connected: remoteConnected,
+            batteryPercent: remoteBatteryPercent,
+            siriAction: siriButtonAction
+        )
+    }
+
+    @objc func showSettings() {
+        rmDebug("⚙️ Settings window requested")
+        statusRefreshHandler?()
+        refreshRemoteBattery()
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                snapshot: settingsSnapshot,
+                setSiriAction: { [weak self] action in self?.setSiriButtonAction(action) },
+                resetSiriAction: { [weak self] in self?.setSiriButtonAction(Self.siriButtonDefaultAction) }
+            )
+        }
+        settingsWindowController?.update(settingsSnapshot)
+        settingsWindowController?.show()
     }
 
     /// Badges the menu-bar glyph whenever something needs attention: the remote is
     /// disconnected, or the bridge is not running.
     private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
-        let needsAttention = !remoteConnected || !microphoneStatus.running
-        statusItem.button?.image = Self.makeRemoteIcon(paused: needsAttention)
+        let badge = RemoteStatusBadge(remoteConnected: remoteConnected, bridgeRunning: microphoneStatus.running)
+        statusItem.button?.image = Self.makeRemoteIcon(badge: badge)
     }
 
     /// A double-height banner row: an SF Symbol glyph, a bold label, and an optional
@@ -329,6 +441,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        settingsWindowController?.update(settingsSnapshot)
+
+        // Settings must remain reachable before pairing and while the remote sleeps.
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(.separator())
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
         updateStatusIcon(microphoneStatus: microphoneStatus)
@@ -371,8 +490,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // With no remote connected there is nothing to control, so show only a notice
-        // (same banner style, no button) and Quit — Debug and Siri mapping are hidden.
+        // Keep the disconnected menu short. The settings window remains available above.
         guard remoteConnected else {
             menu.addItem(makeBanner(symbolName: "exclamationmark.triangle.fill", text: "Remote disconnected"))
             menu.addItem(NSMenuItem.separator())
@@ -435,27 +553,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
         bridgeItem.submenu = diagnosticsMenu
         menu.addItem(bridgeItem)
-        menu.addItem(NSMenuItem.separator())
-
-        // Only the Siri button remains user-customizable; all other buttons are fixed.
-        if let siriDescriptor = remoteButtonDescriptors.first(where: { $0.key == Self.siriButtonKey }) {
-            let siriItem = NSMenuItem(title: "Siri Button Mapping", action: nil, keyEquivalent: "")
-            let siriSubmenu = NSMenu()
-            for action in ButtonAction.allCases {
-                if action.requiresHold && !siriDescriptor.supportsHold { continue }
-                let actionItem = NSMenuItem(
-                    title: action.rawValue,
-                    action: #selector(changeSiriButtonAction(_:)),
-                    keyEquivalent: ""
-                )
-                actionItem.target = self
-                actionItem.representedObject = action
-                actionItem.state = siriButtonAction == action ? .on : .off
-                siriSubmenu.addItem(actionItem)
-            }
-            siriItem.submenu = siriSubmenu
-            menu.addItem(siriItem)
-        }
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
@@ -832,11 +929,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         siriButtonAction = action
         UserDefaults.standard.set(action.rawValue, forKey: Self.siriButtonDefaultsKey)
         rebuildMenu()
-    }
-
-    @objc private func changeSiriButtonAction(_ sender: NSMenuItem) {
-        guard let action = sender.representedObject as? ButtonAction else { return }
-        setSiriButtonAction(action)
     }
 
     @objc private func requestInputAccess() {

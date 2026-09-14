@@ -306,6 +306,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard menuBarManager != nil else { return }
         refreshPermissionStates()
     }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menuBarManager?.showSettings()
+        return true
+    }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false

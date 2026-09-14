@@ -80,6 +80,15 @@ for arch in "${architectures[@]}"; do
     helper_binaries+=("$helper_binary")
 done
 
+# The settings asset loader resolves this bundle inside the app's Resources directory.
+# Resources are architecture-independent; either build is valid.
+resource_bundle="$bin_path/VibeRemote_VibeRemote.bundle"
+if [ ! -d "$resource_bundle" ]; then
+    echo "Error: SwiftPM did not produce the settings resource bundle"
+    exit 1
+fi
+ditto "$resource_bundle" "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
+
 if [ "${#app_binaries[@]}" -eq 1 ]; then
     cp "${app_binaries[0]}" "$APP_NAME"
     cp "${voice_bridge_binaries[0]}" "$VOICE_BRIDGE_NAME"

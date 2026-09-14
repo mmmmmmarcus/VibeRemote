@@ -79,7 +79,7 @@ final class RemoteInputHandler {
     /// The key specification is captured at press time so release remains correct even if the
     /// user changes that button's mapping before letting go.
     private var heldKeys: [String: (keyCode: Int, flags: CGEventFlags)] = [:]
-    private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags)] = [:]
+    private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags, text: String?)] = [:]
 
     /// Last observed pressed/released state per logical button. A Siri Remote may mirror a
     /// button over multiple HID interfaces, so this collapses duplicates into one transition.
@@ -620,7 +620,7 @@ final class RemoteInputHandler {
         case .bulletOutdent:
             sendKey(kVK_Tab, flags: .maskShift)
         case .slashOrModifier:
-            // Quick tap types "/" (the skill/command-picker trigger in agent apps); holding
+            // Quick tap types the focused app's skill-picker trigger; holding
             // arms the button as a modifier for the chords in `modifierChord(for:)`.
             beginModifierHold(button: button)
         case .spaceKey, .rightCmd, .rightOpt:
@@ -726,7 +726,7 @@ final class RemoteInputHandler {
     private var modifierChordFired: Set<String> = []
     private var modifierPressStart: [String: Date] = [:]
 
-    /// A release quicker than this is a tap (types "/"); anything longer was a modifier
+    /// A release quicker than this is a tap (opens the skill picker); anything longer was a modifier
     /// hold — used or abandoned — and produces nothing on its own.
     private let modifierTapMaxDuration: TimeInterval = 0.4
 
@@ -745,7 +745,29 @@ final class RemoteInputHandler {
               Date().timeIntervalSince(pressedAt) < modifierTapMaxDuration else {
             return
         }
-        sendKey(kVK_ANSI_Slash)
+        // Resolve the recipient at release, when the character is actually emitted.
+        // Never reuse the last client we summoned: the user may have changed focus.
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let trigger = Self.skillPickerTrigger(for: bundleID)
+        rmDebug("⌨️ Skill trigger \(trigger.text) for \(bundleID ?? "unknown app")")
+        sendKey(trigger.keyCode, flags: trigger.flags, text: trigger.text)
+    }
+
+    /// Keep the physical key and Unicode text together. The text guarantees an ASCII
+    /// trigger across keyboard layouts; key/flags also serve editors handling keydown.
+    struct SkillPickerTrigger {
+        let keyCode: Int
+        let flags: CGEventFlags
+        let text: String
+    }
+
+    nonisolated static func skillPickerTrigger(for bundleIdentifier: String?) -> SkillPickerTrigger {
+        if bundleIdentifier == codexBundleID {
+            return SkillPickerTrigger(keyCode: kVK_ANSI_4, flags: .maskShift, text: "$")
+        }
+        // Claude and other apps retain the existing slash behavior. Browser/terminal
+        // processes do not reliably identify their page/session, so do not guess.
+        return SkillPickerTrigger(keyCode: kVK_ANSI_Slash, flags: [], text: "/")
     }
 
     private func performChord(_ chord: ModifierChord) {
@@ -776,8 +798,8 @@ final class RemoteInputHandler {
     }
 
     /// Bundle identifiers of the agent desktop clients this remote can summon.
-    private static let codexBundleID = "com.openai.codex"        // ChatGPT / Codex desktop
-    private static let claudeBundleID = "com.anthropic.claudefordesktop"
+    nonisolated private static let codexBundleID = "com.openai.codex" // Also shipped locally as ChatGPT.app
+    nonisolated private static let claudeBundleID = "com.anthropic.claudefordesktop"
 
     /// Brings a coding-agent client to the front. If neither is frontmost, Codex comes up;
     /// otherwise it toggles to the other one. Falls back to whichever is installed.
@@ -845,7 +867,7 @@ final class RemoteInputHandler {
 
     private func releaseAllPendingTapKeys() {
         for pending in pendingTapKeyUps.values {
-            postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false)
+            postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false, text: pending.text)
         }
         pendingTapKeyUps.removeAll()
     }
@@ -854,7 +876,7 @@ final class RemoteInputHandler {
         IOHIDDeviceGetProperty(device, key as CFString) as? Int ?? 0
     }
 
-    private func postKey(keyCode: Int, flags: CGEventFlags, keyDown: Bool) {
+    nonisolated static func makeKeyEvent(keyCode: Int, flags: CGEventFlags, keyDown: Bool, text: String? = nil) -> CGEvent? {
         let source = CGEventSource(stateID: .hidSystemState)
         let event = CGEvent(
             keyboardEventSource: source,
@@ -862,19 +884,27 @@ final class RemoteInputHandler {
             keyDown: keyDown
         )
         event?.flags = flags
-        event?.post(tap: .cghidEventTap)
+        if let text {
+            let characters = Array(text.utf16)
+            event?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
+        }
+        return event
     }
 
-    private func sendKey(_ keyCode: Int, flags: CGEventFlags = []) {
-        postKey(keyCode: keyCode, flags: flags, keyDown: true)
+    private func postKey(keyCode: Int, flags: CGEventFlags, keyDown: Bool, text: String? = nil) {
+        Self.makeKeyEvent(keyCode: keyCode, flags: flags, keyDown: keyDown, text: text)?.post(tap: .cghidEventTap)
+    }
+
+    private func sendKey(_ keyCode: Int, flags: CGEventFlags = [], text: String? = nil) {
+        postKey(keyCode: keyCode, flags: flags, keyDown: true, text: text)
         let eventID = UUID()
-        pendingTapKeyUps[eventID] = (keyCode, flags)
+        pendingTapKeyUps[eventID] = (keyCode, flags, text)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
             guard let self,
                   let pending = self.pendingTapKeyUps.removeValue(forKey: eventID) else {
                 return
             }
-            self.postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false)
+            self.postKey(keyCode: pending.keyCode, flags: pending.flags, keyDown: false, text: pending.text)
         }
     }
 }
