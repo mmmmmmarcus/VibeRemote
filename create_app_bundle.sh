@@ -53,6 +53,7 @@ echo "Creating app bundle: $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 cp "$APP_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
+ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
 
 icon_png=""
 if [ -f "$ICON_PNG" ]; then

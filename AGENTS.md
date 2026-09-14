@@ -25,7 +25,8 @@ shared library target and shell scripts that build the audio driver and assemble
 |------|------|
 | `main.swift` | App entry point (`NSApplicationMain`-style bootstrap). |
 | `SiriRemoteApp.swift` | `AppDelegate`: wires managers, permissions, lifecycle. |
-| `MenuBarManager.swift` | Status-item menu, all user-facing UI. |
+| `MenuBarManager.swift` | Status-item menu, mapping ownership and settings-window state updates. |
+| `SettingsWindowController.swift` | Retained native settings window, SwiftUI remote diagram, native mapping pop-ups, live status snapshot. |
 | `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vibeRemoteLogPath` and `rmDebug`. |
 | `RemoteGeneration.swift` | Tells the 1st-gen remote from the 2nd/3rd-gen one and holds every behavioral difference between them. |
 | `RemoteInputHandler.swift` | Opens HID interfaces, maps buttons, sends synthetic key events, performs the `0xAF` input-enable Feature write. |
@@ -145,15 +146,24 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 
 Mappings are **fixed by design** — `remoteButtonDescriptors` in `MenuBarManager.swift` is the
 single source of truth. Only the **Siri button** is user-customizable (persisted under the
-`siriButtonAction` default); everything else is hardcoded and has no menu UI.
+`siriButtonAction` default); everything else remains fixed.
+
+The menu bar's **Settings…** entry opens one retained window, even with the remote
+disconnected. Only the Siri pop-up edits a mapping; the other pop-ups explain the fixed
+actions. Reset only restores the Siri mapping. Window state comes from `MenuBarManager`
+and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM
+resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
+`Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
 
 Current intent: clickpad arrows → arrow keys, clickpad center → Enter, Back/Menu →
 word-wise Backspace (Option+Delete — macOS `deleteWordBackward:`, whose tokenizer also
 segments Chinese words; repeat runs at a slower word cadence than character repeat),
 TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
 the Codex/Claude desktop client to the front, Power → Enter, volume keys → bullet-list
-control, Siri → held Space, Mute → tap types "/" (the skill/command-picker trigger in
-agent apps); held, it is a modifier: Mute+Back clears all input (Cmd+A, Backspace) and
+control, Siri → held Space, Mute → tap types the focused app's skill-picker trigger
+(`$` in `com.openai.codex`, also locally named ChatGPT.app; `/` in Claude and other apps).
+Resolve focus on release, and preserve the legacy `slashOrModifier` raw value for saved
+Siri assignments. Held, it is a modifier: Mute+Back clears all input (Cmd+A, Backspace) and
 Mute+Play/Pause sends Esc (stop the current task).
 
 **The remote reports one press and one release with no repeats in between.** Key repeat and

@@ -18,8 +18,10 @@ paired at the same time and each keeps its own mapping.
 
 ## Features
 
-- Configurable actions for Back/Menu, TV, Siri, Play/Pause, volume, mute,
-  power, previous-track, and next-track buttons.
+- A native settings window with a visual Siri Remote button guide, opened from
+  the menu bar's **Settings…** item (also available while the remote is disconnected).
+- Fixed mappings for navigation, editing and app switching; the Siri button's
+  action is customizable and saved immediately. **Reset** restores it to Space.
 - Automatic per-generation button profiles. The 1st-gen remote has no Mute and
   no Power key, so the mute button's two roles move to buttons that do exist:
   holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
@@ -29,6 +31,9 @@ paired at the same time and each keeps its own mapping.
   surface / clickpad center sends Enter. The remote microphone transmits only
   while the physical Siri button is held.
 - Press-and-hold mappings for Space, Right Command, and Right Option.
+- Tap the Skill / Modifier button to type `$` in the focused ChatGPT / Codex desktop
+  client or `/` in Claude and other apps. Focus is checked on release; holding the
+  button still enables modifier chords. This also applies when Siri is assigned this action.
 - Siri Remote connection and battery status in the menu bar.
 - Suppression of duplicate HID/media-key delivery without globally unloading
   macOS's remote-control daemon.

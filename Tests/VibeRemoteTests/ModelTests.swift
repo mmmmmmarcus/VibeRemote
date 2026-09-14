@@ -1,4 +1,6 @@
 import HelperProtocol
+import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import VibeRemote
 
@@ -33,6 +35,172 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(schedule.nextAttempt, start.addingTimeInterval(60))
         schedule.reset()
         XCTAssertTrue(schedule.isDue(now: start))
+    }
+
+    func testDisconnectedBadgeTakesPriorityOverBridgePause() {
+        XCTAssertEqual(RemoteStatusBadge(remoteConnected: false, bridgeRunning: false), .disconnected)
+        XCTAssertEqual(RemoteStatusBadge(remoteConnected: false, bridgeRunning: true), .disconnected)
+        XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: false), .paused)
+        XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: true), .none)
+    }
+
+    @MainActor
+    func testStatusBadgesKeepTheRemoteCanvasAndTemplateTint() throws {
+        let original = MenuBarManager.makeRemoteIcon()
+        for badge in [RemoteStatusBadge.paused, .disconnected] {
+            let icon = MenuBarManager.makeRemoteIcon(badge: badge)
+            XCTAssertEqual(icon.size, original.size)
+            XCTAssertTrue(icon.isTemplate)
+            XCTAssertNotNil(icon.tiffRepresentation)
+            if let output = ProcessInfo.processInfo.environment["VIBEREMOTE_ICON_RENDER"] {
+                let native = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(icon.tiffRepresentation)))
+                try XCTUnwrap(native.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: "\(output)-\(badge)-native.png"))
+                let preview = NSImage(size: NSSize(width: 180, height: 200), flipped: false) { rect in
+                    NSColor.white.setFill()
+                    rect.fill()
+                    icon.draw(in: NSRect(x: 20, y: 20, width: icon.size.width * 8, height: icon.size.height * 8))
+                    return true
+                }
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(preview.tiffRepresentation)))
+                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: URL(fileURLWithPath: "\(output)-\(badge).png"))
+            }
+        }
+    }
+
+    @MainActor
+    func testDisconnectedBadgeStaysCircularAtMenuBarScales() throws {
+        // Render the production drawing path at 1x and Retina size, without SF Symbol
+        // typographic alignment metadata or the 8x preview hiding a native-size defect.
+        for scale: CGFloat in [1, 2] {
+            let side = 8 * scale
+            let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+                MenuBarManager.drawDisconnectedBadge(in: rect)
+                return true
+            }
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+            let width = bitmap.pixelsWide
+            let height = bitmap.pixelsHigh
+            func alpha(_ x: Int, _ y: Int) -> CGFloat {
+                bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0
+            }
+            XCTAssertEqual(width, height)
+            // A stretched/cropped circle fills the corners. A circle touches each edge
+            // near the middle while retaining transparent space in all four corners.
+            for (x, y) in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)] {
+                XCTAssertLessThan(alpha(x, y), 0.1)
+            }
+            for (x, y) in [(0, height / 2), (width - 1, height / 2), (width / 2, 0), (width / 2, height - 1)] {
+                XCTAssertGreaterThan(alpha(x, y), 0.4)
+            }
+        }
+    }
+
+    @MainActor
+    func testSettingsNativeControlsAndWindowLifetime() throws {
+        _ = NSApplication.shared
+        var chosenAction: ButtonAction?
+        var resets = 0
+        let controller = SettingsWindowController(
+            snapshot: RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt),
+            setSiriAction: { chosenAction = $0 },
+            resetSiriAction: { resets += 1 }
+        )
+        let window = try XCTUnwrap(controller.window)
+        let frame = try XCTUnwrap(window.contentView?.superview)
+        frame.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let controls = descendants(frame).compactMap { $0 as? NSPopUpButton }
+        XCTAssertEqual(controls.count, 8)
+        let siri = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "siri" })
+        XCTAssertEqual(siri.numberOfItems, ButtonAction.allCases.filter(\.isAssignableToSiriButton).count)
+        XCTAssertNil(siri.item(withTitle: ButtonAction.shiftEnterOrModifier.settingsTitle))
+        XCTAssertNil(siri.item(withTitle: ButtonAction.agentClientOrSlash.settingsTitle))
+        siri.selectItem(withTitle: ButtonAction.rightCmd.settingsTitle)
+        NSApp.sendAction(try XCTUnwrap(siri.action), to: siri.target, from: siri)
+        XCTAssertEqual(chosenAction, .rightCmd)
+        let power = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "power" })
+        NSApp.sendAction(try XCTUnwrap(power.action), to: power.target, from: power)
+        XCTAssertEqual(chosenAction, .rightCmd, "Fixed mappings must not change the Siri mapping")
+
+        controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: .glassTouchSurface))
+        frame.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let tv = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "tv" })
+        let playPause = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "playPause" })
+        XCTAssertEqual(tv.titleOfSelectedItem, ButtonAction.shiftEnterOrModifier.settingsTitle)
+        XCTAssertEqual(playPause.titleOfSelectedItem, ButtonAction.agentClientOrSlash.settingsTitle)
+
+        let reset = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "VibeRemote.ResetSettings" })
+        NSApp.sendAction(try XCTUnwrap(reset.action), to: reset.target, from: reset)
+        XCTAssertEqual(resets, 1)
+        controller.update(RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .spaceKey))
+        XCTAssertFalse(reset.isEnabled)
+
+        // Optional offscreen render for visual comparison. It never orders a window
+        // onto the user's desktop or starts any HID/audio services.
+        if let output = ProcessInfo.processInfo.environment["VIBEREMOTE_SETTINGS_RENDER"] {
+            controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt))
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                window.appearance = NSAppearance(named: appearance)
+                frame.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+                let bitmap = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+                window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    frame.cacheDisplay(in: frame.bounds, to: bitmap)
+                }
+                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: URL(fileURLWithPath: "\(output)-\(name).png"))
+            }
+        }
+        window.close()
+        XCTAssertTrue(controller.window === window)
+        XCTAssertFalse(window.isReleasedWhenClosed)
+    }
+
+    func testSettingsNeverShowAStaleBatteryAsAConnection() {
+        var snapshot = RemoteSettingsSnapshot(connected: false, batteryPercent: 59, siriAction: .spaceKey)
+        XCTAssertEqual(snapshot.connectionText, "DISCONNECTED")
+        snapshot.connected = true
+        XCTAssertEqual(snapshot.connectionText, "CONNECTED 59%")
+        snapshot.batteryPercent = nil
+        XCTAssertEqual(snapshot.connectionText, "CONNECTED — BATTERY UNKNOWN")
+        snapshot.batteryPercent = 101
+        XCTAssertEqual(snapshot.connectionText, "CONNECTED — BATTERY UNKNOWN")
+        snapshot.batteryPercent = 0
+        XCTAssertEqual(snapshot.connectionText, "CONNECTED 0%")
+    }
+
+    func testSettingsShipTheRemoteArtwork() throws {
+        let artwork = try XCTUnwrap(Bundle.module.url(forResource: "SiriRemote", withExtension: "png"))
+        let data = try Data(contentsOf: artwork)
+        XCTAssertEqual(Array(data.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
+    }
+
+    func testSettingsFindResourcesInsideAnInstalledAppLayout() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("SettingsTest.app")
+        let resources = app.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        let info = try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": "com.viberemote.settings-test", "CFBundlePackageType": "APPL"],
+            format: .xml,
+            options: 0
+        )
+        try info.write(to: app.appendingPathComponent("Contents/Info.plist"))
+        try FileManager.default.copyItem(
+            at: Bundle.module.bundleURL,
+            to: resources.appendingPathComponent("VibeRemote_VibeRemote.bundle")
+        )
+        let appBundle = try XCTUnwrap(Bundle(url: app))
+        let installedResources = try XCTUnwrap(SettingsAssets.bundledResources(in: appBundle))
+        XCTAssertNotNil(installedResources.url(forResource: "SiriRemote", withExtension: "png"))
+        XCTAssertTrue(installedResources.bundlePath.hasPrefix(app.path))
     }
 
     func testRemoteInputStatesExposeDistinctMenuStatus() {
@@ -166,7 +334,41 @@ final class ModelTests: XCTestCase {
         ))
     }
 
-    func testMuteButtonTypesSlashAndActsAsModifier() {
+    func testSkillPickerUsesTheFocusedAppAndPreservesUnknownAppBehavior() {
+        let codex = RemoteInputHandler.skillPickerTrigger(for: "com.openai.codex")
+        XCTAssertEqual(codex.text, "$")
+        XCTAssertEqual(codex.keyCode, kVK_ANSI_4)
+        XCTAssertEqual(codex.flags, .maskShift)
+        for bundleID in ["com.anthropic.claudefordesktop", "com.apple.Safari", "com.apple.Terminal", "com.openai.codex.other", nil] {
+            let trigger = RemoteInputHandler.skillPickerTrigger(for: bundleID)
+            XCTAssertEqual(trigger.text, "/")
+            XCTAssertEqual(trigger.keyCode, kVK_ANSI_Slash)
+            XCTAssertTrue(trigger.flags.isEmpty)
+        }
+    }
+
+    func testSkillPickerKeyEventsCarryExactASCIITextAndMatchingRelease() throws {
+        for bundleID in ["com.openai.codex", "com.anthropic.claudefordesktop"] {
+            let trigger = RemoteInputHandler.skillPickerTrigger(for: bundleID)
+            for keyDown in [true, false] {
+                // Construct only; never inject test keystrokes into the user's desktop.
+                let event = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(
+                    keyCode: trigger.keyCode, flags: trigger.flags, keyDown: keyDown, text: trigger.text
+                ))
+                var characters = [UniChar](repeating: 0, count: 8)
+                var length = 0
+                event.keyboardGetUnicodeString(maxStringLength: characters.count, actualStringLength: &length, unicodeString: &characters)
+                XCTAssertEqual(String(utf16CodeUnits: characters, count: length), trigger.text)
+                XCTAssertEqual(event.type, keyDown ? .keyDown : .keyUp)
+                XCTAssertEqual(event.flags, trigger.flags)
+                XCTAssertEqual(event.getIntegerValueField(.keyboardEventKeycode), Int64(trigger.keyCode))
+            }
+        }
+        // Existing saved assignments must survive the updated visible description.
+        XCTAssertEqual(ButtonAction(rawValue: "Slash: Skill Picker / Hold: Modifier"), .slashOrModifier)
+    }
+
+    func testMuteButtonOpensSkillPickerAndActsAsModifier() {
         let mute = remoteButtonDescriptors.first { $0.key == "mute" }
         XCTAssertEqual(mute?.defaultAction, .slashOrModifier)
         // The tap/modifier split is timed on release, not a held-key action.
