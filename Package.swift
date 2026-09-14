@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
     ],
     targets: [
+        .target(name: "RemoteAudioProtocol", path: "RemoteAudioProtocol"),
         .target(
             name: "HelperProtocol",
             path: "HelperProtocol"
@@ -40,6 +41,7 @@ let package = Package(
             exclude: [
                 "build.sh",
                 "create_app_bundle.sh",
+                "install.sh",
                 "VibeRemote",
                 "VibeRemote.app",
                 "VibeRemoteVoiceBridge",
@@ -49,6 +51,7 @@ let package = Package(
                 "VibeRemote.icon",
                 "Vendor",
                 "VoiceBridgeHelper",
+                "RemoteAudioProtocol",
                 "PrivilegedHelper",
                 "HelperProtocol",
                 "AudioDriver",
@@ -69,6 +72,7 @@ let package = Package(
                 "RemoteBatteryReader.swift",
                 "RemoteHIDChannel.swift",
                 "RemoteDetector.swift",
+                "RemoteGeneration.swift",
                 "RemoteInputHandler.swift",
                 "MediaKeyInterceptor.swift",
                 "SystemVolume.swift"
@@ -86,6 +90,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemoteVoiceBridge",
+            dependencies: ["RemoteAudioProtocol"],
             path: "VoiceBridgeHelper",
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
@@ -95,7 +100,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VibeRemoteTests",
-            dependencies: ["VibeRemote", "HelperProtocol"],
+            dependencies: ["VibeRemote", "HelperProtocol", "RemoteAudioProtocol"],
             path: "Tests/VibeRemoteTests"
         )
     ]

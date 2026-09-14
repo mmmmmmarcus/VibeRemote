@@ -1,3 +1,4 @@
+import RemoteAudioProtocol
 import AVFoundation
 import AudioToolbox
 import CoreAudio
@@ -225,10 +226,37 @@ private final class VirtualAudioOutput {
         }
     }
 
+    /// Tune only our own virtual device. The host's default 512-frame quantum adds
+    /// several render cycles between receiving a packet and delivering it to dictation.
+    /// Unsupported requests keep the existing setting; never alter a fallback or headset.
+    private func configureBuffer(deviceID: AudioDeviceID, deviceName: String) {
+        guard deviceName == "VibeRemote" else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSize,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var current: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &current) == noErr else { return }
+        guard current > 128 else {
+            log("Output buffer frames: \(current)")
+            return
+        }
+        var settable: DarwinBoolean = false
+        guard AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr, settable.boolValue else { return }
+        var requested: UInt32 = 128
+        let result = AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &requested)
+        var actual = current
+        _ = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &actual)
+        log("Output buffer frames: \(current) -> \(actual), requestStatus=\(result)")
+    }
+
     /// Builds a fresh engine pinned to the virtual device. The device is re-resolved by name
     /// every time, because a CoreAudio reconfiguration can hand the same device a new ID.
     private func buildLocked() throws {
         let (deviceID, deviceName) = try preferredOutputDevice()
+        configureBuffer(deviceID: deviceID, deviceName: deviceName)
         let newEngine = AVAudioEngine()
         guard let audioUnit = newEngine.outputNode.audioUnit else {
             throw BridgeError.audioFormat
@@ -308,7 +336,7 @@ private final class VirtualAudioOutput {
         restartIfStopped()
     }
 
-    func enqueue(_ buffer: AVAudioPCMBuffer) {
+    func enqueue(_ buffer: AVAudioPCMBuffer, traceFirstPacket: Bool = false, captureTime: Date? = nil) {
         lock.lock()
         let engine = self.engine
         let player = self.player
@@ -328,7 +356,20 @@ private final class VirtualAudioOutput {
             rebuild(reason: "the audio engine stopped advancing its render clock")
             return
         }
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: nil)
+        if traceFirstPacket {
+            let submitted = Date()
+            let age = captureTime.map { String(format: "%.1f", submitted.timeIntervalSince($0) * 1000) } ?? "unknown"
+            log("Latency first PCM enqueue epoch=\(String(format: "%.6f", submitted.timeIntervalSince1970)) captureAgeMs=\(age) frames=\(buffer.frameLength)")
+            let queue = controlQueue
+            player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+                let played = Date()
+                queue.async {
+                    log("Latency first PCM played epoch=\(String(format: "%.6f", played.timeIntervalSince1970)) enqueueToPlayedMs=\(String(format: "%.1f", played.timeIntervalSince(submitted) * 1000))")
+                }
+            }
+        } else {
+            player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: nil)
+        }
     }
 
     func voiceEnded() {
@@ -368,215 +409,6 @@ private final class VirtualAudioOutput {
     }
 }
 
-private struct PendingL2CAPPacket {
-    let expectedLength: Int
-    var bytes: [UInt8]
-}
-
-private enum VoiceEvent {
-    case started
-    case packet(Data)
-    case ended
-}
-
-private struct SiriRemotePacketParser {
-    private var pendingByHandle: [UInt16: PendingL2CAPPacket] = [:]
-    private var oldFrame: [UInt8] = []
-    private var oldVoiceActive = false
-    private var newVoiceActive = false
-    private var directVoiceActive = false
-    private var lastLine: String?
-
-    mutating func events(from line: String) -> [VoiceEvent] {
-        // PacketLogger can occasionally repeat an identical rendered record. Feeding
-        // duplicates to the stateful Opus decoder produces stutter and buffer growth.
-        guard line != lastLine else { return [] }
-        lastLine = line
-
-        if line.hasPrefix("HID REPORT ") {
-            return directHIDEvents(from: line)
-        }
-
-        guard let marker = line.range(of: " RECV ") else { return [] }
-        let bytes = line[marker.upperBound...]
-            .split(whereSeparator: { $0.isWhitespace })
-            .compactMap { UInt8($0, radix: 16) }
-        guard bytes.count >= 4 else { return [] }
-
-        var output = oldProtocolEvents(from: bytes)
-        output.append(contentsOf: l2capEvents(from: bytes))
-        return output
-    }
-
-    private mutating func directHIDEvents(from line: String) -> [VoiceEvent] {
-        guard let marker = line.range(of: " data=") else { return [] }
-        var bytes = line[marker.upperBound...]
-            .split(whereSeparator: { $0.isWhitespace })
-            .compactMap { UInt8($0, radix: 16) }
-        guard !bytes.isEmpty else { return [] }
-
-        // macOS may include its synthetic 0xFF report ID in the callback buffer. The Gen-3
-        // microphone payload itself is exactly 99 bytes, so remove only that unambiguous prefix.
-        if bytes.count == 100, bytes.first == 0xFF {
-            bytes.removeFirst()
-        }
-
-        // Gen-3 direct HID microphone layout (99 bytes): two prefix bytes, a little-endian
-        // sequence, one Opus length byte, the Opus packet, then zero padding. A zero-length
-        // report is the button-release sentinel.
-        if bytes.count == 99 {
-            let packetLength = Int(bytes[4])
-            if packetLength == 0 {
-                guard directVoiceActive else { return [] }
-                directVoiceActive = false
-                return [.ended]
-            }
-            guard packetLength <= 94, 5 + packetLength <= bytes.count else { return [] }
-            let packet = Data(bytes[5..<(5 + packetLength)])
-            guard packet.contains(where: { $0 != 0 }) else { return [] }
-            var output: [VoiceEvent] = []
-            if !directVoiceActive {
-                directVoiceActive = true
-                output.append(.started)
-            }
-            output.append(.packet(packet))
-            return output
-        }
-
-        // Retain the old PacketLogger-era encapsulation parser as a compatibility fallback for
-        // earlier remote generations that expose 1B 35 / 1B 39 inside their buffered report.
-        var output: [VoiceEvent] = []
-        var offset = 0
-        while offset + 1 < bytes.count {
-            guard bytes[offset] == 0x1B else {
-                offset += 1
-                continue
-            }
-            switch bytes[offset + 1] {
-            case 0x35:
-                guard offset + 7 < bytes.count else { return output }
-                let packetLength = Int(bytes[offset + 7])
-                let end = offset + 8 + packetLength
-                guard packetLength > 0, end <= bytes.count else {
-                    offset += 2
-                    continue
-                }
-                output.append(contentsOf: events(fromL2CAPPayload: Array(bytes[offset..<end])))
-                offset = end
-            case 0x39:
-                output.append(contentsOf: events(fromL2CAPPayload: [0x1B, 0x39]))
-                offset += 2
-            default:
-                offset += 2
-            }
-        }
-        return output
-    }
-
-    private mutating func oldProtocolEvents(from bytes: [UInt8]) -> [VoiceEvent] {
-        let oldStart: [UInt8] = [0x1B, 0x23, 0x00, 0x00, 0x10]
-        let oldEnd: [UInt8] = [0x1B, 0x23, 0x00, 0x10, 0x00]
-        if bytes.suffix(oldStart.count).elementsEqual(oldStart) {
-            oldFrame.removeAll(keepingCapacity: true)
-            oldVoiceActive = true
-            return [.started]
-        }
-        if bytes.suffix(oldEnd.count).elementsEqual(oldEnd) {
-            var events: [VoiceEvent] = []
-            if let packet = validatedOldFrame() {
-                events.append(.packet(packet))
-            }
-            oldFrame.removeAll(keepingCapacity: true)
-            if oldVoiceActive { events.append(.ended) }
-            oldVoiceActive = false
-            return events
-        }
-        guard oldVoiceActive, bytes.count == 31 else { return [] }
-
-        if bytes[0] == 0x40, bytes[1] == 0x20, bytes[18] == 0xB8 {
-            var events: [VoiceEvent] = []
-            if let packet = validatedOldFrame() {
-                events.append(.packet(packet))
-            }
-            oldFrame = Array(bytes[17...])
-            return events
-        }
-        guard !oldFrame.isEmpty, bytes[1] == 0x10 else { return [] }
-        oldFrame.append(contentsOf: bytes.dropFirst(4))
-        return []
-    }
-
-    private func validatedOldFrame() -> Data? {
-        guard let packetLength = oldFrame.first.map(Int.init),
-              packetLength > 0,
-              oldFrame.count >= packetLength + 1 else {
-            return nil
-        }
-        return Data(oldFrame[1..<(packetLength + 1)])
-    }
-
-    private mutating func l2capEvents(from bytes: [UInt8]) -> [VoiceEvent] {
-        let handle = UInt16(bytes[0]) | (UInt16(bytes[1] & 0x0F) << 8)
-        let packetBoundaryFlag = (bytes[1] >> 4) & 0x03
-        let aclPayloadLength = Int(UInt16(bytes[2]) | (UInt16(bytes[3]) << 8))
-        let availableEnd = min(bytes.count, 4 + aclPayloadLength)
-        guard availableEnd >= 4 else { return [] }
-
-        if packetBoundaryFlag == 0x02 {
-            guard availableEnd >= 8 else { return [] }
-            let l2capLength = Int(UInt16(bytes[4]) | (UInt16(bytes[5]) << 8))
-            guard l2capLength > 0 else { return [] }
-            let payload = Array(bytes[8..<availableEnd])
-            if payload.count >= l2capLength {
-                pendingByHandle.removeValue(forKey: handle)
-                return events(fromL2CAPPayload: Array(payload.prefix(l2capLength)))
-            }
-            pendingByHandle[handle] = PendingL2CAPPacket(
-                expectedLength: l2capLength,
-                bytes: payload
-            )
-            return []
-        }
-
-        if packetBoundaryFlag == 0x01, var pending = pendingByHandle[handle] {
-            pending.bytes.append(contentsOf: bytes[4..<availableEnd])
-            if pending.bytes.count >= pending.expectedLength {
-                pendingByHandle.removeValue(forKey: handle)
-                return events(
-                    fromL2CAPPayload: Array(pending.bytes.prefix(pending.expectedLength))
-                )
-            }
-            pendingByHandle[handle] = pending
-        }
-        return []
-    }
-
-    private mutating func events(fromL2CAPPayload bytes: [UInt8]) -> [VoiceEvent] {
-        guard bytes.count >= 2, bytes[0] == 0x1B else { return [] }
-        switch bytes[1] {
-        case 0x35:
-            guard bytes.count >= 8 else { return [] }
-            let packetLength = Int(bytes[7])
-            guard packetLength > 0, bytes.count >= 8 + packetLength else { return [] }
-            let packet = Data(bytes[8..<(8 + packetLength)])
-            guard packet.contains(where: { $0 != 0 }) else { return [] }
-            var events: [VoiceEvent] = []
-            if !newVoiceActive {
-                newVoiceActive = true
-                events.append(.started)
-            }
-            events.append(.packet(packet))
-            return events
-        case 0x39:
-            guard newVoiceActive else { return [] }
-            newVoiceActive = false
-            return [.ended]
-        default:
-            return []
-        }
-    }
-}
-
 /// PacketLogger prefixes each record with "MMM d HH:mm:ss.SSS". Returns nil when the
 /// line does not carry a parseable capture timestamp.
 private let captureTimestampFormatter: DateFormatter = {
@@ -593,19 +425,23 @@ private func captureLineTimestamp(_ line: String, year: Int) -> Date? {
     return captureTimestampFormatter.date(from: "\(parts[0]) \(parts[1]) \(parts[2]) \(year)")
 }
 
+// Offline validation reads capture text from stdin without opening an audio device.
+let validateCapture = CommandLine.arguments.contains("--validate-capture")
 do {
     let decoder = try OpusDecoder()
-    let audioOutput = try VirtualAudioOutput(format: decoder.pcmFormat)
+    let audioOutput = validateCapture ? nil : try VirtualAudioOutput(format: decoder.pcmFormat)
+    var maximumPeak: Float = 0
     var parser = SiriRemotePacketParser()
     var decodedPackets = 0
     var directHIDReports = 0
+    var traceFirstPacket = true
 
     // PacketLogger replays the Bluetooth stack's buffered history when a capture starts,
     // which would re-decode the previous voice session into the output device. Skip
     // records older than helper launch until the first live record arrives.
     let staleCutoff = Date().addingTimeInterval(-1.5)
     let captureYear = Calendar.current.component(.year, from: Date())
-    var reachedLiveCapture = false
+    var reachedLiveCapture = validateCapture
     var skippedReplayLines = 0
 
     while let line = readLine(strippingNewline: true) {
@@ -629,12 +465,23 @@ do {
         for event in parser.events(from: line) {
             switch event {
             case .started:
-                audioOutput.voiceStarted()
+                traceFirstPacket = true
+                let received = Date()
+                let age = captureLineTimestamp(line, year: captureYear).map { String(format: "%.1f", received.timeIntervalSince($0) * 1000) } ?? "unknown"
+                log("Latency voice start epoch=\(String(format: "%.6f", received.timeIntervalSince1970)) captureAgeMs=\(age)")
+                audioOutput?.voiceStarted()
                 log("Voice started")
             case .packet(let packet):
                 do {
                     if let buffer = try decoder.decode(packet) {
-                        audioOutput.enqueue(buffer)
+                        if validateCapture, let samples = buffer.floatChannelData?[0] {
+                            for index in 0..<Int(buffer.frameLength) {
+                                maximumPeak = max(maximumPeak, abs(samples[index]))
+                            }
+                        }
+                        audioOutput?.enqueue(buffer, traceFirstPacket: traceFirstPacket,
+                                             captureTime: traceFirstPacket ? captureLineTimestamp(line, year: captureYear) : nil)
+                        traceFirstPacket = false
                         decodedPackets += 1
                         if decodedPackets == 1 || decodedPackets % 50 == 0 {
                             log("Decoded audio packets: \(decodedPackets)")
@@ -644,11 +491,12 @@ do {
                     log("Error: \(error.localizedDescription)")
                 }
             case .ended:
-                audioOutput.voiceEnded()
+                audioOutput?.voiceEnded()
                 log("Voice ended")
             }
         }
     }
+    if validateCapture { log("Capture validation: packets=\(decodedPackets) peak=\(maximumPeak)") }
 } catch {
     log("Fatal error: \(error.localizedDescription)")
     exit(EXIT_FAILURE)

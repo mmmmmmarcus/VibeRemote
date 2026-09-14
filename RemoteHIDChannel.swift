@@ -36,6 +36,39 @@ final class RemoteHIDChannel: NSObject,
     private var pendingReferences: Set<ObjectIdentifier> = []
     private var pendingNotifications: Set<ObjectIdentifier> = []
     private var retryTimer: Timer?
+    // Bounded opt-in experiment only. A battery ATT read may delay firmware idle sleep,
+    // but it is not proof of keepalive support and must not become an unconditional poll.
+    private var keepAliveTimer: Timer?
+    private var keepAliveCharacteristic: CBCharacteristic?
+    private var keepAliveFailures = 0
+    private let batteryServiceUUID = CBUUID(string: "180F")
+    private let batteryLevelUUID = CBUUID(string: "2A19")
+
+    private var keepAliveExperimentActive: Bool {
+        Date().timeIntervalSince1970 < UserDefaults.standard.double(forKey: "remoteKeepAliveExperimentUntil")
+    }
+
+    private func startKeepAliveExperiment() {
+        guard keepAliveTimer == nil, keepAliveExperimentActive else { return }
+        let timer = Timer(timeInterval: 20, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.keepAliveExperimentActive, self.keepAliveFailures < 3 else {
+                    self.keepAliveTimer?.invalidate()
+                    self.keepAliveTimer = nil
+                    rmDebug("📡 Remote keepalive experiment ended")
+                    return
+                }
+                guard let peripheral = self.peripheral, peripheral.state == .connected,
+                      let characteristic = self.keepAliveCharacteristic else { return }
+                peripheral.readValue(for: characteristic)
+            }
+        }
+        keepAliveTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        rmDebug("📡 Remote keepalive experiment: battery read every 20 seconds until configured expiry")
+    }
+
     private var knownPeripheralIdentifiers: [UUID] = []
     private var isStarted = false
     private var hasConfiguredReports = false
@@ -202,6 +235,10 @@ final class RemoteHIDChannel: NSObject,
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard self.peripheral?.identifier == peripheral.identifier else { return }
         let discovered = (peripheral.services ?? []).map(\.uuid.uuidString).joined(separator: ", ")
+        if error == nil, keepAliveExperimentActive,
+           let battery = peripheral.services?.first(where: { $0.uuid == batteryServiceUUID }) {
+            peripheral.discoverCharacteristics([batteryLevelUUID], for: battery)
+        }
         guard error == nil,
               let service = peripheral.services?.first(where: { $0.uuid == hidServiceUUID }) else {
             serviceDiscoveryFailures += 1
@@ -223,8 +260,16 @@ final class RemoteHIDChannel: NSObject,
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
-        guard self.peripheral?.identifier == peripheral.identifier,
-              service.uuid == hidServiceUUID else { return }
+        guard self.peripheral?.identifier == peripheral.identifier else { return }
+        if service.uuid == batteryServiceUUID {
+            guard error == nil, keepAliveExperimentActive else { return }
+            keepAliveCharacteristic = service.characteristics?.first(where: {
+                $0.uuid == batteryLevelUUID && $0.properties.contains(.read)
+            })
+            if keepAliveCharacteristic != nil { startKeepAliveExperiment() }
+            return
+        }
+        guard service.uuid == hidServiceUUID else { return }
         guard error == nil else {
             rmDebug("📡 Direct GATT HID characteristic discovery failed: \(error!.localizedDescription)")
             return
@@ -366,6 +411,12 @@ final class RemoteHIDChannel: NSObject,
         didUpdateValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        if characteristic.uuid == batteryLevelUUID {
+            guard self.peripheral?.identifier == peripheral.identifier else { return }
+            if error != nil { keepAliveFailures += 1 } else { keepAliveFailures = 0 }
+            rmDebug("📡 Remote keepalive battery response success=\(error == nil)")
+            return
+        }
         guard error == nil,
               let reference = reportReferences[ObjectIdentifier(characteristic)],
               reference.type == inputReportType,
@@ -385,6 +436,10 @@ final class RemoteHIDChannel: NSObject,
     }
 
     private func resetReportState() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        keepAliveCharacteristic = nil
+        keepAliveFailures = 0
         reportCharacteristics.removeAll()
         reportReferences.removeAll()
         pendingReferences.removeAll()

@@ -24,6 +24,10 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case bulletIndent = "Bullet: New / Indent"
     case bulletOutdent = "Bullet: Outdent / Remove"
     case slashOrModifier = "Slash: Skill Picker / Hold: Modifier"
+    /// 1st-gen stand-in for the mute button's modifier half (the remote has no mute key).
+    case shiftEnterOrModifier = "Shift + Enter: Newline / Hold: Modifier"
+    /// 1st-gen stand-in for the mute button's "/" half.
+    case agentClientOrSlash = "Toggle Codex / Claude Desktop / Hold: Slash"
     case none = "None"
 
     var requiresHold: Bool {
@@ -32,6 +36,17 @@ enum ButtonAction: String, CaseIterable, Sendable {
             return true
         default:
             return false
+        }
+    }
+
+    /// Composite actions exist to fold two roles onto one physical key on a remote that is
+    /// short of keys. They are assigned by the generation profile, never chosen by hand.
+    var isAssignableToSiriButton: Bool {
+        switch self {
+        case .shiftEnterOrModifier, .agentClientOrSlash:
+            return false
+        default:
+            return true
         }
     }
 }
@@ -128,6 +143,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// The one remaining customizable mapping, persisted across launches.
     private var siriButtonAction: ButtonAction = MenuBarManager.loadSiriButtonAction()
     private var remoteConnected = false
+    private var remoteGeneration: RemoteGeneration = .unknown
     private var bluetoothAccessState: BluetoothAccessState = .notDetermined
     private var remoteInputState: RemoteInputState = .permissionRequired
     private var remoteControlState: RemoteControlState = .permissionRequired
@@ -423,6 +439,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         // conveyed by the menu-bar icon and the stopped banner, so this row is a fixed
         // "Debug" entry that opens the detailed diagnostics submenu.
         addInfoItem("Bluetooth: \(remoteConnected ? "Connected" : "Not Connected")", to: menu)
+        addInfoItem("Remote: \(remoteGeneration.shortName)", to: menu)
         addInfoItem("Battery: \(remoteBatteryPercent.map { "\($0)%" } ?? "Unknown")", to: menu)
 
         let bridgeItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
@@ -443,6 +460,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             let siriSubmenu = NSMenu()
             for action in ButtonAction.allCases {
                 if action.requiresHold && !siriDescriptor.supportsHold { continue }
+                if !action.isAssignableToSiriButton { continue }
                 let actionItem = NSMenuItem(
                     title: action.rawValue,
                     action: #selector(changeSiriButtonAction(_:)),
@@ -567,7 +585,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         bridgeActionItem.target = self
         submenu.addItem(bridgeActionItem)
 
-        if microphoneStatus.outputDeviceName == nil, microphoneBridgeManager.bundledAudioDriverAvailable {
+        if microphoneStatus.outputDeviceName != "VibeRemote", microphoneBridgeManager.bundledAudioDriverAvailable {
             let installItem = NSMenuItem(
                 title: "Install Audio Device...",
                 action: #selector(installAudioDriver),
@@ -813,16 +831,28 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
     }
 
-    func getMapping(for button: String) -> ButtonAction {
-        if button == Self.siriButtonKey {
-            return siriButtonAction
-        }
-        return Self.fixedButtonActions[button] ?? .none
+    /// `generation` is the remote that produced the press, not necessarily the one the menu
+    /// shows: a 1st-gen and a 2nd/3rd-gen remote can be paired at the same time and each must
+    /// keep its own profile.
+    func getMapping(for button: String, generation: RemoteGeneration? = nil) -> ButtonAction {
+        (generation ?? remoteGeneration).action(
+            for: button,
+            defaultAction: Self.fixedButtonActions[button] ?? .none,
+            siriAction: siriButtonAction
+        )
+    }
+
+    func updateRemoteGeneration(_ generation: RemoteGeneration) {
+        guard remoteGeneration != generation else { return }
+        remoteGeneration = generation
+        rebuildMenu()
     }
 
     private static func loadSiriButtonAction() -> ButtonAction {
         guard let raw = UserDefaults.standard.string(forKey: siriButtonDefaultsKey),
-              let action = ButtonAction(rawValue: raw) else {
+              let action = ButtonAction(rawValue: raw),
+              // Profile-only composite actions are not valid user settings.
+              action.isAssignableToSiriButton else {
             return siriButtonDefaultAction
         }
         return action

@@ -3,6 +3,38 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
+    func testVolumeSuppressionCoversHoldReleaseAndMissingRelease() {
+        var state = RemoteVolumeSuppression()
+        let start = Date(timeIntervalSince1970: 100)
+        state.update(button: "volumeUp", pressed: true, now: start)
+        XCTAssertTrue(state.contains("volumeUp", now: start.addingTimeInterval(5)))
+        XCTAssertFalse(state.contains("volumeDown", now: start.addingTimeInterval(5)))
+        state.update(button: "volumeDown", pressed: true, now: start.addingTimeInterval(4))
+        state.update(button: "volumeUp", pressed: false, now: start.addingTimeInterval(5))
+        XCTAssertTrue(state.contains("volumeUp", now: start.addingTimeInterval(5.4)))
+        XCTAssertFalse(state.contains("volumeUp", now: start.addingTimeInterval(5.6)))
+        XCTAssertTrue(state.isActive(now: start.addingTimeInterval(6)))
+        XCTAssertFalse(state.isActive(now: start.addingTimeInterval(35)))
+        state = RemoteVolumeSuppression()
+        state.update(button: "volumeDown", pressed: false, now: start)
+        XCTAssertFalse(state.isActive(now: start))
+    }
+
+    func testBridgeRetriesBackOffAndResetAfterRecovery() {
+        var schedule = BridgeRetrySchedule()
+        let start = Date(timeIntervalSince1970: 100)
+        XCTAssertTrue(schedule.isDue(now: start))
+        schedule.recordAttempt(now: start)
+        XCTAssertFalse(schedule.isDue(now: start.addingTimeInterval(2)))
+        XCTAssertTrue(schedule.isDue(now: start.addingTimeInterval(3)))
+        schedule.recordAttempt(now: start.addingTimeInterval(3))
+        XCTAssertEqual(schedule.nextAttempt, start.addingTimeInterval(9))
+        for _ in 0..<10 { schedule.recordAttempt(now: start) }
+        XCTAssertEqual(schedule.nextAttempt, start.addingTimeInterval(60))
+        schedule.reset()
+        XCTAssertTrue(schedule.isDue(now: start))
+    }
+
     func testRemoteInputStatesExposeDistinctMenuStatus() {
         XCTAssertEqual(RemoteInputState.permissionRequired.menuTitle, "Input: Permission Required...")
         XCTAssertEqual(RemoteInputState.starting.menuTitle, "Input: Starting...")
@@ -96,7 +128,7 @@ final class ModelTests: XCTestCase {
             helperReady: true,
             helperVersion: currentVersion
         ))
-        XCTAssertFalse(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
+        XCTAssertTrue(MicrophoneBridgeManager.shouldRecoverPacketLoggerAfterBluetoothConnection(
             enginePreference: "packetlogger",
             bridgeRunning: false,
             helperReady: true,
@@ -249,5 +281,202 @@ final class ModelTests: XCTestCase {
         // Root-side signature validation must stay ahead of any system mutation.
         XCTAssertTrue(command.contains("validate_packetlogger || fail"))
         XCTAssertTrue(command.contains("validate_helper \"$helper_source\" || fail"))
+    }
+
+    func testSupervisorInitializesAParseableHelperPlist() throws {
+        let command = PacketLoggerBridge.supervisorCommand(
+            packetLogger: "/Applications/PacketLogger.app/Contents/Resources/packetlogger",
+            packetLoggerApp: "/Applications/PacketLogger.app",
+            helperSource: "/tmp/helper", userHelper: "/tmp/voice",
+            runtimeDirectory: "/tmp/runtime", ownerPID: 1000, ownerUID: 501,
+            supervisorToken: UUID().uuidString
+        )
+        let lines = command.components(separatedBy: "\n")
+        let seed = try XCTUnwrap(lines.first { $0.contains("<dict/></plist>") })
+        let populate = try XCTUnwrap(lines.first { $0.contains("-c 'Clear dict'") })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", "set -e\ntemp_plist=\"$1/helper.plist\"\n" + seed + "\n" + populate, "test", directory.path]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let data = try Data(contentsOf: directory.appendingPathComponent("helper.plist"))
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertEqual(plist["Label"] as? String, "com.apple.bluetooth.PacketLoggerHelper")
+        XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/Library/PrivilegedHelperTools/com.apple.bluetooth.PacketLoggerHelper"])
+        XCTAssertEqual(plist["MachServices"] as? [String: Bool], ["com.apple.bluetooth.PacketLoggerHelper": true])
+    }
+
+    // MARK: - Siri Remote generations
+
+    private func interface(
+        deviceKey: String = "48:a9:1c:91:77:5c",
+        transport: String? = "Bluetooth Low Energy",
+        usagePage: Int = 0x0C,
+        usage: Int = 0x01,
+        maxInput: Int = 2,
+        maxFeature: Int = 1,
+        hardwareRevision: String? = nil
+    ) -> RemoteInterfaceDescriptor {
+        RemoteInterfaceDescriptor(
+            deviceKey: deviceKey,
+            productName: "Siri Remote",
+            productID: 0x026D,
+            transport: transport,
+            usagePage: usagePage,
+            usage: usage,
+            maxInputReportSize: maxInput,
+            maxFeatureReportSize: maxFeature,
+            hardwareRevision: hardwareRevision
+        )
+    }
+
+    func testReportSizeFallbackWhenHardwareRevisionIsUnavailable() {
+        // Both families are sold as "Siri Remote" and both have shipped as product 0x026D, so
+        // report sizes remain a fallback when hardware revision is unavailable.
+        let clickpad = [
+            interface(usagePage: 0x0C, usage: 0x04, maxInput: 209, maxFeature: 209),
+            interface(usagePage: 0x0C, usage: 0x01, maxInput: 2, maxFeature: 209),
+        ]
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: clickpad), .aluminumClickpad)
+
+        let touchSurface = [
+            interface(usagePage: 0x0C, usage: 0x01, maxInput: 2, maxFeature: 1),
+            interface(usagePage: 0x01, usage: 0x06, maxInput: 20, maxFeature: 1),
+        ]
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: touchSurface), .glassTouchSurface)
+
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: []), .unknown)
+    }
+
+    func testConfirmedGlassRemoteWithLargeProxyReports() {
+        let old = interface(maxInput: 209, maxFeature: 209, hardwareRevision: "0A00")
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: [old]), .glassTouchSurface)
+        let newer = interface(deviceKey: "newer", maxInput: 209, maxFeature: 209)
+        let both = RemoteGeneration.classifyAll(interfaces: [newer, old])
+        XCTAssertEqual(both[old.deviceKey], .glassTouchSurface)
+        XCTAssertEqual(both[newer.deviceKey], .aluminumClickpad)
+        XCTAssertEqual(both[old.deviceKey]?.action(for: "select", defaultAction: .enterKey, siriAction: .rightOpt), .enterKey)
+        let otherProduct = RemoteInterfaceDescriptor(
+            deviceKey: "other", productName: "Siri Remote", productID: 0x0315,
+            transport: old.transport, usagePage: 0x0C, usage: 1,
+            maxInputReportSize: 209, maxFeatureReportSize: 209, hardwareRevision: "0A00"
+        )
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: [otherProduct]), .aluminumClickpad)
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: [
+            interface(transport: "USB", maxInput: 209, hardwareRevision: "0A00")
+        ]), .unknown)
+        XCTAssertFalse(RemoteInputHandler.shouldSniffAudio(
+            descriptor: old, generation: .glassTouchSurface, hasDedicatedAudioCollection: true
+        ))
+    }
+
+    func testRemoteAttachedOverLightningIsNeverTheActiveRemote() {
+        // A 1st-gen remote plugged in to charge enumerates as a single vendor-page interface
+        // with a 1-byte report and no buttons. It must not displace a paired remote, and on
+        // its own it must not look like a usable remote either.
+        let cabled = interface(
+            deviceKey: "DJ7YK3PPJ90M",
+            transport: "USB",
+            usagePage: 0xFF00,
+            usage: 0x0B,
+            maxInput: 1,
+            maxFeature: 39
+        )
+        XCTAssertEqual(RemoteGeneration.classify(interfaces: [cabled]), .unknown)
+
+        let paired = interface(usagePage: 0x0C, usage: 0x04, maxInput: 209, maxFeature: 209)
+        XCTAssertEqual(RemoteGeneration.primary(interfaces: [cabled, paired]), .aluminumClickpad)
+
+        let pairedOldRemote = interface(deviceKey: "aa:bb:cc:dd:ee:ff", maxInput: 20)
+        XCTAssertEqual(
+            RemoteGeneration.primary(interfaces: [cabled, pairedOldRemote]),
+            .glassTouchSurface
+        )
+
+        // Both remotes paired at once: each keeps its own generation, so a press on either
+        // resolves against the right button profile no matter which one the menu shows.
+        let byDevice = RemoteGeneration.classifyAll(interfaces: [cabled, paired, pairedOldRemote])
+        XCTAssertEqual(byDevice["48:a9:1c:91:77:5c"], .aluminumClickpad)
+        XCTAssertEqual(byDevice["aa:bb:cc:dd:ee:ff"], .glassTouchSurface)
+        XCTAssertEqual(byDevice["DJ7YK3PPJ90M"], .unknown)
+    }
+
+    func testFirstGenerationProfileRehomesTheMissingMuteButton() {
+        // The mute button's two jobs move onto TV and Play/Pause.
+        let overrides = RemoteGeneration.glassTouchSurface.buttonActionOverrides
+        XCTAssertEqual(overrides["tv"], .shiftEnterOrModifier)
+        XCTAssertEqual(overrides["playPause"], .agentClientOrSlash)
+        XCTAssertNil(overrides["select"]) // Both generations keep the baseline Enter action.
+        XCTAssertEqual(RemoteGeneration.glassTouchSurface.absentButtonKeys, ["mute", "power"])
+        XCTAssertTrue(RemoteGeneration.aluminumClickpad.buttonActionOverrides.isEmpty)
+        XCTAssertTrue(RemoteGeneration.unknown.buttonActionOverrides.isEmpty)
+
+        // The chords the mute button armed must still resolve, now from the TV button.
+        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "menu"), .clearInput)
+        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "playPause"), .escape)
+        XCTAssertNil(RemoteInputHandler.modifierChord(for: "tv"))
+
+        // None of the replacements may become a held-key action; all resolve on release.
+        XCTAssertFalse(ButtonAction.shiftEnterOrModifier.requiresHold)
+        XCTAssertFalse(ButtonAction.agentClientOrSlash.requiresHold)
+    }
+
+    func testOnlyPhysicalSiriButtonFollowsTheSiriSettingOnBothGenerations() {
+        for action in ButtonAction.allCases where action.isAssignableToSiriButton {
+            for generation in RemoteGeneration.allCases {
+                XCTAssertEqual(generation.action(for: "siri", defaultAction: .spaceKey, siriAction: action), action)
+                XCTAssertEqual(
+                    generation.action(for: "select", defaultAction: .enterKey, siriAction: action),
+                    .enterKey
+                )
+                XCTAssertEqual(generation.action(for: "navUp", defaultAction: .upKey, siriAction: action), .upKey)
+            }
+        }
+    }
+
+    func testCompositeActionsAreNeverOfferedForTheSiriButton() {
+        // The Siri submenu lists every ButtonAction case. A composite action must not appear
+        // there: they are assigned by the generation profile.
+        for action in ButtonAction.allCases where action.isAssignableToSiriButton {
+            XCTAssertNotEqual(action, .shiftEnterOrModifier)
+            XCTAssertNotEqual(action, .agentClientOrSlash)
+        }
+        XCTAssertTrue(ButtonAction.spaceKey.isAssignableToSiriButton)
+        XCTAssertTrue(ButtonAction.rightCmd.isAssignableToSiriButton)
+        XCTAssertTrue(ButtonAction.none.isAssignableToSiriButton)
+    }
+
+    func testOnlyTheOlderRemoteSniffsOrdinaryInterfacesForAudio() {
+        // The 2nd/3rd-gen remote publishes audio on one dedicated collection, so widening the
+        // net there would pipe button reports into the voice helper.
+        let large = interface(usagePage: 0x0D, usage: 0x01, maxInput: 209, maxFeature: 209)
+        XCTAssertFalse(RemoteInputHandler.shouldSniffAudio(
+            descriptor: large,
+            generation: .aluminumClickpad
+        ))
+        XCTAssertTrue(RemoteInputHandler.shouldSniffAudio(
+            descriptor: interface(maxInput: 20),
+            generation: .glassTouchSurface
+        ))
+        // Button-sized reports can never hold a 20 ms Opus frame.
+        XCTAssertFalse(RemoteInputHandler.shouldSniffAudio(
+            descriptor: interface(maxInput: 4),
+            generation: .glassTouchSurface
+        ))
+    }
+
+    func testFirstGenerationButtonUsagesAreMapped() {
+        // The 1st-gen remote predates the 2nd-gen HID descriptor and reports its six buttons
+        // with the generic Consumer media usages.
+        XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0x46), "menu")
+        XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0x89), "tv")
+        XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0xB0), "playPause")
+        XCTAssertEqual(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0xCF), "siri")
+        // Unrelated usages stay unmapped so nothing else on the vendor pages is seized.
+        XCTAssertNil(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0x77))
     }
 }

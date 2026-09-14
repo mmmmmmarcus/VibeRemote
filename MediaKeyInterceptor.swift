@@ -152,8 +152,10 @@ final class MediaKeyInterceptor {
             break
         }
         
-        if let key = mediaKey, let handler = onMediaKey, handler(key, isKeyDown) {
-            return nil // Consume event
+        if let key = mediaKey, let handler = onMediaKey {
+            let consumed = handler(key, isKeyDown)
+            rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") consumed=\(consumed) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID)) data2=\(nsEvent.data2) epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
+            if consumed { return nil }
         }
         
         return Unmanaged.passUnretained(event)

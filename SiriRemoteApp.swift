@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mediaKeyInterceptor: MediaKeyInterceptor?
     private var consumedRemoteMediaButtons: Set<String> = []
     private var microphoneHealthTimer: Timer?
+    private var bridgeHealthTimer: Timer?
+    private var bridgeWakeObserver: NSObjectProtocol?
     private var bluetoothConnectNotification: IOBluetoothUserNotification?
     /// Disconnect notifications are per-device, not global: IOBluetooth has no
     /// `registerForDisconnectNotifications` counterpart to the class-level connect observer.
@@ -62,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menuBarManager: menuBarManager,
             microphoneBridgeManager: microphoneBridgeManager
         )
+        // Which Siri Remote family is attached decides the button profile and the microphone
+        // path, and it is only knowable once its HID interfaces are open.
+        remoteInputHandler?.onGenerationChanged = { [weak self] generation in
+            self?.menuBarManager.updateRemoteGeneration(generation)
+            self?.microphoneBridgeManager.updateRemoteGeneration(generation)
+        }
         
         // Start remote detection
         remoteDetector = RemoteDetector(
@@ -133,10 +141,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridgeManager?.prepareAtLaunch {
             bridgeManager?.startAtLaunchIfPromptFree()
         }
+        bridgeHealthTimer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.microphoneBridgeManager.maintainBridgeHealth()
+            }
+        }
+        if let bridgeHealthTimer { RunLoop.main.add(bridgeHealthTimer, forMode: .common) }
+        bridgeWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.recoverFromStaleHIDInterfacesIfNeeded()
+                self?.microphoneBridgeManager.recoverPacketLoggerAfterBluetoothConnectionAsync(deviceDescription: "Mac woke from sleep")
+            }
+        }
         microphoneHealthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.recoverFromStaleHIDInterfacesIfNeeded()
-                self?.microphoneBridgeManager.maintainBridgeHealth()
                 self?.refreshPermissionStates()
                 self?.menuBarManager.refresh()
             }
@@ -325,6 +346,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !didCleanUp else { return }
         didCleanUp = true
 
+        bridgeHealthTimer?.invalidate()
+        bridgeHealthTimer = nil
+        if let bridgeWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(bridgeWakeObserver)
+            self.bridgeWakeObserver = nil
+        }
         microphoneHealthTimer?.invalidate()
         microphoneHealthTimer = nil
         bluetoothBridgeRecoveryTimer?.invalidate()
@@ -381,6 +408,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .volumeUp:   buttonName = "volumeUp"
         case .volumeDown: buttonName = "volumeDown"
         case .mute:       buttonName = "mute"
+        }
+
+        // System repeats arrive without another HID down. Keep consuming them for the
+        // physical hold instead of letting them escape after the initial 350ms marker.
+        if VolumeRevertGuard.shared.suppressesMediaKey(buttonName) {
+            if isPressed { consumedRemoteMediaButtons.insert(buttonName) }
+            else { consumedRemoteMediaButtons.remove(buttonName) }
+            return true
         }
 
         if !isPressed {

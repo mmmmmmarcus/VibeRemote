@@ -49,13 +49,37 @@ enum SystemVolume {
     }
 }
 
+/// Tracks physical holds separately from the short tail of delayed Bluetooth events.
+/// A missing release expires after 30 seconds so a disconnected remote cannot lock volume.
+struct RemoteVolumeSuppression {
+    private var heldUntil: [String: Date] = [:]
+    private var releasedUntil: [String: Date] = [:]
+
+    mutating func update(button: String, pressed: Bool, now: Date) {
+        if pressed {
+            heldUntil[button] = now.addingTimeInterval(30)
+            releasedUntil.removeValue(forKey: button)
+        } else if heldUntil.removeValue(forKey: button) != nil {
+            releasedUntil[button] = now.addingTimeInterval(0.5)
+        }
+    }
+
+    func contains(_ button: String, now: Date) -> Bool {
+        now < (heldUntil[button] ?? .distantPast) || now < (releasedUntil[button] ?? .distantPast)
+    }
+
+    func isActive(now: Date) -> Bool {
+        ["volumeUp", "volumeDown"].contains { contains($0, now: now) }
+    }
+}
+
 /// Reverts AVRCP-origin volume changes caused by the Siri Remote's volume buttons.
 ///
 /// Design: a CoreAudio listener continuously tracks system volume. It maintains a
 /// `baselineVolume` that lags real volume by `settleDelay` — any observed change stays
-/// provisional for that interval. If a remote volume HID press (`armFromRemoteButton()`)
+/// provisional for that interval. If a remote volume HID press (`handleRemoteButton(_:pressed:)`)
 /// arrives during the settle window, we retroactively revert to the pre-change baseline.
-/// During a 500ms guard window after a press, further changes are reverted immediately.
+/// Throughout the hold and for 500ms after release, further changes are reverted immediately.
 ///
 /// Why lagged baseline: BT AVRCP can beat the HID callback to main. A plain snapshot-on-
 /// press approach captures the post-change volume and has nothing to revert to. By holding
@@ -68,8 +92,7 @@ final class VolumeRevertGuard {
     static let shared = VolumeRevertGuard()
 
     private var baselineVolume: Float?
-    private var guardUntil: Date = .distantPast
-    private let guardWindow: TimeInterval = 0.5
+    private var suppression = RemoteVolumeSuppression()
     private let settleDelay: TimeInterval = 0.15
     private var pendingSettle: DispatchWorkItem?
     private var volumeListener: AudioObjectPropertyListenerBlock?
@@ -89,18 +112,28 @@ final class VolumeRevertGuard {
         rmDebug("🔊 VolumeRevertGuard prewarm: listener=\(volumeListener != nil) baseline=\(baselineVolume.map { String(format: "%.3f", $0) } ?? "nil")")
     }
 
-    /// Called on every volume HID press from the remote. Opens the guard window and, if a
+    /// Called on volume HID press and release. Tracks the full hold and, if a
     /// volume change landed in the last `settleDelay` ms, reverts it retroactively — this
     /// handles the common case where AVRCP beats HID to the main thread.
-    func armFromRemoteButton() {
+    func handleRemoteButton(_ button: String, pressed: Bool) {
         guard isActive else { return }
         ensureDefaultOutputListener()
         bindVolumeListenerToCurrentOutput()
-        guardUntil = Date().addingTimeInterval(guardWindow)
-        if pendingSettle != nil, let baselineValue = baselineVolume {
+        suppression.update(button: button, pressed: pressed, now: Date())
+        if suppression.isActive(now: Date()), pendingSettle != nil, let baselineValue = baselineVolume {
             pendingSettle?.cancel()
             pendingSettle = nil
             SystemVolume.set(baselineValue)
+        }
+    }
+
+    func suppressesMediaKey(_ button: String) -> Bool {
+        isActive && suppression.contains(button, now: Date())
+    }
+
+    func releaseRemoteButtons() {
+        for button in ["volumeUp", "volumeDown"] {
+            suppression.update(button: button, pressed: false, now: Date())
         }
     }
 
@@ -109,7 +142,7 @@ final class VolumeRevertGuard {
         isActive = false
         pendingSettle?.cancel()
         pendingSettle = nil
-        guardUntil = .distantPast
+        suppression = RemoteVolumeSuppression()
         removeVolumeListener()
 
         if let listener = defaultOutputListener {
@@ -201,7 +234,7 @@ final class VolumeRevertGuard {
     private func defaultOutputDidChange() {
         pendingSettle?.cancel()
         pendingSettle = nil
-        guardUntil = .distantPast
+        suppression = RemoteVolumeSuppression()
         bindVolumeListenerToCurrentOutput()
         baselineVolume = SystemVolume.get()
         rmDebug("🔊 Default output changed: device=\(listenerDeviceID) baseline=\(baselineVolume.map { String(format: "%.3f", $0) } ?? "nil")")
@@ -229,7 +262,7 @@ final class VolumeRevertGuard {
             return
         }
         let baselineStr = baselineVolume.map { String(format: "%.3f", $0) } ?? "nil"
-        let inWindow = Date() < guardUntil
+        let inWindow = suppression.isActive(now: Date())
         rmDebug("🔊 listener: current=\(String(format: "%.3f", current)) baseline=\(baselineStr) inGuard=\(inWindow)")
 
         // Our own revert write echoes back as a listener callback; noop when it matches.

@@ -27,6 +27,7 @@ shared library target and shell scripts that build the audio driver and assemble
 | `SiriRemoteApp.swift` | `AppDelegate`: wires managers, permissions, lifecycle. |
 | `MenuBarManager.swift` | Status-item menu, all user-facing UI. |
 | `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vibeRemoteLogPath` and `rmDebug`. |
+| `RemoteGeneration.swift` | Tells the 1st-gen remote from the 2nd/3rd-gen one and holds every behavioral difference between them. |
 | `RemoteInputHandler.swift` | Opens HID interfaces, maps buttons, sends synthetic key events, performs the `0xAF` input-enable Feature write. |
 | `RemoteHIDChannel.swift` | Direct HID-over-GATT (CoreBluetooth) path — see caveats below. |
 | `RemoteBatteryReader.swift` | Battery level via IOBluetooth/CoreBluetooth. |
@@ -34,6 +35,7 @@ shared library target and shell scripts that build the audio driver and assemble
 | `MediaKeyInterceptor.swift` | Intercepts system media keys the remote emits. |
 | `SystemVolume.swift` | CoreAudio volume read/set + revert guard. |
 | `MicrophoneBridgeManager.swift` | Orchestrates the mic bridge (both engines). The largest and most delicate file. |
+| `RemoteAudioProtocol/SiriRemotePacketParser.swift` | Shared, testable HID/ACL/L2CAP audio parser for both remote families. |
 | `VoiceBridgeHelper/main.swift` | **Separate executable** (`VibeRemoteVoiceBridge`): parses HCI/HID records, Opus-decodes, plays into the virtual audio device. |
 | `PrivilegedHelper/main.swift` | **Separate executable** (`VibeRemoteHelper`): root LaunchDaemon registered via `SMAppService`; performs privileged work over XPC. |
 | `HelperProtocol/HelperProtocol.swift` | Library target shared by the app and daemon: the XPC contract and shared identifiers. |
@@ -41,6 +43,7 @@ shared library target and shell scripts that build the audio driver and assemble
 | `Vendor/SiriRemoteVoiceControl/` | Prebuilt legacy helper binaries (compatibility fallbacks). |
 | `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
 | `build.sh` | SwiftPM build → universal `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
+| `install.sh` | Developer-ID-signed build deployed over `/Applications/VibeRemote.app`; the stable signature is what preserves the TCC grants. |
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `VibeRemote.entitlements` | Only `com.apple.security.device.bluetooth`. |
@@ -69,20 +72,22 @@ swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
 no helper until those scripts run; the app degrades gracefully (falls back to an existing
 BlackHole/Soundflower device and to admin prompts).
 
-**Prefer the Developer ID signing command when installing for real testing.**
-Ad-hoc signatures change every build, which revokes the app's Accessibility /
-Input Monitoring / Bluetooth TCC grants and forces re-approval each time. A
-stable identity preserves them:
+**Use `./install.sh` when installing for real testing.** It wraps the Developer ID
+signing command and the deploy-and-relaunch dance below, because ad-hoc signatures change
+every build, which revokes the app's Accessibility / Input Monitoring / Bluetooth TCC
+grants and forces re-approval each time. A stable identity preserves them:
+
+```bash
+./install.sh                          # picks the first Developer ID identity
+ARCHS="$(uname -m)" ./install.sh      # host-only, ~2x faster while iterating
+```
+
+Equivalent by hand:
 
 ```bash
 SIGNING_MODE=developer \
 CODESIGN_IDENTITY="Developer ID Application: <your identity>" \
 ./create_app_bundle.sh
-```
-
-Deploy the built bundle over the installed one and relaunch:
-
-```bash
 osascript -e 'tell application "VibeRemote" to quit'
 rm -rf /Applications/VibeRemote.app
 ditto VibeRemote.app /Applications/VibeRemote.app
@@ -92,6 +97,49 @@ open /Applications/VibeRemote.app
 CI (`.github/workflows/ci.yml`, `macos-15`) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
 the entitlements. Keep all of these green.
+
+## Remote generations
+
+Do not classify solely by HID report size: the user's physically confirmed black-glass
+remote advertises 209-byte input/feature reports too. Product `0x026D` plus
+`kBTHardwareRevisionKey = 0A00` is the observed old-hardware combination and takes priority
+in `RemoteGeneration.classify`. Report size is only a fallback for unrecognized hardware;
+it is not proof of generation. Classification uses the whole physical interface set.
+
+- Classification is **per physical remote** (`deviceKey` = Bluetooth address, or the Apple
+  serial over Lightning), not global. Both remotes can be paired at once, so button
+  mappings and audio registrations key off the interface that produced the event;
+  `RemoteGeneration.primary` only decides what the menu displays.
+- A remote plugged in over Lightning enumerates as a single vendor-page interface with a
+  1-byte report and no buttons. It classifies as `.unknown` and must never become the
+  active remote — otherwise charging the old remote hijacks the profile of the paired one.
+- The 1st-gen remote has **no Mute and no Power key**. The mute button's two jobs move
+  to the only buttons whose baseline action is a single instantaneous press: TV gains
+  the modifier hold, Play/Pause gains the "/" hold. That table lives in
+  `RemoteGeneration.buttonActionOverrides`.
+- Both generations use the physical Siri button for **Siri Button Mapping** and
+  firmware-gated microphone capture. The old touch surface and new clickpad center
+  keep the baseline Enter action; do not remap the old surface to Siri again.
+- **Composite actions are profile-assigned, never user-chosen.** The Siri submenu iterates
+  `ButtonAction.allCases`, so profile composites return `false` from
+  `isAssignableToSiriButton`. `loadSiriButtonAction` re-checks it on read.
+- Older remotes without a dedicated Consumer/0x04 audio collection have their voice
+  frames sniffed off every interface whose reports could hold a 20 ms Opus frame
+  (`RemoteInputHandler.shouldSniffAudio`). The confirmed 0A00 black-glass remote does
+  expose a dedicated collection; prefer it and suppress other-interface sniffing for that
+  physical remote. Sniffing is only safe because the voice helper
+  confirms the framing per report — length prefix plus a CELT-only, single-frame Opus TOC
+  byte — instead of assuming it; button reports on the same interface fail that check.
+  **Never widen sniffing to the 2nd/3rd-gen remote**: it publishes audio on one dedicated
+  collection, and the extra interfaces would pipe button reports into the decoder.
+- Sniffed interfaces keep handling buttons. `handleInputValue` only diverts a value to the
+  audio parser when the interface is a dedicated audio collection or the value is wider
+  than `maximumButtonValueLength`.
+
+Both generations encode CELT-only, single-frame Opus and the decoder outputs 48 kHz
+regardless of the encoded bandwidth, so one decoder configuration serves both. The
+vendored legacy helper decoded at 16 kHz purely because that was its output rate — that is
+**not** evidence of a second codec configuration, and re-deriving one wastes time.
 
 ## Button mappings and hold behavior
 
@@ -173,6 +221,11 @@ path look impossible; do not regress them:
 3. `defaults write com.apple.PacketLogger 'Last UsedPacket Priority Set' -int 3`
    is required or the CLI dumps the device inventory and disconnects.
 
+The helper is now version 3: first-run PacketLoggerHelper plist creation seeds a valid XML
+dictionary before PlistBuddy writes entries. Never pre-create a zero-length plist; current
+macOS rejects it with "Cannot parse a NULL or zero-length data". The model test executes
+this exact generated fragment without privileges and checks the resulting launchd keys.
+
 ### Bluetooth debug prerequisites
 
 The supervisor writes `com.apple.MobileBluetooth.debug` prefs and the
@@ -222,6 +275,25 @@ start is guaranteed silent (Direct HID engine, or PacketLogger engine with the a
 helper daemon current). Anything that would raise an administrator prompt stays behind
 the explicit `Start`/`Restart` menu action — app launch must never surprise the user
 with a password dialog.
+
+### Automatic recovery and bounded keepalive experiment
+
+The 3-second bridge health check restarts stopped voice helpers or supervisors with
+3/6/12/24/48/60-second retry delays. Reset the failure history only after 60 seconds
+of healthy operation. `wantsBridgeRunning` is queue-confined and cleared on shutdown;
+all automatic start paths pass `allowAdministratorPrompt: false` through to the
+supervisor boundary, even if helper approval changes during startup. Reconnect
+recovery must also cover an already-stopped bridge. Mac wake requests recovery.
+The independent HID registry watchdog remains at 15 seconds.
+
+`remoteKeepAliveExperimentUntil` is an optional Unix timestamp, not a permanent
+mode. Until it expires, RemoteHIDChannel may read the current peripheral's battery
+characteristic every 20 seconds. It stops on disconnect, expiry, or three errors.
+Successful reads prove communication only, not prevention of firmware sleep. Keep
+this disabled by default; do not claim both-generation keepalive from one remote.
+The 2026-09-14 black-glass test failed: reads succeeded through 08:59:56, but
+the remote disconnected at 09:00:04, about two minutes after startup. The local
+experiment was disabled. Do not re-enable battery polling as a proven keepalive.
 
 ### Bluetooth topology changes
 
@@ -314,12 +386,12 @@ remember an already-approved daemon keeps running the **old** binary until re-re
 ### Migration status (what still raises a password prompt)
 
 The helper owns audio-driver installation **and** PacketLogger capture
-(`startPacketLoggerCapture`, helper version 2): with the daemon approved, starting the
+(`startPacketLoggerCapture`, introduced in v2; current minimum v3): with the daemon approved, starting the
 bridge no longer prompts. The design constraint held — the voice helper stays in the
 user's CoreAudio session; only the capture supervisor runs as root, launched by the
 daemon instead of osascript, with the same FIFO data channel and the same stop-signal
 file. The prompt survives in exactly two cases: the daemon is not approved / not
-reachable, or an approved daemon is still **running a pre-v2 binary** (a replaced app
+reachable, or an approved daemon is still **running a pre-v3 binary** (a replaced app
 bundle does not restart a live daemon — the app probes `helperVersion` first and falls
 back rather than calling a selector the old process lacks; `sudo launchctl kickstart -k
 system/com.viberemote.helper` or re-registration picks up the new binary).
@@ -389,3 +461,13 @@ in `voice-helper.log`, not just that the process launched.
 Button mapping, GATT/HID delivery, and audio decoding cannot be validated in CI.
 Any change to `RemoteInputHandler`, `RemoteHIDChannel`, the supervisor script, or
 the helper needs a manual test on a paired Siri Remote before it can be trusted.
+
+### Old-remote PacketLogger framing (confirmed 2026-09-13)
+
+The black-glass remote sends ATT `1B 23 00` notifications. Start/end payloads are
+`1B 23 00 00 10` / `1B 23 00 10 00`; complete audio payloads carry the Opus length
+at byte 9 and packet at byte 10. Reassemble L2CAP using the actual ACL connection
+handle (0x0043 observed), never hardcode 0x0040 or assume 31-byte ACL records.
+The shared RemoteAudioProtocol target tests fragmentation and interleaved generations.
+`VibeRemoteVoiceBridge --validate-capture < capture.log` decodes locally without opening
+an audio device, reporting packet count and peak. Capture may contain speech; keep local.

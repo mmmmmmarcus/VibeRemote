@@ -14,6 +14,19 @@ import Foundation
 import HelperProtocol
 import IOBluetooth
 
+/// Retry timing is independent of process state: a stopped process still needs recovery.
+struct BridgeRetrySchedule {
+    private(set) var nextAttempt = Date.distantPast
+    private var attempts = 0
+    mutating func recordAttempt(now: Date) {
+        let delay = min(60.0, 3.0 * pow(2.0, Double(min(attempts, 5))))
+        attempts += 1
+        nextAttempt = now.addingTimeInterval(delay)
+    }
+    func isDue(now: Date) -> Bool { now >= nextAttempt }
+    mutating func reset() { self = BridgeRetrySchedule() }
+}
+
 struct MicrophoneBridgeStatus: Sendable {
     var running: Bool
     var remoteAddress: String?
@@ -165,12 +178,18 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private let appBundle: Bundle
     private let workQueue = DispatchQueue(label: "com.viberemote.microphoneBridge", qos: .userInitiated)
     private let workQueueKey = DispatchSpecificKey<Void>()
+    // Accessed only on workQueue. Shutdown disables all queued automatic work.
+    private var wantsBridgeRunning = false
+    private var retrySchedule = BridgeRetrySchedule()
+    private var healthySince: Date?
+
     private let stateLock = NSLock()
     private var storedHelperProcess: Process?
     private var storedHelperPID: Int32?
     private var storedPacketLoggerIdentity: SupervisorIdentity?
     private var storedPreviousDefaultInputDeviceID: AudioDeviceID?
     private var storedLastError: String?
+    private var storedRemoteGeneration: RemoteGeneration = .unknown
     /// Accessed only on workQueue. The write end feeds raw HID report records to the user-session helper.
     private var helperInputPipe: Pipe?
     private var directHIDCapturedReportCount = 0
@@ -235,25 +254,41 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func startAtLaunchIfPromptFree() {
         workQueue.async { [weak self] in
             guard let self else { return }
-            if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" {
-                guard PrivilegedHelperClient.shared.state == .ready else {
-                    self.appendAppLog("Microphone bridge auto-start skipped: the privileged helper is not approved, so starting would prompt for a password")
-                    return
-                }
-                guard let version = self.fetchPrivilegedHelperVersion(timeout: 10),
-                      version >= HelperConstants.packetLoggerCaptureMinimumVersion else {
-                    self.appendAppLog("Microphone bridge auto-start skipped: the helper daemon is unreachable or outdated, so starting would prompt for a password")
-                    return
-                }
-            }
-            self.appendAppLog("Microphone bridge auto-starting at launch")
-            self.startLocked()
+            self.wantsBridgeRunning = true
+            self.attemptAutomaticStartLocked(reason: "app launch")
         }
+    }
+
+    private func attemptAutomaticStartLocked(reason: String) {
+        guard wantsBridgeRunning, retrySchedule.isDue(now: Date()) else { return }
+        healthySince = nil
+        appendAppLog("Microphone bridge automatic start: \(reason)")
+        startLocked(allowAdministratorPrompt: false)
+        // Count backoff from completion, not from before a potentially slow XPC request.
+        retrySchedule.recordAttempt(now: Date())
+        if isRunningLocked() { healthySince = Date() }
     }
 
     func handleButton(button: String, pressed: Bool) {
         // Siri Remote decides when to emit microphone audio. Button presses should not
         // start/stop the bridge; the bridge stays online and passively waits for audio.
+    }
+
+    /// Records which remote family is attached so diagnostics report the microphone path that
+    /// is actually in use. Both families feed the same helper — the framings are distinguished
+    /// per report inside it — so this changes reporting, not routing.
+    func updateRemoteGeneration(_ generation: RemoteGeneration) {
+        let changed = withStateLock { () -> Bool in
+            guard storedRemoteGeneration != generation else { return false }
+            storedRemoteGeneration = generation
+            return true
+        }
+        guard changed else { return }
+        appendAppLog("Remote generation: \(generation.displayName) — microphone path: \(generation.microphoneTransport.rawValue)")
+    }
+
+    var remoteGeneration: RemoteGeneration {
+        withStateLock { storedRemoteGeneration }
     }
 
     func handleDirectHIDAudioReport(reportID: UInt32, data: Data) {
@@ -488,18 +523,19 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     func start() {
         syncOnWorkQueue {
+            wantsBridgeRunning = true
             startLocked()
         }
     }
 
-    private func startLocked() {
+    private func startLocked(allowAdministratorPrompt: Bool = true) {
         // macOS's IOHID proxy never delivers Siri Remote 0xFA audio reports to user space,
         // so the PacketLogger capture bridge remains the only working audio path. The
         // Direct HID engine stays the default while that conclusion is revalidated;
         // opt into the capture engine with:
         //   defaults write com.viberemote.app microphoneBridgeEngine packetlogger
         if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" {
-            startPacketLoggerBridgeLocked()
+            startPacketLoggerBridgeLocked(allowAdministratorPrompt: allowAdministratorPrompt)
             return
         }
         appendAppLog("Direct HID microphone bridge start requested")
@@ -591,7 +627,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     /// Retained temporarily as an implementation reference and compatibility fallback while the
     /// Direct HID framing is validated. The normal menu flow never calls this method.
-    private func startPacketLoggerBridgeLocked() {
+    private func startPacketLoggerBridgeLocked(allowAdministratorPrompt: Bool = true) {
         appendAppLog("Microphone bridge start requested")
         guard prepareRuntimeDirectory() else { return }
 
@@ -681,7 +717,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             packetLogger: packetLogger,
             packetLoggerApp: packetLoggerApp,
             userHelper: helper,
-            supervisorToken: supervisorToken
+            supervisorToken: supervisorToken,
+            allowAdministratorPrompt: allowAdministratorPrompt
         ) {
         case .started(let supervisorPID):
             pid = supervisorPID
@@ -760,7 +797,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         packetLogger: String,
         packetLoggerApp: String,
         userHelper: String,
-        supervisorToken: String
+        supervisorToken: String,
+        allowAdministratorPrompt: Bool
     ) -> SupervisorStartOutcome {
         if let viaHelper = startSupervisorViaPrivilegedHelper(
             packetLogger: packetLogger,
@@ -768,6 +806,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             supervisorToken: supervisorToken
         ) {
             return viaHelper
+        }
+        guard allowAdministratorPrompt else {
+            return .failed("Automatic start is waiting for an approved, current VibeRemote helper. Use the menu to complete setup.")
         }
         return startSupervisorViaAdministratorPrompt(
             packetLogger: packetLogger,
@@ -789,11 +830,11 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // An approved daemon keeps running the binary it launched with, which may predate
         // this capability. Probe its version instead of sending a selector it may lack.
         guard let version = fetchPrivilegedHelperVersion(timeout: 10) else {
-            appendAppLog("Microphone bridge helper did not answer a version probe; falling back to an administrator prompt")
+            appendAppLog("Microphone bridge helper did not answer a version probe; privileged capture unavailable")
             return nil
         }
         guard version >= HelperConstants.packetLoggerCaptureMinimumVersion else {
-            appendAppLog("Microphone bridge helper is version \(version), needs \(HelperConstants.packetLoggerCaptureMinimumVersion); falling back to an administrator prompt (restarting the daemon picks up the new binary)")
+            appendAppLog("Microphone bridge helper is version \(version), needs \(HelperConstants.packetLoggerCaptureMinimumVersion); restart the daemon to pick up the new binary")
             return nil
         }
         appendAppLog("Microphone bridge starting the supervisor via the privileged helper")
@@ -891,6 +932,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     func stop() {
         syncOnWorkQueue {
+            wantsBridgeRunning = false
             stopLocked()
         }
     }
@@ -904,14 +946,19 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     func maintainBridgeHealth() {
         workQueue.async { [weak self] in
-            guard let self else { return }
-            let running = self.isRunningLocked()
-            if !running {
-                if self.previousDefaultInputDeviceID != nil {
-                    self.setLastError("The microphone bridge stopped unexpectedly; restoring the previous input device.")
-                    self.stopLocked()
-                }
+            guard let self, self.wantsBridgeRunning else { return }
+            let packetLogger = UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger"
+            let supervisorAlive = !packetLogger || self.packetLoggerIdentity.map(self.packetLoggerSupervisorMatches) == true
+            if !self.isRunningLocked() || !supervisorAlive {
+                self.healthySince = nil
+                guard self.retrySchedule.isDue(now: Date()) else { return }
+                self.stopLocked()
+                self.attemptAutomaticStartLocked(reason: "capture pipeline stopped")
                 return
+            }
+            if self.healthySince == nil { self.healthySince = Date() }
+            if let since = self.healthySince, Date().timeIntervalSince(since) >= 60 {
+                self.retrySchedule.reset()
             }
             if let outputDeviceName = self.preferredOutputDeviceName(),
                self.defaultInputDeviceName() != outputDeviceName {
@@ -932,7 +979,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
             let enginePreference = UserDefaults.standard.string(forKey: "microphoneBridgeEngine")
             let bridgeRunning = self.isRunningLocked()
-            guard enginePreference == "packetlogger", bridgeRunning else { return }
+            guard self.wantsBridgeRunning, enginePreference == "packetlogger" else { return }
 
             let helperReady = PrivilegedHelperClient.shared.state == .ready
             let helperVersion = helperReady
@@ -954,7 +1001,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 "Microphone bridge restarting after Bluetooth change: \(reason)"
             )
             self.stopLocked()
-            self.startPacketLoggerBridgeLocked()
+            self.retrySchedule.reset()
+            self.attemptAutomaticStartLocked(reason: reason)
         }
     }
 
@@ -965,13 +1013,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         helperVersion: Int?
     ) -> Bool {
         enginePreference == "packetlogger"
-            && bridgeRunning
             && helperReady
             && (helperVersion ?? 0) >= HelperConstants.packetLoggerCaptureMinimumVersion
     }
 
     func startAsync(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
+            self?.wantsBridgeRunning = true
             self?.startLocked()
             DispatchQueue.main.async {
                 completion?()
@@ -982,6 +1030,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func restartAsync(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
             self?.stopLocked()
+            self?.wantsBridgeRunning = true
             self?.startLocked()
             DispatchQueue.main.async {
                 completion?()
@@ -1020,7 +1069,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                         self.appendAppLog("Installed the VibeRemote audio driver via the helper")
                         self.workQueue.async {
                             Thread.sleep(forTimeInterval: 2.0)
-                            let installed = self.preferredOutputDeviceName() != nil
+                            let installed = self.audioDeviceID(named: "VibeRemote") != nil
                             if installed { self.clearLastError() }
                             DispatchQueue.main.async {
                                 completion?(installed, installed ? nil : "The driver was installed but no virtual audio device appeared yet.")
@@ -1075,7 +1124,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 self.appendAppLog("Installed the VibeRemote audio driver")
                 // coreaudiod needs a moment to publish the new device.
                 Thread.sleep(forTimeInterval: 2.0)
-                let installed = self.preferredOutputDeviceName() != nil
+                let installed = self.audioDeviceID(named: "VibeRemote") != nil
                 if installed {
                     self.clearLastError()
                 }

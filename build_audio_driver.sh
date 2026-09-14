@@ -123,7 +123,9 @@ mkdir -p "$OUTPUT_DIR"
 rm -rf "$OUTPUT_DIR/$DRIVER_NAME.driver"
 cp -R "$built" "$OUTPUT_DIR/"
 
-if [ "$signing_identity" != "-" ]; then
+if [ "$signing_identity" = "-" ]; then
+    codesign --force --sign - "$OUTPUT_DIR/$DRIVER_NAME.driver"
+else
     codesign --force --timestamp --sign "$signing_identity" "$OUTPUT_DIR/$DRIVER_NAME.driver"
 fi
 codesign --verify --strict --verbose=1 "$OUTPUT_DIR/$DRIVER_NAME.driver" 2>&1 | tail -1

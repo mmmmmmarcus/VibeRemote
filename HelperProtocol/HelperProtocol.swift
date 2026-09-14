@@ -18,12 +18,12 @@ public enum HelperConstants {
 
     /// Bumped whenever the helper's capabilities change so the app can prompt for a
     /// re-registration instead of talking to a stale daemon.
-    public static let version = 2
+    public static let version = 3
 
-    /// The helper version that introduced `startPacketLoggerCapture`. An approved daemon
-    /// keeps running the binary it launched with, so the app checks this before calling and
-    /// falls back to an administrator prompt when the daemon predates the capability.
-    public static let packetLoggerCaptureMinimumVersion = 2
+    /// Minimum capture implementation: v2 introduced the XPC method; v3 fixes first-run
+    /// plist creation on current macOS. An approved daemon retains its old binary until
+    /// restarted, so the app probes before calling and falls back when it is outdated.
+    public static let packetLoggerCaptureMinimumVersion = 3
 
     /// Team identifier the helper requires of any connecting client.
     public static let expectedTeamIdentifier = "SM96W8VVK9"
@@ -232,7 +232,9 @@ public enum PacketLoggerBridge {
           [ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:com.apple.bluetooth.PacketLoggerHelper' "$helper_plist" 2>/dev/null)" = "true" ] || fail "The PacketLoggerHelper plist has unexpected Mach services."
         else
           temp_plist="$backup_dir/PacketLoggerHelper.plist"
-          /usr/bin/touch "$temp_plist"
+          # PlistBuddy rejects an existing zero-length file on current macOS. Seed a
+          # valid dictionary before applying the launch-daemon entries.
+          /usr/bin/printf '%s\\n' '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>' > "$temp_plist"
           /usr/libexec/PlistBuddy -c 'Clear dict' -c 'Add :Label string com.apple.bluetooth.PacketLoggerHelper' -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /Library/PrivilegedHelperTools/com.apple.bluetooth.PacketLoggerHelper' -c 'Add :MachServices dict' -c 'Add :MachServices:com.apple.bluetooth.PacketLoggerHelper bool true' -c 'Add :RunAtLoad bool true' "$temp_plist" >/dev/null
           /usr/bin/install -m 644 -o root -g wheel "$temp_plist" "$helper_plist"
           plist_installed_by_bridge=1

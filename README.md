@@ -5,10 +5,29 @@ buttons to keyboard actions. It can also display the connected remote's
 battery level and optionally bridge Siri Remote microphone audio through a
 virtual audio device.
 
+Both Siri Remote hardware families are supported:
+
+| | 1st gen (A1513 / A1844) | 2nd & 3rd gen (A2540 / A2859) |
+|---|---|---|
+| Look | thin, black glass touch surface | thicker, aluminum clickpad ring |
+| Buttons | Menu, TV, Play/Pause, Siri, Volume ± | adds Power and Mute |
+| Microphone | HID report sniffing (see below) | dedicated `0xFA` audio collection |
+
+The app detects which one is attached and switches profile automatically; both can be
+paired at the same time and each keeps its own mapping.
+
 ## Features
 
 - Configurable actions for Back/Menu, TV, Siri, Play/Pause, volume, mute,
   power, previous-track, and next-track buttons.
+- Automatic per-generation button profiles. The 1st-gen remote has no Mute and
+  no Power key, so the mute button's two roles move to buttons that do exist:
+  holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
+  sends Esc) while a TV tap still sends Shift+Enter, and holding Play/Pause
+  types "/" while a tap still toggles the agent client. On both generations,
+  **Siri Button Mapping** applies only to the physical Siri button; the touch
+  surface / clickpad center sends Enter. The remote microphone transmits only
+  while the physical Siri button is held.
 - Press-and-hold mappings for Space, Right Command, and Right Option.
 - Siri Remote connection and battery status in the menu bar.
 - Suppression of duplicate HID/media-key delivery without globally unloading
@@ -28,7 +47,20 @@ The optional microphone bridge additionally requires:
 
 ## Build
 
-Create an optimized universal local build:
+Build, sign, and install over `/Applications/VibeRemote.app`:
+
+```bash
+./install.sh
+```
+
+`install.sh` signs with the first Developer ID identity in the keychain. That matters
+for day-to-day use: macOS keys the Accessibility / Input Monitoring / Bluetooth grants to
+the code signature, so an ad-hoc signature — which changes on every build — revokes them
+on every rebuild, while a stable identity keeps them for the life of the app. Pass
+`CODESIGN_IDENTITY=...` to choose a different one, and `ARCHS="$(uname -m)"` for a faster
+host-only build.
+
+Or create an optimized universal local build without installing it:
 
 ```bash
 ./create_app_bundle.sh
@@ -76,16 +108,26 @@ approved again in System Settings:
 
 ## Microphone bridge safety
 
-The microphone bridge is meant to run whenever the app is open, but it never
-starts on its own: each start is an explicit menu action. Current builds read the
-Siri Remote's dedicated audio HID interface directly and pass reports to the
-user-session voice helper. Starting the bridge does not launch PacketLogger,
-change Bluetooth debugging settings, or request administrator privileges.
-On third-generation remotes, VibeRemote also performs the required HID-over-GATT
-input-enable handshake (`0xAF`) before waiting for the 99-byte, 48 kHz Opus
-microphone reports. The wire layout was cross-checked against the independent
-[siri-remote](https://github.com/azais-corentin/siri-remote) reverse-engineering
-project.
+With the app open, the bridge automatically starts when its dependencies and the
+approved, current privileged helper are available. A stopped capture pipeline is
+retried with bounded backoff; reconnect and Mac wake also request recovery.
+Automatic recovery never falls back to an administrator password prompt. Complete
+missing setup through the menu. Quitting VibeRemote stops recovery and capture.
+
+The working microphone engine is PacketLogger (select with
+`defaults write com.viberemote.app microphoneBridgeEngine packetlogger`). It uses
+Apple's separately installed PacketLogger, enables Bluetooth debug capture, and
+runs only the capture supervisor as root. The voice decoder remains in the user
+session. The Direct HID engine is retained but does not deliver audio on the tested
+macOS configuration. Audio is emitted only while the physical Siri button is held.
+
+Some black-glass remotes also expose a dedicated audio collection (observed with
+product 0x026D / hardware revision 0A00), which VibeRemote prefers. Only older remotes
+without that collection use report sniffing on interfaces large enough to hold a
+20 ms Opus frame; the voice helper validates framing per report.
+Both generations encode CELT-only, single-frame Opus (`0xB8` — wideband, 20 ms), which is
+what makes sniffing safe on an interface that also reports buttons: a report only becomes
+audio if its length prefix and Opus TOC byte both check out.
 
 For framing diagnostics, each bridge start keeps at most 128 raw audio HID
 reports in the app's private Application Support directory. These reports can

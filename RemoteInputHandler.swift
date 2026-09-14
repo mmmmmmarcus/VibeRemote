@@ -71,6 +71,23 @@ final class RemoteInputHandler {
     private var lastAudioReports: [ObjectIdentifier: (data: Data, time: TimeInterval)] = [:]
     private var isAcceptingInput = true
 
+    /// Descriptors for every interface we hold open, used to tell the 1st-gen remote from the
+    /// 2nd/3rd-gen one. Both families report the same product name and have shipped under the
+    /// same product ID, so the decision needs the whole interface set (see `RemoteGeneration`).
+    private var interfaceDescriptors: [ObjectIdentifier: RemoteInterfaceDescriptor] = [:]
+    /// Interfaces that only carry raw reports to the audio parser. Their button elements are
+    /// still handled normally — on the 1st-gen remote the same interface may do both.
+    private var audioOnlyInterfaces: Set<ObjectIdentifier> = []
+    private var lastReportedGeneration: RemoteGeneration = .unknown
+    /// Generation per physical remote, keyed by `RemoteInterfaceDescriptor.deviceKey`.
+    private var deviceGenerations: [String: RemoteGeneration] = [:]
+
+    /// Which remote family is currently attached. Drives the button profile and the
+    /// microphone path; `.unknown` until at least one interface is open.
+    private(set) var generation: RemoteGeneration = .unknown
+
+    var onGenerationChanged: ((RemoteGeneration) -> Void)?
+
     // Prevent double-processing with MediaKeyInterceptor. Both producers run on the main loop.
     static var lastProcessedButton: String?
     static var lastProcessedTime: UInt64 = 0
@@ -135,44 +152,21 @@ final class RemoteInputHandler {
             property(kIOHIDPrimaryUsageKey, of: device)
         ))
 
-        let isAudioInterface = Self.isAudioInterface(
-            usagePage: property(kIOHIDPrimaryUsagePageKey, of: device),
-            usage: property(kIOHIDPrimaryUsageKey, of: device)
+        // Buffered-byte HID elements are delivered as IOHIDValue on some macOS builds even when
+        // the raw report queue remains empty, so every interface keeps its value callback —
+        // including the audio ones, which deduplicate against the raw reports below.
+        IOHIDDeviceRegisterInputValueCallback(
+            device,
+            inputValueCallback,
+            Unmanaged.passUnretained(self).toOpaque()
         )
-        if isAudioInterface {
-            let advertisedSize = property(kIOHIDMaxInputReportSizeKey, of: device)
-            let capacity = max(1, advertisedSize)
-            let registration = InputReportRegistration(capacity: capacity)
-            inputReportRegistrations[interfaceID] = registration
-            audioReportCounts[interfaceID] = 0
-            IOHIDDeviceRegisterInputReportCallback(
-                device,
-                registration.buffer,
-                registration.capacity,
-                inputReportCallback,
-                Unmanaged.passUnretained(self).toOpaque()
-            )
-            // Buffered-byte HID elements are delivered as IOHIDValue on some macOS builds even
-            // when the raw report queue remains empty. Register both paths and deduplicate below.
-            IOHIDDeviceRegisterInputValueCallback(
-                device,
-                inputValueCallback,
-                Unmanaged.passUnretained(self).toOpaque()
-            )
-            rmDebug("🎙 Direct HID audio listener registered (capacity=\(capacity))")
-        } else {
-            IOHIDDeviceRegisterInputValueCallback(
-                device,
-                inputValueCallback,
-                Unmanaged.passUnretained(self).toOpaque()
-            )
-        }
         IOHIDDeviceScheduleWithRunLoop(
             device,
             CFRunLoopGetMain(),
             CFRunLoopMode.commonModes.rawValue
         )
         devices[interfaceID] = device
+        interfaceDescriptors[interfaceID] = descriptor(for: device)
         let service = IOHIDDeviceGetService(device)
         if service != IO_OBJECT_NULL {
             var registryID: UInt64 = 0
@@ -180,8 +174,123 @@ final class RemoteInputHandler {
                 deviceRegistryIDs[interfaceID] = registryID
             }
         }
+        // Interfaces arrive one at a time, so the generation is only knowable after each open.
+        // Re-running the audio registrations here lets a late-arriving interface flip the
+        // decision and retro-fit the interfaces that were already open.
+        refreshGeneration()
+        applyAudioRegistrations()
         enableRemoteInputStreaming(on: device)
         return true
+    }
+
+    private func descriptor(for device: IOHIDDevice) -> RemoteInterfaceDescriptor {
+        let serial = IOHIDDeviceGetProperty(device, kIOHIDSerialNumberKey as CFString) as? String
+        let productID = property(kIOHIDProductIDKey, of: device)
+        return RemoteInterfaceDescriptor(
+            deviceKey: serial ?? "product-\(productID)",
+            productName: IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String,
+            productID: productID,
+            transport: IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String,
+            usagePage: property(kIOHIDPrimaryUsagePageKey, of: device),
+            usage: property(kIOHIDPrimaryUsageKey, of: device),
+            maxInputReportSize: property(kIOHIDMaxInputReportSizeKey, of: device),
+            maxFeatureReportSize: property(kIOHIDMaxFeatureReportSizeKey, of: device),
+            hardwareRevision: IOHIDDeviceGetProperty(device, "kBTHardwareRevisionKey" as CFString) as? String
+        )
+    }
+
+    private func refreshGeneration() {
+        let descriptors = Array(interfaceDescriptors.values)
+        // Both remotes can be paired at once — a 1st-gen next to a 2nd/3rd-gen is the normal
+        // state while testing — so every decision that belongs to a specific button press or
+        // audio report uses that interface's own remote. `generation` is only the one the menu
+        // reports.
+        deviceGenerations = RemoteGeneration.classifyAll(interfaces: descriptors)
+        generation = RemoteGeneration.primary(interfaces: descriptors)
+        guard generation != lastReportedGeneration else { return }
+        lastReportedGeneration = generation
+        if descriptors.isEmpty {
+            rmDebug("🎛 Remote generation: no remote attached")
+        } else {
+            rmDebug("🎛 Remote generation: \(generation.displayName) — microphone path: \(generation.microphoneTransport.rawValue)")
+        }
+        onGenerationChanged?(generation)
+    }
+
+    /// The remote family behind one HID interface, which is what button mappings and audio
+    /// registrations must key off when more than one remote is attached.
+    private func generation(ofInterface interfaceID: ObjectIdentifier) -> RemoteGeneration {
+        guard let descriptor = interfaceDescriptors[interfaceID] else { return generation }
+        return deviceGenerations[descriptor.deviceKey] ?? generation
+    }
+
+    /// Bring every open interface's raw-report registration in line with the current
+    /// generation and actual collections. Some black-glass remotes also expose a dedicated
+    /// audio collection; prefer that before considering legacy report sniffing.
+    private func applyAudioRegistrations() {
+        let dedicatedDeviceKeys = Set(interfaceDescriptors.values.filter {
+            Self.isAudioInterface(usagePage: $0.usagePage, usage: $0.usage)
+        }.map(\.deviceKey))
+        for (interfaceID, device) in devices {
+            guard let descriptor = interfaceDescriptors[interfaceID] else { continue }
+            let dedicated = Self.isAudioInterface(
+                usagePage: descriptor.usagePage,
+                usage: descriptor.usage
+            )
+            let wanted = dedicated || Self.shouldSniffAudio(
+                descriptor: descriptor,
+                generation: deviceGenerations[descriptor.deviceKey] ?? generation,
+                hasDedicatedAudioCollection: dedicatedDeviceKeys.contains(descriptor.deviceKey)
+            )
+            let registered = inputReportRegistrations[interfaceID] != nil
+            if dedicated {
+                audioOnlyInterfaces.insert(interfaceID)
+            }
+            guard wanted != registered else { continue }
+
+            if wanted {
+                let capacity = max(1, descriptor.maxInputReportSize)
+                let registration = InputReportRegistration(capacity: capacity)
+                inputReportRegistrations[interfaceID] = registration
+                audioReportCounts[interfaceID] = 0
+                IOHIDDeviceRegisterInputReportCallback(
+                    device,
+                    registration.buffer,
+                    registration.capacity,
+                    inputReportCallback,
+                    Unmanaged.passUnretained(self).toOpaque()
+                )
+                rmDebug(String(
+                    format: "🎙 Audio listener registered (usagePage=0x%X usage=0x%X capacity=%d dedicated=%@)",
+                    descriptor.usagePage,
+                    descriptor.usage,
+                    capacity,
+                    dedicated ? "yes" : "no"
+                ))
+            } else if let registration = inputReportRegistrations.removeValue(forKey: interfaceID) {
+                IOHIDDeviceRegisterInputReportCallback(
+                    device,
+                    registration.buffer,
+                    registration.capacity,
+                    nil,
+                    nil
+                )
+                audioReportCounts.removeValue(forKey: interfaceID)
+                lastAudioReports.removeValue(forKey: interfaceID)
+            }
+        }
+    }
+
+    /// Pure so the sniffing rule can be pinned by tests: only the older remote widens the net,
+    /// and only to interfaces whose reports could actually hold a voice frame.
+    nonisolated static func shouldSniffAudio(
+        descriptor: RemoteInterfaceDescriptor,
+        generation: RemoteGeneration,
+        hasDedicatedAudioCollection: Bool = false
+    ) -> Bool {
+        guard !hasDedicatedAudioCollection else { return false }
+        guard generation.microphoneTransport == .hidReportSniffing else { return false }
+        return descriptor.maxInputReportSize >= RemoteGeneration.minimumSniffedReportSize
     }
 
     // MARK: - Stale-interface watchdog
@@ -224,18 +333,31 @@ final class RemoteInputHandler {
     /// documented for the Bluetooth transport, so send both framings; the wrong one is
     /// ignored by the remote.
     private func enableRemoteInputStreaming(on device: IOHIDDevice) {
+        // The 1st-gen remote can advertise no writable Feature report at all yet still accept
+        // the Output-report enable below, so only the newer remote's Feature path is gated on
+        // a non-zero Feature report size.
         guard property(kIOHIDVendorIDKey, of: device) == 0x004C,
-              property(kIOHIDMaxFeatureReportSizeKey, of: device) >= 1 else {
+              property(kIOHIDMaxFeatureReportSizeKey, of: device) >= 1
+                  || generation(ofInterface: ObjectIdentifier(device)).microphoneTransport
+                      == .hidReportSniffing else {
             return
         }
 
         let usagePage = property(kIOHIDPrimaryUsagePageKey, of: device)
         let usage = property(kIOHIDPrimaryUsageKey, of: device)
-        let variants: [(String, [UInt8])] = [
-            ("id+value", [0xFF, 0xAF]),
-            ("value-only", [0xAF]),
+        var variants: [(String, IOHIDReportType, [UInt8])] = [
+            ("feature id+value", kIOHIDReportTypeFeature, [0xFF, 0xAF]),
+            ("feature value-only", kIOHIDReportTypeFeature, [0xAF]),
         ]
-        for (variant, payload) in variants {
+        // The 1st-gen remote predates the writable Feature control the newer remote uses; its
+        // input-enable is an Output report. macOS surfaces Output reports on HID-over-GATT
+        // devices, so the write is worth making — the remote ignores the reports that are not
+        // its control characteristic, exactly as it does for the Feature variants above.
+        if generation(ofInterface: ObjectIdentifier(device)).microphoneTransport == .hidReportSniffing {
+            variants.append(("output id+value", kIOHIDReportTypeOutput, [0xFF, 0xAF]))
+            variants.append(("output value-only", kIOHIDReportTypeOutput, [0xAF]))
+        }
+        for (variant, reportType, payload) in variants {
             let request = FeatureEnableRequest(
                 handler: self,
                 usagePage: usagePage,
@@ -246,7 +368,7 @@ final class RemoteInputHandler {
             let context = Unmanaged.passRetained(request).toOpaque()
             let result = IOHIDDeviceSetReportWithCallback(
                 device,
-                kIOHIDReportTypeFeature,
+                reportType,
                 0xFF,
                 request.buffer,
                 request.length,
@@ -297,7 +419,7 @@ final class RemoteInputHandler {
     ) {
         if result == kIOReturnSuccess {
             rmDebug(String(
-                format: "📡 Siri Remote input enabled (Feature %@ <- 0xAF, usagePage=0x%X usage=0x%X)",
+                format: "📡 Siri Remote input enabled (%@ <- 0xAF, usagePage=0x%X usage=0x%X)",
                 variant,
                 usagePage,
                 usage
@@ -361,6 +483,7 @@ final class RemoteInputHandler {
         }
         releaseAllHeldKeys()
         releaseAllPendingTapKeys()
+        refreshGeneration()
     }
 
     private func closeDevice(_ device: IOHIDDevice) {
@@ -378,6 +501,8 @@ final class RemoteInputHandler {
             audioReportCounts.removeValue(forKey: interfaceID)
             lastAudioReports.removeValue(forKey: interfaceID)
         }
+        interfaceDescriptors.removeValue(forKey: interfaceID)
+        audioOnlyInterfaces.remove(interfaceID)
         deviceRegistryIDs.removeValue(forKey: interfaceID)
         IOHIDDeviceUnscheduleFromRunLoop(
             device,
@@ -401,6 +526,10 @@ final class RemoteInputHandler {
     nonisolated static func isAudioInterface(usagePage: Int, usage: Int) -> Bool {
         usagePage == 0x0C && usage == 0x04
     }
+
+    /// Widest HID value that can still be a button. Siri Remote button elements report a
+    /// 1-byte pressed/released state and the widest observed button mask is 3 bytes.
+    static let maximumButtonValueLength = 8
 
     nonisolated static func requiresSharedSystemAccess(usagePage: Int, usage: Int) -> Bool {
         isAudioInterface(usagePage: usagePage, usage: usage)
@@ -456,18 +585,23 @@ final class RemoteInputHandler {
         }
 
         let element = IOHIDValueGetElement(value)
-        if let interfaceID,
-           inputReportRegistrations[interfaceID] != nil {
-            let bytes = IOHIDValueGetBytePtr(value)
-            handleInputReport(
-                result: kIOReturnSuccess,
-                reportID: UInt32(IOHIDElementGetReportID(element)),
-                bytes: bytes,
-                length: IOHIDValueGetLength(value),
-                from: interfaceID,
-                source: "value"
-            )
-            return
+        if let interfaceID, inputReportRegistrations[interfaceID] != nil {
+            // A dedicated audio collection carries nothing but audio, so every value on it is
+            // a buffered voice frame. A sniffed interface on the 1st-gen remote carries both,
+            // and its button elements are 1–4 bytes wide while a voice frame never is — so
+            // only oversized values are diverted, and buttons keep working.
+            let length = IOHIDValueGetLength(value)
+            if audioOnlyInterfaces.contains(interfaceID) || length > Self.maximumButtonValueLength {
+                handleInputReport(
+                    result: kIOReturnSuccess,
+                    reportID: UInt32(IOHIDElementGetReportID(element)),
+                    bytes: IOHIDValueGetBytePtr(value),
+                    length: length,
+                    from: interfaceID,
+                    source: "value"
+                )
+                return
+            }
         }
         let usagePage = IOHIDElementGetUsagePage(element)
         let usage = IOHIDElementGetUsage(element)
@@ -486,12 +620,15 @@ final class RemoteInputHandler {
             return
         }
         buttonState[buttonName] = isPressed
+        if buttonName == "siri" {
+            rmDebug("Latency Siri \(isPressed ? "down" : "up") epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
+        }
 
         // Volume keys on the Siri Remote also travel over BT AVRCP absolute-volume, which
-        // coreaudiod honors below cghidEventTap. Arm the revert guard on every press so the
+        // coreaudiod honors below cghidEventTap. Track both press and release so the
         // CoreAudio listener snaps the level back to the pre-press value.
-        if isPressed && (buttonName == "volumeUp" || buttonName == "volumeDown") {
-            VolumeRevertGuard.shared.armFromRemoteButton()
+        if buttonName == "volumeUp" || buttonName == "volumeDown" {
+            VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed)
         }
 
         if isPressed {
@@ -501,10 +638,13 @@ final class RemoteInputHandler {
 
         microphoneBridgeManager?.handleButton(button: buttonName, pressed: isPressed)
 
-        let action = menuBarManager?.getMapping(for: buttonName) ?? ButtonAction.none
+        let sourceGeneration = interfaceID.map(generation(ofInterface:)) ?? generation
+        let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
+            ?? ButtonAction.none
         if isPressed {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
+        rmDebug("🎛 Button \(buttonName) \(isPressed ? "down" : "up") source=\(sourceGeneration.shortName) action=\(action.rawValue)")
         executeAction(action, button: buttonName, pressed: isPressed)
     }
 
@@ -534,6 +674,18 @@ final class RemoteInputHandler {
         case (0x0C, 0x223): return "tv"           // AC Home (TV button alternative)
         case (0x0C, 0x224): return "back"         // AC Back
         case (0x0C, 0x40): return "menu"          // Menu
+
+        // Standard Consumer usages the 1st-gen remote can emit instead of the ones above. It
+        // predates the 2nd-gen HID descriptor, so its six buttons are reported with the
+        // generic media usages rather than the Apple-specific ones. Anything still unmapped is
+        // logged as "<unmapped>" with its page/usage, which is how new usages get identified.
+        case (0x0C, 0x46): return "menu"          // Menu Escape
+        case (0x0C, 0x88): return "tv"            // Media Select Home
+        case (0x0C, 0x89): return "tv"            // Media Select TV
+        case (0x0C, 0xB0): return "playPause"     // Play
+        case (0x0C, 0xB1): return "playPause"     // Pause
+        case (0x0C, 0xCF): return "siri"          // Voice Command (1st-gen microphone button)
+        case (0x0C, 0x221): return "siri"         // AC Search
         case (0x0C, 0x30): return "power"         // Power
         case (0x0C, 0xE2): return "mute"          // Mute (standard Consumer usage; verified on 2nd-gen Siri Remote)
         case (0x0C, 0x20): return "mute"          // Mute (some remotes report this instead)
@@ -622,7 +774,20 @@ final class RemoteInputHandler {
         case .slashOrModifier:
             // Quick tap types "/" (the skill/command-picker trigger in agent apps); holding
             // arms the button as a modifier for the chords in `modifierChord(for:)`.
-            beginModifierHold(button: button)
+            beginModifierHold(button: button) { [weak self] in self?.sendKey(kVK_ANSI_Slash) }
+        case .shiftEnterOrModifier:
+            // 1st-gen remote: TV takes over the missing mute button's modifier role while
+            // keeping its own tap action.
+            beginModifierHold(button: button) { [weak self] in
+                self?.sendKey(kVK_Return, flags: .maskShift)
+            }
+        case .agentClientOrSlash:
+            // 1st-gen remote: Play/Pause takes over the missing mute button's "/" tap.
+            beginTapOrLongPress(
+                button: button,
+                tap: { [weak self] in self?.toggleAgentClient() },
+                longPress: { [weak self] in self?.sendKey(kVK_ANSI_Slash) }
+            )
         case .spaceKey, .rightCmd, .rightOpt:
             break // handled above
         }
@@ -643,14 +808,30 @@ final class RemoteInputHandler {
     private let repeatMaxTicks = 400   // ~20s safety cap in case a release is ever dropped
     private let longPressThreshold: TimeInterval = 0.4
 
+    /// These timers are created and fired on the main run loop. Common modes keep a held
+    /// button responsive while an AppKit menu is tracking; callbacks remain synchronous so
+    /// a queued action cannot run after release.
+    private func scheduleInputTimer(
+        interval: TimeInterval,
+        repeats: Bool,
+        action: @escaping @MainActor @Sendable (Timer) -> Void
+    ) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: repeats) { timer in
+            let callbackTimer = MainRunLoopTimer(timer: timer)
+            MainActor.assumeIsolated { action(callbackTimer.timer) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
+    }
+
     /// Fire immediately, then auto-repeat while the button stays held (Backspace, arrows).
-    private func beginRepeating(button: String, interval: TimeInterval? = nil, fire: @escaping () -> Void) {
+    private func beginRepeating(button: String, interval: TimeInterval? = nil, fire: @escaping @MainActor @Sendable () -> Void) {
         stopRepeat(for: button)
         fire()
-        let starter = Timer.scheduledTimer(withTimeInterval: repeatInitialDelay, repeats: false) { [weak self] _ in
+        let starter = scheduleInputTimer(interval: repeatInitialDelay, repeats: false) { [weak self] _ in
             guard let self else { return }
             var ticks = 0
-            let repeater = Timer.scheduledTimer(withTimeInterval: interval ?? self.repeatInterval, repeats: true) { [weak self] timer in
+            let repeater = self.scheduleInputTimer(interval: interval ?? self.repeatInterval, repeats: true) { [weak self] timer in
                 guard let self else { timer.invalidate(); return }
                 ticks += 1
                 if ticks > self.repeatMaxTicks {
@@ -672,10 +853,10 @@ final class RemoteInputHandler {
 
     /// Distinguish a short tap from a hold: the long-press action fires once the threshold
     /// elapses; a release before then runs the tap action instead.
-    private func beginTapOrLongPress(button: String, tap: @escaping () -> Void, longPress: @escaping () -> Void) {
+    private func beginTapOrLongPress(button: String, tap: @escaping @MainActor @Sendable () -> Void, longPress: @escaping @MainActor @Sendable () -> Void) {
         cancelLongPress(for: button)
         pendingTapActions[button] = tap
-        let timer = Timer.scheduledTimer(withTimeInterval: longPressThreshold, repeats: false) { [weak self] _ in
+        let timer = scheduleInputTimer(interval: longPressThreshold, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.longPressTimers[button] = nil
             self.pendingTapActions[button] = nil
@@ -725,27 +906,33 @@ final class RemoteInputHandler {
     private var heldModifierButtons: Set<String> = []
     private var modifierChordFired: Set<String> = []
     private var modifierPressStart: [String: Date] = [:]
+    /// The tap half of each armed modifier button, captured at press time. It differs per
+    /// remote: the 2nd/3rd-gen mute button types "/", while the 1st-gen TV button — which
+    /// inherits the modifier role from the mute button it does not have — sends Shift+Enter.
+    private var modifierTapActions: [String: () -> Void] = [:]
 
-    /// A release quicker than this is a tap (types "/"); anything longer was a modifier
-    /// hold — used or abandoned — and produces nothing on its own.
+    /// A release quicker than this is a tap; anything longer was a modifier hold — used or
+    /// abandoned — and produces nothing on its own.
     private let modifierTapMaxDuration: TimeInterval = 0.4
 
-    private func beginModifierHold(button: String) {
+    private func beginModifierHold(button: String, tap: @escaping () -> Void) {
         heldModifierButtons.insert(button)
         modifierChordFired.remove(button)
         modifierPressStart[button] = Date()
+        modifierTapActions[button] = tap
     }
 
     private func resolveModifierRelease(for button: String) {
         guard heldModifierButtons.remove(button) != nil else { return }
         let pressedAt = modifierPressStart.removeValue(forKey: button)
+        let tap = modifierTapActions.removeValue(forKey: button)
         let chorded = modifierChordFired.remove(button) != nil
         guard !chorded,
               let pressedAt,
               Date().timeIntervalSince(pressedAt) < modifierTapMaxDuration else {
             return
         }
-        sendKey(kVK_ANSI_Slash)
+        tap?()
     }
 
     private func performChord(_ chord: ModifierChord) {
@@ -759,6 +946,7 @@ final class RemoteInputHandler {
     }
 
     private func stopAllHoldTimers() {
+        VolumeRevertGuard.shared.releaseRemoteButtons()
         repeatTimers.values.forEach { $0.invalidate() }
         repeatTimers.removeAll()
         longPressTimers.values.forEach { $0.invalidate() }
@@ -767,6 +955,7 @@ final class RemoteInputHandler {
         heldModifierButtons.removeAll()
         modifierChordFired.removeAll()
         modifierPressStart.removeAll()
+        modifierTapActions.removeAll()
     }
 
     /// "- " + space is the markdown input rule that turns the current line into a bullet.
@@ -880,6 +1069,11 @@ final class RemoteInputHandler {
 }
 
 // MARK: - C callback
+
+// Timer is only accessed synchronously on the main run loop, including invalidation.
+private struct MainRunLoopTimer: @unchecked Sendable {
+    let timer: Timer
+}
 
 private struct CallbackValue: @unchecked Sendable {
     let value: IOHIDValue
