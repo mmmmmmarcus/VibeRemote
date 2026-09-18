@@ -71,6 +71,7 @@ final class RemoteHIDChannel: NSObject,
 
     private var knownPeripheralIdentifiers: [UUID] = []
     private var isStarted = false
+    private var isSuspendedForIdleDisconnect = false
     private var hasConfiguredReports = false
     private var audioReportCount: UInt64 = 0
     private var serviceDiscoveryFailures = 0
@@ -114,6 +115,7 @@ final class RemoteHIDChannel: NSObject,
 
     func stop() {
         isStarted = false
+        isSuspendedForIdleDisconnect = false
         retryTimer?.invalidate()
         retryTimer = nil
         central?.stopScan()
@@ -121,6 +123,32 @@ final class RemoteHIDChannel: NSObject,
         peripheral = nil
         central = nil
         resetReportState()
+    }
+
+    /// CoreBluetooth is another live client of the same baseband connection. It must release
+    /// its peripheral before the app asks IOBluetooth to disconnect, or macOS immediately
+    /// reconnects to satisfy this session. HID rediscovery calls `resumeAfterIdleDisconnect`.
+    func suspendForIdleDisconnect() {
+        guard isStarted else { return }
+        isSuspendedForIdleDisconnect = true
+        retryTimer?.invalidate()
+        retryTimer = nil
+        central?.stopScan()
+        if let peripheral, peripheral.state == .connected || peripheral.state == .connecting {
+            central?.cancelPeripheralConnection(peripheral)
+        }
+        peripheral?.delegate = nil
+        peripheral = nil
+        resetReportState()
+        rmDebug("📡 Direct GATT HID suspended for first-generation idle disconnect")
+    }
+
+    func resumeAfterIdleDisconnect() {
+        guard isStarted, isSuspendedForIdleDisconnect else { return }
+        isSuspendedForIdleDisconnect = false
+        rmDebug("📡 Direct GATT HID resuming after remote wake")
+        guard central?.state == .poweredOn else { return }
+        findConnectedRemote()
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -135,7 +163,7 @@ final class RemoteHIDChannel: NSObject,
     }
 
     private func findConnectedRemote() {
-        guard isStarted, let central else { return }
+        guard isStarted, !isSuspendedForIdleDisconnect, let central else { return }
         if let remote = central.retrievePeripherals(withIdentifiers: knownPeripheralIdentifiers).first {
             rmDebug("📡 Direct GATT HID retrieved system peripheral identifier \(remote.identifier.uuidString)")
             use(remote)
@@ -449,7 +477,7 @@ final class RemoteHIDChannel: NSObject,
     }
 
     private func scheduleRetry() {
-        guard isStarted, retryTimer == nil else { return }
+        guard isStarted, !isSuspendedForIdleDisconnect, retryTimer == nil else { return }
         retryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }

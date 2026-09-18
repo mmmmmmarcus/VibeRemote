@@ -5,6 +5,67 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
+    func testFirstGenerationIdleTimeoutOptionsAndDefault() {
+        XCTAssertEqual(FirstGenerationIdleTimeout.defaultValue, .fiveMinutes)
+        XCTAssertEqual(FirstGenerationIdleTimeout.fiveMinutes.interval, 300)
+        XCTAssertEqual(FirstGenerationIdleTimeout.fifteenMinutes.interval, 900)
+        XCTAssertEqual(FirstGenerationIdleTimeout.thirtyMinutes.interval, 1_800)
+        XCTAssertNil(FirstGenerationIdleTimeout.never.interval)
+        XCTAssertEqual(Set(FirstGenerationIdleTimeout.allCases.map(\.title)).count, 4)
+    }
+
+    func testFirstGenerationIdleTrackerResetsAndEmitsOnce() {
+        var tracker = FirstGenerationIdleTracker()
+        tracker.synchronize(deviceKeys: ["old-a", "old-b"], now: 100)
+        tracker.recordActivity(deviceKey: "old-b", now: 200)
+
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 399, timeout: 300), [])
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 400, timeout: 300), ["old-a"])
+        XCTAssertFalse(tracker.shouldKeepAlive(deviceKey: "old-a"))
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-b"))
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 500, timeout: 300), ["old-b"])
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 900, timeout: 300), [])
+
+        tracker.recordActivity(deviceKey: "old-a", now: 1_000)
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-a"))
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 1_299, timeout: 300), [])
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 1_300, timeout: 300), ["old-a"])
+
+        tracker.reset(now: 2_000)
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-a"))
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-b"))
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 9_000, timeout: nil), [])
+
+        tracker.synchronize(deviceKeys: [], now: 9_000)
+        XCTAssertTrue(tracker.isEmpty)
+    }
+
+    func testOnlyFirstGenerationSiriHoldWaitsForVoiceTail() {
+        XCTAssertEqual(
+            RemoteInputHandler.voiceTailReleaseTimeout(
+                action: .rightOpt,
+                button: "siri",
+                generation: .glassTouchSurface
+            ),
+            3
+        )
+        XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
+            action: .rightOpt,
+            button: "siri",
+            generation: .aluminumClickpad
+        ))
+        XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
+            action: .enterKey,
+            button: "siri",
+            generation: .glassTouchSurface
+        ))
+        XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
+            action: .rightOpt,
+            button: "tv",
+            generation: .glassTouchSurface
+        ))
+    }
+
     func testConnectionInputGateIsPerRemoteAndExtendsAcrossInterfaces() {
         var gate = RemoteConnectionInputGate()
         gate.arm(deviceKey: "old", now: 10)

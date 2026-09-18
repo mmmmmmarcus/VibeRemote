@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "VibeRemote",
-    platforms: [.macOS(.v11)],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "VibeRemote", targets: ["VibeRemote"]),
         .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"]),

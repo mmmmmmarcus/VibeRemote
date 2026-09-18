@@ -174,6 +174,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private var requestInputAccessHandler: (() -> Void)?
     private var requestControlAccessHandler: (() -> Void)?
     private var statusRefreshHandler: (() -> Void)?
+    private var firstGenerationIdleTimeoutHandler: ((FirstGenerationIdleTimeout) -> Void)?
+    private var firstGenerationIdleTimeout = FirstGenerationIdleTimeout.load()
     private var remoteBatteryPercent: Int?
     private var batteryRefreshInFlight = false
     private var lastBatteryRefreshAt: Date?
@@ -567,6 +569,24 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         addInfoItem("Remote: \(remoteGeneration.shortName)", to: menu)
         addInfoItem("Battery: \(remoteBatteryPercent.map { "\($0)%" } ?? "Unknown")", to: menu)
 
+        if remoteGeneration == .glassTouchSurface {
+            let idleItem = NSMenuItem(title: "Auto Disconnect", action: nil, keyEquivalent: "")
+            let idleMenu = NSMenu()
+            for timeout in FirstGenerationIdleTimeout.allCases {
+                let item = NSMenuItem(
+                    title: timeout.title,
+                    action: #selector(selectFirstGenerationIdleTimeout(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = timeout.rawValue
+                item.state = timeout == firstGenerationIdleTimeout ? .on : .off
+                idleMenu.addItem(item)
+            }
+            idleItem.submenu = idleMenu
+            menu.addItem(idleItem)
+        }
+
         let bridgeItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
         // A submenu may still be retained by the menu item AppKit just removed.
         // Reusing that NSMenu immediately raises "already a submenu" during rapid
@@ -866,6 +886,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         statusRefreshHandler = handler
     }
 
+    func setFirstGenerationIdleTimeoutHandler(
+        _ handler: @escaping (FirstGenerationIdleTimeout) -> Void
+    ) {
+        firstGenerationIdleTimeoutHandler = handler
+        handler(firstGenerationIdleTimeout)
+    }
+
     func updateBluetoothConnectionStatus(connected: Bool) {
         let wasConnected = remoteConnected
         remoteConnected = connected
@@ -965,6 +992,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         guard action.isAssignableToSiriButton else { return }
         siriButtonAction = action
         UserDefaults.standard.set(action.rawValue, forKey: Self.siriButtonDefaultsKey)
+        rebuildMenu()
+    }
+
+    @objc private func selectFirstGenerationIdleTimeout(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? Int,
+              let timeout = FirstGenerationIdleTimeout(rawValue: rawValue) else { return }
+        firstGenerationIdleTimeout = timeout
+        UserDefaults.standard.set(timeout.rawValue, forKey: FirstGenerationIdleTimeout.defaultsKey)
+        firstGenerationIdleTimeoutHandler?(timeout)
         rebuildMenu()
     }
 

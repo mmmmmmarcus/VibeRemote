@@ -9,7 +9,7 @@ APP_NAME="VibeRemote"
 VOICE_BRIDGE_NAME="VibeRemoteVoiceBridge"
 HELPER_NAME="VibeRemoteHelper"
 CONFIGURATION="${CONFIGURATION:-release}"
-MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-11.0}"
+MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-27.0}"
 ARCHS="${ARCHS:-arm64 x86_64}"
 
 if ! command -v xcrun >/dev/null 2>&1 || ! xcrun --show-sdk-path --sdk macosx >/dev/null 2>&1; then

@@ -35,6 +35,11 @@ private func log(_ message: String) {
     fflush(stdout)
 }
 
+/// Cross-process signal consumed by the menu-bar app. The old remote keeps flushing audio
+/// after its physical Siri button rises, so the mapped dictation key follows this real
+/// protocol end marker instead of the earlier button release.
+private let voiceEndedNotification = Notification.Name("com.viberemote.voice-ended")
+
 private func audioDeviceName(_ deviceID: AudioDeviceID) -> String? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioObjectPropertyName,
@@ -492,6 +497,19 @@ do {
                 }
             case .ended:
                 audioOutput?.voiceEnded()
+                let received = Date()
+                let age = captureLineTimestamp(line, year: captureYear).map {
+                    String(format: "%.1f", received.timeIntervalSince($0) * 1000)
+                } ?? "unknown"
+                log("Latency voice end epoch=\(String(format: "%.6f", received.timeIntervalSince1970)) captureAgeMs=\(age)")
+                if !validateCapture {
+                    DistributedNotificationCenter.default().postNotificationName(
+                        voiceEndedNotification,
+                        object: nil,
+                        userInfo: nil,
+                        deliverImmediately: true
+                    )
+                }
                 log("Voice ended")
             }
         }

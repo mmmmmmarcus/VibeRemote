@@ -171,7 +171,7 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<key>CFBundleVersion</key>
 	<string>$BUILD_NUMBER</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>27.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSPrincipalClass</key>

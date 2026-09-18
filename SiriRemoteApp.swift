@@ -70,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.menuBarManager.updateRemoteGeneration(generation)
             self?.microphoneBridgeManager.updateRemoteGeneration(generation)
         }
+        remoteInputHandler?.onFirstGenerationIdleDisconnectRequested = { [weak self] deviceKey in
+            self?.disconnectFirstGenerationRemote(deviceKey: deviceKey)
+        }
         
         // Start remote detection
         remoteDetector = RemoteDetector(
@@ -79,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let inputReady: Bool
                 switch event {
                 case .added(let device):
+                    self.remoteHIDChannel?.resumeAfterIdleDisconnect()
                     self.remoteHIDChannel?.considerHIDDevice(device)
                     inputReady = self.remoteInputHandler?.addRemoteDevice(device) ?? false
                     self.menuBarManager.updateBluetoothConnectionStatus(connected: true)
@@ -114,6 +118,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menuBarManager.setStatusRefreshHandler { [weak self] in
             self?.refreshPermissionStates()
+        }
+        menuBarManager.setFirstGenerationIdleTimeoutHandler { [weak self] timeout in
+            self?.remoteInputHandler?.updateFirstGenerationIdleTimeout(timeout)
         }
         bluetoothAccessManager.onStateChanged = { [weak self] state in
             self?.menuBarManager.updateBluetoothAccessState(state)
@@ -294,6 +301,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         rmDebug("📡 Bluetooth device connected: \(deviceDescription); scheduling PacketLogger recovery")
         scheduleBridgeRecovery(reason: "\(deviceDescription) connected")
+    }
+
+    /// The HID descriptor exposes the physical remote's Bluetooth address as its serial. Close
+    /// only that paired device after the 1st-gen idle timer expires; if lookup fails, HID
+    /// keepalive has already stopped and the remote can still enter its normal firmware sleep.
+    private func disconnectFirstGenerationRemote(deviceKey: String) {
+        remoteHIDChannel?.suspendForIdleDisconnect()
+        // CoreBluetooth cancellation completes asynchronously. Give it a short head start so
+        // IOBluetooth does not close and immediately reopen a link that still has a GATT client.
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.closeFirstGenerationBluetoothConnection(deviceKey: deviceKey)
+            }
+        }
+    }
+
+    private func closeFirstGenerationBluetoothConnection(deviceKey: String) {
+        let normalizedKey = deviceKey.lowercased().filter(\.isHexDigit)
+        let pairedDevices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        guard let device = pairedDevices.first(where: {
+            $0.addressString?.lowercased().filter(\.isHexDigit) == normalizedKey
+        }) else {
+            rmDebug("⚠️ First-generation idle disconnect could not match Bluetooth address \(deviceKey)")
+            return
+        }
+        guard device.isConnected() else {
+            rmDebug("📡 First-generation idle disconnect skipped; remote is already disconnected")
+            return
+        }
+        let result = device.closeConnection()
+        if result == kIOReturnSuccess {
+            rmDebug("📡 First-generation remote disconnected after configured idle timeout")
+        } else {
+            rmDebug(String(
+                format: "⚠️ First-generation idle disconnect failed (IOReturn=0x%X)",
+                result
+            ))
+        }
     }
 
     /// Coalesces bursts of topology changes into one restart. A single user action routinely

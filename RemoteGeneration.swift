@@ -29,6 +29,83 @@ struct RemoteInterfaceDescriptor: Equatable, Sendable {
     }
 }
 
+/// How long the 1st-generation remote stays awake after its most recent button press.
+/// The newer remote keeps its firmware-managed connection behavior and never enters this path.
+enum FirstGenerationIdleTimeout: Int, CaseIterable, Sendable {
+    case fiveMinutes = 300
+    case fifteenMinutes = 900
+    case thirtyMinutes = 1_800
+    case never = 0
+
+    static let defaultsKey = "firstGenerationIdleTimeoutSeconds"
+    static let defaultValue: FirstGenerationIdleTimeout = .fiveMinutes
+
+    var title: String {
+        switch self {
+        case .fiveMinutes: return "After 5 Minutes"
+        case .fifteenMinutes: return "After 15 Minutes"
+        case .thirtyMinutes: return "After 30 Minutes"
+        case .never: return "Never"
+        }
+    }
+
+    var interval: TimeInterval? {
+        self == .never ? nil : TimeInterval(rawValue)
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> FirstGenerationIdleTimeout {
+        guard defaults.object(forKey: defaultsKey) != nil,
+              let value = FirstGenerationIdleTimeout(rawValue: defaults.integer(forKey: defaultsKey)) else {
+            return defaultValue
+        }
+        return value
+    }
+}
+
+/// Per-physical-remote idle state. Interfaces for one remote arrive independently, so the
+/// tracker keys by Bluetooth address and emits at most one disconnect request per idle period.
+struct FirstGenerationIdleTracker: Sendable {
+    private struct Entry: Sendable {
+        var lastActivity: TimeInterval
+        var disconnectRequested = false
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    mutating func synchronize(deviceKeys: Set<String>, now: TimeInterval) {
+        entries = entries.filter { deviceKeys.contains($0.key) }
+        for key in deviceKeys where entries[key] == nil {
+            entries[key] = Entry(lastActivity: now)
+        }
+    }
+
+    mutating func recordActivity(deviceKey: String, now: TimeInterval) {
+        entries[deviceKey] = Entry(lastActivity: now)
+    }
+
+    mutating func reset(now: TimeInterval) {
+        for key in entries.keys {
+            entries[key] = Entry(lastActivity: now)
+        }
+    }
+
+    mutating func takeDueDisconnects(now: TimeInterval, timeout: TimeInterval?) -> [String] {
+        guard let timeout else { return [] }
+        var due: [String] = []
+        for (key, entry) in entries where !entry.disconnectRequested && now - entry.lastActivity >= timeout {
+            entries[key]?.disconnectRequested = true
+            due.append(key)
+        }
+        return due.sorted()
+    }
+
+    func shouldKeepAlive(deviceKey: String) -> Bool {
+        entries[deviceKey]?.disconnectRequested == false
+    }
+
+    var isEmpty: Bool { entries.isEmpty }
+}
+
 /// The two Siri Remote hardware families VibeRemote supports.
 ///
 /// Button profiles differ by generation. Audio collection availability must also be checked

@@ -19,6 +19,9 @@ It is a three-executable SwiftPM package (app, voice bridge, privileged helper) 
 shared library target and shell scripts that build the audio driver and assemble/sign the
 `.app` bundle. There is no Xcode project file.
 
+This is a personal-use build targeting macOS 27.0. Keep the SwiftPM platform, build-script
+deployment target, and generated app bundle minimum system version aligned at 27.0.
+
 ## Repository layout
 
 | Path | Role |
@@ -306,6 +309,10 @@ few seconds).
   never the outgoing player node, because stopping a player is the deadlock below.
 - On start the helper skips PacketLogger's buffered replay (records older than
   launch) so a stale prior session is not re-decoded into the output device.
+- The black-glass remote flushes about 2.1 seconds of audio after physical Siri-button
+  release. Its mapped dictation key must stay held until the helper sees the real `1B 23`
+  voice-end marker and posts `com.viberemote.voice-ended`; a 3-second timer is only the
+  missing-marker safety release. Do not apply this tail handling to the newer remote.
 - Audio format: Opus CELT-only, 48 kHz mono, 960 samples/frame, 99-byte HID
   payload, enable byte `0xAF`, report ID `0xFA`. Cross-checked against
   https://github.com/azais-corentin/siri-remote.
@@ -342,6 +349,13 @@ this disabled by default; do not claim both-generation keepalive from one remote
 The 2026-09-14 black-glass test failed: reads succeeded through 08:59:56, but
 the remote disconnected at 09:00:04, about two minutes after startup. The local
 experiment was disabled. Do not re-enable battery polling as a proven keepalive.
+
+The black-glass remote keepalive re-sends only the already-successful Feature report `FF AF`
+every 45 seconds on its interfaces. A physical test confirmed an immediate button response
+after more than twice the remote's former 3–4-minute sleep interval. Its menu setting controls
+an idle deadline (5/15/30 minutes or Never); the default is 5 minutes. Every real old-remote
+button press resets the per-device deadline. At expiry, stop keepalive before asking
+`IOBluetoothDevice` to close that remote's connection. Newer remotes never enter this path.
 
 ### Bluetooth topology changes
 
