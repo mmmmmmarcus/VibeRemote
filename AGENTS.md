@@ -175,6 +175,14 @@ Opening Settings switches the app's activation policy to `.regular` so its Dock 
 appears. Closing the window restores `.accessory`; minimizing keeps the Dock icon so
 the user can restore the window. Keep `LSUIElement` for menu-bar-only launch.
 
+The first menu row is the complete device summary. While connected, it shows `Connected`
+and the remote generation on the left, plus a green circular battery gauge with the numeric
+percentage centered on the right. While the remote is connected and its always-on bridge is
+still coming up, replace `Connected` with `Starting`; the menu-bar remote glyph uses a refresh
+badge during the same interval. While disconnected, the row shows only `Disconnected`. There
+is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth, generation,
+or battery as separate rows below this summary.
+
 The menu bar's **Settings…** entry opens one retained window, even with the remote
 disconnected. Only the Siri pop-up edits a mapping; the other pop-ups explain the fixed
 actions. Reset only restores the Siri mapping. Window state comes from `MenuBarManager`
@@ -330,6 +338,15 @@ start is guaranteed silent (Direct HID engine, or PacketLogger engine with the a
 helper daemon current). Anything that would raise an administrator prompt stays behind
 the explicit `Start`/`Restart` menu action — app launch must never surprise the user
 with a password dialog.
+
+For the PacketLogger engine, launch the user-session `VibeRemoteVoiceBridge` reader before
+starting the privileged PacketLogger supervisor. A reconnecting remote can emit its voice-start
+marker during supervisor startup; if the helper launches second, its replay filter discards that
+marker and the rest of the Siri hold is undecodable. Menu readiness is a separate state from
+process liveness: keep `Starting` and the refresh badge until both processes pass the final
+startup checks. Clear readiness as soon as a Bluetooth topology edge schedules recovery, before
+the debounce expires. Never mark the bridge connected merely because the voice-helper process
+exists.
 
 ### Automatic recovery and bounded keepalive experiment
 

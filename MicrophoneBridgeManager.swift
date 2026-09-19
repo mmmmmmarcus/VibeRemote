@@ -190,6 +190,10 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private var storedPreviousDefaultInputDeviceID: AudioDeviceID?
     private var storedLastError: String?
     private var storedRemoteGeneration: RemoteGeneration = .unknown
+    /// True only after the complete capture pipeline passes its final startup checks. A live
+    /// voice-helper process alone is insufficient: during reconnect it may still be waiting for
+    /// PacketLogger, which is exactly when the menu must continue to show Starting.
+    private var storedBridgeReady = false
     /// Accessed only on workQueue. The write end feeds raw HID report records to the user-session helper.
     private var helperInputPipe: Pipe?
     private var directHIDCapturedReportCount = 0
@@ -218,6 +222,11 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private var lastError: String? {
         get { withStateLock { storedLastError } }
         set { withStateLock { storedLastError = newValue } }
+    }
+
+    private var bridgeReady: Bool {
+        get { withStateLock { storedBridgeReady } }
+        set { withStateLock { storedBridgeReady = newValue } }
     }
 
     init(appBundle: Bundle = .main) {
@@ -333,7 +342,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func menuStatus() -> MicrophoneBridgeStatus {
         let outputDeviceName = preferredOutputDeviceName()
         return MicrophoneBridgeStatus(
-            running: helperProcess?.isRunning == true,
+            running: bridgeReady && helperProcess?.isRunning == true,
             remoteAddress: nil,
             packetLoggerPath: nil,
             helperPath: nil,
@@ -347,7 +356,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     private func statusLocked() -> MicrophoneBridgeStatus {
         MicrophoneBridgeStatus(
-            running: isRunningLocked(),
+            running: bridgeReady && isRunningLocked(),
             remoteAddress: configuredOrDetectedRemoteAddress(),
             packetLoggerPath: packetLoggerExecutablePath(),
             helperPath: helperExecutablePath(),
@@ -449,7 +458,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return MicrophoneBridgeDiagnostics(
             generatedAt: Date(),
             remoteAddress: remoteAddress,
-            bridgeRunning: isRunningLocked(),
+            bridgeRunning: bridgeReady && isRunningLocked(),
             helperPID: helperLivePID,
             helperAlive: helperAlive,
             packetLoggerPID: packetLoggerLivePID,
@@ -545,14 +554,17 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let outputDeviceName = preferredOutputDeviceName() {
                 loadPreviousInputDeviceIfNeeded()
                 _ = setDefaultInputDevice(named: outputDeviceName)
+                bridgeReady = true
                 clearLastError()
                 appendAppLog("Direct HID microphone bridge already running")
             } else {
+                bridgeReady = false
                 setLastError("The VibeRemote audio device is not installed.")
             }
             return
         }
 
+        bridgeReady = false
         stopUserHelper()
         // Clean up a legacy capture supervisor if an older build left one running. This sends
         // only its private stop signal and never starts PacketLogger or invokes osascript.
@@ -617,6 +629,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "Could not select \(outputDeviceName) as the default input device."]
                 )
             }
+            bridgeReady = true
             clearLastError()
             appendAppLog("Direct HID microphone bridge started pid=\(helperRunner.processIdentifier); waiting for Siri Remote audio reports")
         } catch {
@@ -635,14 +648,17 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let outputDeviceName = preferredOutputDeviceName() {
                 loadPreviousInputDeviceIfNeeded()
                 _ = setDefaultInputDevice(named: outputDeviceName)
+                bridgeReady = livePacketLoggerIdentity() != nil
                 clearLastError()
                 appendAppLog("Microphone bridge already running")
             } else {
+                bridgeReady = false
                 setLastError("The VibeRemote audio device is not installed.")
             }
             return
         }
 
+        bridgeReady = false
         stopUserHelper()
         stopPacketLogger()
         restoreDefaultInputDevice()
@@ -710,6 +726,31 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
         helperRunner.arguments = ["-c", helperCommand]
 
+        // Start the user-session decoder before PacketLogger. On a Bluetooth reconnect the
+        // remote may emit a voice-start marker while the privileged supervisor is still coming
+        // up. Starting PacketLogger first used to leave that marker in its buffered output;
+        // the later helper correctly rejected it as pre-launch replay, then could not decode the
+        // rest of that physical Siri hold. A reader waiting on the FIFO before capture begins
+        // closes that loss window without replaying an older session.
+        do {
+            try helperRunner.run()
+            helperProcess = helperRunner
+            helperPID = helperRunner.processIdentifier
+            guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
+                throw NSError(
+                    domain: "VibeRemote.MicrophoneBridge",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not record the voice-helper identity."]
+                )
+            }
+            appendAppLog("Microphone bridge helper runner waiting for capture pid=\(helperRunner.processIdentifier)")
+        } catch {
+            setLastError("Could not start voice helper: \(error.localizedDescription)")
+            stopUserHelper()
+            removeBridgeFIFOs()
+            return
+        }
+
         let supervisorToken = UUID().uuidString.uppercased()
         appendAppLog("Microphone bridge starting PacketLogger supervisor")
         let pid: Int32
@@ -732,6 +773,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         guard packetLoggerSupervisorMatches(identity) else {
             setLastError("The privileged PacketLogger supervisor could not be verified.")
             _ = writePrivateFile("stop\n", at: stopSignalPath)
+            stopUserHelper()
             removeBridgeFIFOs()
             return
         }
@@ -739,24 +781,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         guard writePrivateFile("\(pid) \(supervisorToken)\n", at: packetLoggerPIDFilePath) else {
             setLastError("Could not record the verified PacketLogger supervisor identity.")
             stopPacketLogger()
-            removeBridgeFIFOs()
-            return
-        }
-        do {
-            try helperRunner.run()
-            helperProcess = helperRunner
-            helperPID = helperRunner.processIdentifier
-            guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
-                throw NSError(
-                    domain: "VibeRemote.MicrophoneBridge",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Could not record the voice-helper identity."]
-                )
-            }
-            appendAppLog("Microphone bridge helper runner started pid=\(helperRunner.processIdentifier)")
-        } catch {
-            setLastError("Could not start voice helper: \(error.localizedDescription)")
-            stopPacketLogger()
+            stopUserHelper()
             removeBridgeFIFOs()
             return
         }
@@ -781,6 +806,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             stopLocked()
             return
         }
+        bridgeReady = true
         clearLastError()
         appendAppLog("Microphone bridge started successfully pid=\(pid)")
     }
@@ -938,6 +964,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func stopLocked() {
+        bridgeReady = false
         stopUserHelper()
         stopPacketLogger()
         removeBridgeFIFOs()
@@ -951,6 +978,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             let supervisorAlive = !packetLogger || self.packetLoggerIdentity.map(self.packetLoggerSupervisorMatches) == true
             if !self.isRunningLocked() || !supervisorAlive {
                 self.healthySince = nil
+                self.bridgeReady = false
                 guard self.retrySchedule.isDue(now: Date()) else { return }
                 self.stopLocked()
                 self.attemptAutomaticStartLocked(reason: "capture pipeline stopped")
@@ -965,6 +993,14 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 _ = self.setDefaultInputDevice(named: outputDeviceName)
             }
         }
+    }
+
+    /// A Bluetooth edge invalidates the current PacketLogger subscription immediately, even
+    /// though the actual restart is briefly debounced to coalesce a burst of topology changes.
+    /// Clear UI readiness now so the old live processes cannot masquerade as a recovered bridge.
+    func markBluetoothRecoveryPending() {
+        guard UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" else { return }
+        bridgeReady = false
     }
 
     /// Recovers the live PacketLogger subscription after a Bluetooth topology change — a device

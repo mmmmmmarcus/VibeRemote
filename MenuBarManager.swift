@@ -8,10 +8,74 @@
 import AppKit
 
 enum RemoteStatusBadge: Equatable, Sendable {
-    case none, paused, disconnected
+    case none, starting, disconnected
 
     init(remoteConnected: Bool, bridgeRunning: Bool) {
-        self = !remoteConnected ? .disconnected : (bridgeRunning ? .none : .paused)
+        self = !remoteConnected ? .disconnected : (bridgeRunning ? .none : .starting)
+    }
+}
+
+/// Compact battery visualization used by the menu's device summary. Drawing the percentage
+/// and progress in one view keeps their alignment stable at every menu width and appearance.
+@MainActor
+final class RemoteBatteryRingView: NSView {
+    private let percent: Int?
+
+    init(percent: Int?) {
+        self.percent = percent.map { min(100, max(0, $0)) }
+        super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 34))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("Remote battery")
+        setAccessibilityValue(self.percent.map { "\($0)%" } ?? "Unknown")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 34, height: 34) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radius: CGFloat = 13
+        let lineWidth: CGFloat = 3
+        context.setLineWidth(lineWidth)
+        context.setLineCap(.round)
+        context.setStrokeColor(NSColor.quaternaryLabelColor.cgColor)
+        context.addArc(
+            center: center,
+            radius: radius,
+            startAngle: 0,
+            endAngle: .pi * 2,
+            clockwise: false
+        )
+        context.strokePath()
+
+        if let percent, percent > 0 {
+            context.setStrokeColor(NSColor.systemGreen.cgColor)
+            context.addArc(
+                center: center,
+                radius: radius,
+                startAngle: -.pi / 2,
+                endAngle: -.pi / 2 + (.pi * 2 * CGFloat(percent) / 100),
+                clockwise: false
+            )
+            context.strokePath()
+        }
+
+        let text = percent.map(String.init) ?? "—"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let size = (text as NSString).size(withAttributes: attributes)
+        (text as NSString).draw(
+            at: CGPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
+            withAttributes: attributes
+        )
     }
 }
 
@@ -191,12 +255,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         self.menu = NSMenu()
         super.init()
 
+        menu.delegate = self
         diagnosticsMenu.delegate = self
         setupMenuBar()
     }
 
     /// The menu-bar glyph: the Apple TV remote SF Symbol, with a status badge notched into
-    /// the bottom-right corner (slash for disconnected, pause for bridge stopped). Falls
+    /// the bottom-right corner (slash for disconnected, refresh for bridge startup). Falls
     /// back to a hand-drawn remote if the symbol is unavailable (older macOS). The image
     /// stays a template so macOS keeps tinting it for light/dark menu bars.
     static func makeRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
@@ -223,25 +288,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             ctx.setBlendMode(.clear)
             ctx.fillEllipse(in: CGRect(x: cx - r * 1.2, y: cy - r * 1.2, width: r * 2.4, height: r * 2.4))
 
-            if badge == .disconnected {
-                ctx.setBlendMode(.normal)
-                drawDisconnectedBadge(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
-                return true
-            }
-
-            // Solid (tinted) badge disc.
             ctx.setBlendMode(.normal)
-            ctx.setFillColor(CGColor(gray: 0, alpha: 1))
-            ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
-
-            // Two pause bars punched out of the disc.
-            ctx.setBlendMode(.clear)
-            let barW = r * 0.30
-            let barH = r * 0.92
-            let gap = r * 0.24
-            ctx.fill(CGRect(x: cx - gap / 2 - barW, y: cy - barH / 2, width: barW, height: barH))
-            ctx.fill(CGRect(x: cx + gap / 2, y: cy - barH / 2, width: barW, height: barH))
-            ctx.setBlendMode(.normal)
+            drawStatusBadge(badge, in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
             return true
         }
         badged.isTemplate = true
@@ -278,25 +326,11 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 ctx.setBlendMode(.clear)
                 ctx.fillEllipse(in: CGRect(x: cx - moatR, y: cy - moatR, width: 2 * moatR, height: 2 * moatR))
 
-                if badge == .disconnected {
-                    ctx.setBlendMode(.normal)
-                    drawDisconnectedBadge(in: CGRect(x: cx - badgeR, y: cy - badgeR, width: 2 * badgeR, height: 2 * badgeR))
-                    return true
-                }
-
-                // Solid (tinted) badge disc.
                 ctx.setBlendMode(.normal)
-                ctx.fillEllipse(in: CGRect(x: cx - badgeR, y: cy - badgeR, width: 2 * badgeR, height: 2 * badgeR))
-
-                // Two pause bars punched out of the disc.
-                ctx.setBlendMode(.clear)
-                let barW = 0.06 * s
-                let barH = 0.18 * s
-                let gap = 0.05 * s
-                let barY = cy - barH / 2
-                ctx.fill(CGRect(x: cx - gap / 2 - barW, y: barY, width: barW, height: barH))
-                ctx.fill(CGRect(x: cx + gap / 2, y: barY, width: barW, height: barH))
-                ctx.setBlendMode(.normal)
+                drawStatusBadge(
+                    badge,
+                    in: CGRect(x: cx - badgeR, y: cy - badgeR, width: 2 * badgeR, height: 2 * badgeR)
+                )
             }
             return true
         }
@@ -328,6 +362,38 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
               let trimmed = cgImage.cropping(to: CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)) else { return nil }
         return NSImage(cgImage: trimmed, size: NSSize(width: trimmed.width, height: trimmed.height))
     }()
+
+    static let startingBadgeImage: NSImage? = {
+        let config = NSImage.SymbolConfiguration(pointSize: 60, weight: .regular)
+        return NSImage(systemSymbolName: "arrow.clockwise.circle.fill", accessibilityDescription: "Bridge starting")?
+            .withSymbolConfiguration(config)
+    }()
+
+    static func drawStatusBadge(_ badge: RemoteStatusBadge, in rect: CGRect) {
+        let image: NSImage?
+        switch badge {
+        case .none: return
+        case .starting: image = startingBadgeImage
+        case .disconnected: image = disconnectedBadgeImage
+        }
+        guard let image else { return }
+        let scale = min(rect.width / image.size.width, rect.height / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        let destination = NSRect(
+            x: rect.midX - size.width / 2,
+            y: rect.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        image.draw(
+            in: destination,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high.rawValue]
+        )
+    }
 
     static func drawDisconnectedBadge(in rect: CGRect) {
         guard let slash = disconnectedBadgeImage else { return }
@@ -397,8 +463,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         settingsWindowController?.show()
     }
 
-    /// Badges the menu-bar glyph whenever something needs attention: the remote is
-    /// disconnected, or the bridge is not running.
+    /// Badges the menu-bar glyph whenever the remote is disconnected or its always-on bridge
+    /// is still starting. There is no user-facing stopped state.
     private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
         let badge = RemoteStatusBadge(remoteConnected: remoteConnected, bridgeRunning: microphoneStatus.running)
         statusItem.button?.image = Self.makeRemoteIcon(badge: badge)
@@ -464,9 +530,73 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return item
     }
 
+    /// The first menu row is the complete remote summary. It replaces the former three text
+    /// rows for Bluetooth, model and battery so the same state is never repeated below it.
+    private func makeDeviceStatusItem(microphoneStatus: MicrophoneBridgeStatus) -> NSMenuItem {
+        let item = NSMenuItem()
+        let rowHeight: CGFloat = remoteConnected ? 62 : 42
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight))
+        container.autoresizingMask = [.width]
+
+        let statusTitle: String
+        if !remoteConnected {
+            statusTitle = "Disconnected"
+        } else {
+            statusTitle = microphoneStatus.running ? "Connected" : "Starting"
+        }
+        let title = NSTextField(labelWithString: statusTitle)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.textColor = .labelColor
+        container.addSubview(title)
+
+        if remoteConnected {
+            let generationText: String
+            switch remoteGeneration {
+            case .glassTouchSurface: generationText = "1st Generation"
+            case .aluminumClickpad: generationText = "2nd / 3rd Generation"
+            case .unknown: generationText = "Generation Unknown"
+            }
+            let generation = NSTextField(labelWithString: generationText)
+            generation.translatesAutoresizingMaskIntoConstraints = false
+            generation.font = .systemFont(ofSize: 11.5)
+            generation.textColor = .secondaryLabelColor
+
+            let battery = RemoteBatteryRingView(percent: remoteBatteryPercent)
+            battery.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(generation)
+            container.addSubview(battery)
+
+            NSLayoutConstraint.activate([
+                title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+                title.topAnchor.constraint(equalTo: container.topAnchor, constant: 13),
+                generation.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+                generation.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+                generation.trailingAnchor.constraint(lessThanOrEqualTo: battery.leadingAnchor, constant: -12),
+                battery.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+                battery.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                battery.widthAnchor.constraint(equalToConstant: 34),
+                battery.heightAnchor.constraint(equalToConstant: 34),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+                title.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                title.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -14),
+            ])
+        }
+
+        item.view = container
+        return item
+    }
+
     private func rebuildMenu() {
         menu.removeAllItems()
         settingsWindowController?.update(settingsSnapshot)
+
+        let microphoneStatus = microphoneBridgeManager.menuStatus()
+        menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus))
+        menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
@@ -474,7 +604,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(settingsItem)
         menu.addItem(.separator())
 
-        let microphoneStatus = microphoneBridgeManager.menuStatus()
         updateStatusIcon(microphoneStatus: microphoneStatus)
 
         // Permissions appear only while something still needs granting, pinned to the top.
@@ -517,8 +646,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         // Keep the disconnected menu short. The settings window remains available above.
         guard remoteConnected else {
-            menu.addItem(makeBanner(symbolName: "exclamationmark.triangle.fill", text: "Remote disconnected"))
-            menu.addItem(NSMenuItem.separator())
             let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
             quitItem.target = self
             menu.addItem(quitItem)
@@ -552,22 +679,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                     : nil
             ))
             menu.addItem(NSMenuItem.separator())
-        } else if !microphoneStatus.running {
-            menu.addItem(makeBanner(
-                symbolName: "pause.circle.fill",
-                text: "Bridge is stopped",
-                buttonTitle: "Start",
-                buttonAction: #selector(startMicrophoneBridge)
-            ))
-            menu.addItem(NSMenuItem.separator())
         }
-
-        // At-a-glance lines rendered directly in the top level. Bridge run state is already
-        // conveyed by the menu-bar icon and the stopped banner, so this row is a fixed
-        // "Debug" entry that opens the detailed diagnostics submenu.
-        addInfoItem("Bluetooth: \(remoteConnected ? "Connected" : "Not Connected")", to: menu)
-        addInfoItem("Remote: \(remoteGeneration.shortName)", to: menu)
-        addInfoItem("Battery: \(remoteBatteryPercent.map { "\($0)%" } ?? "Unknown")", to: menu)
 
         if remoteGeneration == .glassTouchSurface {
             let idleItem = NSMenuItem(title: "Auto Disconnect", action: nil, keyEquivalent: "")
@@ -738,6 +850,11 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         requestDiagnostics(force: false)
     }
 
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        rebuildMenu()
+    }
+
     private func requestDiagnostics(
         force: Bool,
         completion: ((MicrophoneBridgeDiagnostics) -> Void)? = nil
@@ -868,6 +985,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     func refresh() {
         refreshRemoteBattery()
         rebuildMenu()
+    }
+
+    /// The bridge health timer calls this more frequently than the full menu refresh so the
+    /// startup badge clears promptly without forcing battery work or rebuilding a closed menu.
+    func refreshBridgeStatusIcon() {
+        updateStatusIcon(microphoneStatus: microphoneBridgeManager.menuStatus())
     }
 
     func setBluetoothAccessRequestHandler(_ handler: @escaping () -> Void) {

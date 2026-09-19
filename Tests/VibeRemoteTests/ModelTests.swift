@@ -116,17 +116,17 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(schedule.isDue(now: start))
     }
 
-    func testDisconnectedBadgeTakesPriorityOverBridgePause() {
+    func testDisconnectedBadgeTakesPriorityOverBridgeStartup() {
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: false, bridgeRunning: false), .disconnected)
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: false, bridgeRunning: true), .disconnected)
-        XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: false), .paused)
+        XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: false), .starting)
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: true), .none)
     }
 
     @MainActor
     func testStatusBadgesKeepTheRemoteCanvasAndTemplateTint() throws {
         let original = MenuBarManager.makeRemoteIcon()
-        for badge in [RemoteStatusBadge.paused, .disconnected] {
+        for badge in [RemoteStatusBadge.starting, .disconnected] {
             let icon = MenuBarManager.makeRemoteIcon(badge: badge)
             XCTAssertEqual(icon.size, original.size)
             XCTAssertTrue(icon.isTemplate)

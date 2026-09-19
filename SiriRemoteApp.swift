@@ -151,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridgeHealthTimer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.microphoneBridgeManager.maintainBridgeHealth()
+                self?.menuBarManager.refreshBridgeStatusIcon()
             }
         }
         if let bridgeHealthTimer { RunLoop.main.add(bridgeHealthTimer, forMode: .common) }
@@ -346,6 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// bringing up its profiles one at a time), and each restart costs a couple of seconds of
     /// capture.
     private func scheduleBridgeRecovery(reason: String) {
+        microphoneBridgeManager.markBluetoothRecoveryPending()
+        menuBarManager.refreshBridgeStatusIcon()
         bluetoothBridgeRecoveryTimer?.invalidate()
         bluetoothBridgeRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
