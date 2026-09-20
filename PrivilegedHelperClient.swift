@@ -177,6 +177,18 @@ final class PrivilegedHelperClient {
         }
     }
 
+    func prepareSharedAudio(completion: @escaping @Sendable (Bool, String?) -> Void) {
+        let latch = ErrorLatch()
+        guard let helper = proxy(onError: { message in
+            guard latch.trip() else { return }
+            completion(false, message)
+        }) else { return }
+        helper.prepareSharedAudio { ok, message in
+            guard latch.trip() else { return }
+            completion(ok, message)
+        }
+    }
+
     func installAudioDriver(
         fromPath path: String,
         completion: @escaping @Sendable (Bool, String?) -> Void

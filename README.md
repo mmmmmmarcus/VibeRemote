@@ -20,8 +20,9 @@ paired at the same time and each keeps its own mapping.
 
 - A native settings window with a visual Siri Remote button guide, opened from
   the menu bar's **Settings…** item (also available while the remote is disconnected).
-- Fixed mappings for navigation, editing and app switching; the Siri button's
-  action is customizable and saved immediately. **Reset** restores it to Space.
+- Default mappings for navigation, editing and app switching; Siri is customizable.
+  Play/Pause and Mute can each switch between Touch and Audio & Buttons instead of their
+  original action. Changes save immediately. **Reset** restores all three assignments.
 - Automatic per-generation button profiles. The 1st-gen remote has no Mute and
   no Power key, so the mute button's two roles move to buttons that do exist:
   holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
@@ -164,3 +165,59 @@ each supported Siri Remote generation.
 
 The VibeRemote source is available under the MIT License. Third-party
 components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Experimental audio delivery and touch mode
+
+Select **Mode → Audio & Buttons / Touch (Experimental)** from the menu bar, or use
+Settings' hand icon. Audio mode retains fixed button mappings and held-Siri capture.
+Touch mode releases all app-owned remote HID/GATT handles and disables voice decoding,
+then attaches to remote-sized MultitouchSupport
+surfaces: slide moves the pointer, tap clicks, two fingers scroll. The modes are
+mutually exclusive and remembered across launches. Hardware behavior must be checked
+with each remote generation; an attached surface alone does not prove touch delivery.
+
+With PacketLogger selected, passive capture remains running in Touch. For aluminum
+remotes, assigned Play/Pause and Mute keys are matched against fresh captured button
+reports before suppressing the corresponding system media events. Unmatched media
+events are forwarded after a bounded 160 ms wait. This remains experimental: simultaneous
+media-key presses from other devices can be ambiguous, and the old remote capture
+format is not supported for switching back. The toolbar mode selector remains available.
+
+**Audio Output → Direct HAL (Experimental)** sends decoded 48 kHz mono Float32 samples
+through a two-second mmap ring directly into the VibeRemote HAL input callback.
+The file is created by helper v4 for the authenticated user's UID under
+`/Library/Application Support/VibeRemote/Audio/`, mode 0660 for that user and
+`_coreaudiod`, inside root-owned directories. No public `/tmp` file is used. The
+render callback performs no allocation, filesystem access or blocking lock. Hardware
+format is fixed to 48 kHz; CoreAudio converts client formats. Buffer overrun invalidates
+successful drain reporting, underrun produces silence, and a stale writer heartbeat
+returns the driver to ordinary loopback. **Compatibility** uses AVAudioEngine.
+Old driver/helper versions automatically retain compatibility output.
+
+Physical Siri release, protocol voice-end, and rendered/read completion are separate
+log events. A 250 ms quiet interval collects packets arriving just after protocol end;
+these packets continue the ending session instead of starting another one. Only completed output releases a pending held dictation key; a 4-second
+old-remote / 3-second new-remote deadline prevents stuck keys when markers or consumers
+are absent. A timed-out or interrupted output is never logged as successfully drained.
+HAL read completion does not prove that the receiving app transcribed the audio.
+
+After changing the shared driver, run `./build_audio_driver.sh`, build/install the signed
+app, restart/re-register an old privileged daemon, and select **Audio Output → Install /
+Update Audio Driver…**. This restarts CoreAudio. Check `voice-helper.log` for
+`Audio output: shared-memory HAL` and `Voice buffer drained` during an actual recording.
+To revert, select **Compatibility**; to regain keys/microphone, select **Audio & Buttons**.
+
+Personal app builds embed the existing Apple-signed PacketLogger by default when found
+at `/Applications/Additional Tools for Xcode/Hardware/PacketLogger.app`.
+`PACKETLOGGER_APP_SOURCE` supplies another installed copy, `INCLUDE_PACKETLOGGER=0`
+omits it. Release signing requires explicit `INCLUDE_PACKETLOGGER=1` to include it.
+The Apple bundle is neither altered nor re-signed. Original dependency signatures are
+checked during packaging and again before privileged capture starts.
+
+Additional ring test (no root, no hardware):
+
+```sh
+xcrun clang -isysroot "$(xcrun --show-sdk-path)" -std=c11 -Wall -Wextra -Werror \
+  scripts/test_shared_audio.c -o /tmp/viberemote-ring-tests
+/tmp/viberemote-ring-tests
+```

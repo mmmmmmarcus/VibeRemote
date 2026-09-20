@@ -21,6 +21,30 @@ let vibeRemoteLogPath: String = {
 private let rmLogQueue = DispatchQueue(label: "com.viberemote.log", qos: .utility)
 private let rmLogMaximumBytes: UInt64 = 1_048_576
 
+/// Enumeration and ownership are different: an idle disconnect closes our handles without
+/// necessarily removing macOS's HID services. Reconcile against the handles actually open,
+/// but only for live Bluetooth links, so polling cannot wake an intentionally sleeping remote.
+enum RemoteInterfaceRecovery {
+    static func bluetoothAddress(_ value: String) -> String? {
+        let compact = value.lowercased().filter { $0 != ":" && $0 != "-" }
+        guard compact.count == 12, compact.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return compact
+    }
+
+    static func missingInterfaces<ID: Hashable>(
+        discovered: [ID: String], opened: Set<ID>, connectedAddresses: Set<String>,
+        disconnectingAddresses: Set<String>
+    ) -> Set<ID> {
+        let connected = Set(connectedAddresses.compactMap(bluetoothAddress))
+            .subtracting(disconnectingAddresses.compactMap(bluetoothAddress))
+        return Set(discovered.compactMap { id, serial in
+            guard !opened.contains(id), let address = bluetoothAddress(serial),
+                  connected.contains(address) else { return nil }
+            return id
+        })
+    }
+}
+
 /// Append diagnostics asynchronously to a private, size-bounded user log.
 func rmDebug(_ message: String) {
     let line = "\(Date()) \(message)\n"
@@ -183,6 +207,37 @@ final class RemoteDetector {
         }
 
         trackedInterfaces.removeAll()
+    }
+
+    func recoverMissingInterfaces(
+        opened: Set<ObjectIdentifier>, connectedAddresses: Set<String>,
+        disconnectingAddresses: Set<String>
+    ) {
+        guard isDetecting, let manager,
+              let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return }
+        var candidates: [ObjectIdentifier: IOHIDDevice] = [:]
+        var addresses: [ObjectIdentifier: String] = [:]
+        for device in devices where isSiriRemote(device) {
+            guard let transport = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String,
+                  transport.lowercased().contains("bluetooth"),
+                  let serial = IOHIDDeviceGetProperty(device, kIOHIDSerialNumberKey as CFString) as? String else { continue }
+            let id = ObjectIdentifier(device)
+            candidates[id] = device
+            addresses[id] = serial
+        }
+        let missing = RemoteInterfaceRecovery.missingInterfaces(
+            discovered: addresses, opened: opened, connectedAddresses: connectedAddresses,
+            disconnectingAddresses: disconnectingAddresses
+        )
+        guard !missing.isEmpty else { return }
+        rmDebug("🛰 Recovering \(missing.count) unopened HID interface(s) for connected remote(s)")
+        for id in missing {
+            guard let device = candidates[id] else { continue }
+            // Bypass matching-callback deduplication: the exact same service may have been
+            // closed for idle disconnect. Failed opens remain eligible on the next health tick.
+            trackedInterfaces[id] = device
+            deviceCallback?(.added(device))
+        }
     }
 
     private func enumerateAllDevices() {

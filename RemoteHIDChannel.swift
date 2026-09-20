@@ -119,6 +119,7 @@ final class RemoteHIDChannel: NSObject,
         retryTimer?.invalidate()
         retryTimer = nil
         central?.stopScan()
+        if let peripheral { central?.cancelPeripheralConnection(peripheral) }
         peripheral?.delegate = nil
         peripheral = nil
         central = nil
@@ -140,7 +141,7 @@ final class RemoteHIDChannel: NSObject,
         peripheral?.delegate = nil
         peripheral = nil
         resetReportState()
-        rmDebug("📡 Direct GATT HID suspended for first-generation idle disconnect")
+        rmDebug("📡 Direct GATT HID suspended for remote idle disconnect")
     }
 
     func resumeAfterIdleDisconnect() {

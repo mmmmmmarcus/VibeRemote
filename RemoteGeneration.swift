@@ -29,16 +29,16 @@ struct RemoteInterfaceDescriptor: Equatable, Sendable {
     }
 }
 
-/// How long the 1st-generation remote stays awake after its most recent button press.
-/// The newer remote keeps its firmware-managed connection behavior and never enters this path.
-enum FirstGenerationIdleTimeout: Int, CaseIterable, Sendable {
+/// Shared idle duration for both remote families, measured independently per physical remote.
+enum RemoteIdleTimeout: Int, CaseIterable, Sendable {
     case fiveMinutes = 300
     case fifteenMinutes = 900
     case thirtyMinutes = 1_800
     case never = 0
 
+    // Keep the original key so upgrading also preserves the user's existing Never choice.
     static let defaultsKey = "firstGenerationIdleTimeoutSeconds"
-    static let defaultValue: FirstGenerationIdleTimeout = .fiveMinutes
+    static let defaultValue: RemoteIdleTimeout = .fiveMinutes
 
     var title: String {
         switch self {
@@ -53,9 +53,9 @@ enum FirstGenerationIdleTimeout: Int, CaseIterable, Sendable {
         self == .never ? nil : TimeInterval(rawValue)
     }
 
-    static func load(from defaults: UserDefaults = .standard) -> FirstGenerationIdleTimeout {
+    static func load(from defaults: UserDefaults = .standard) -> RemoteIdleTimeout {
         guard defaults.object(forKey: defaultsKey) != nil,
-              let value = FirstGenerationIdleTimeout(rawValue: defaults.integer(forKey: defaultsKey)) else {
+              let value = RemoteIdleTimeout(rawValue: defaults.integer(forKey: defaultsKey)) else {
             return defaultValue
         }
         return value
@@ -64,7 +64,7 @@ enum FirstGenerationIdleTimeout: Int, CaseIterable, Sendable {
 
 /// Per-physical-remote idle state. Interfaces for one remote arrive independently, so the
 /// tracker keys by Bluetooth address and emits at most one disconnect request per idle period.
-struct FirstGenerationIdleTracker: Sendable {
+struct RemoteIdleTracker: Sendable {
     private struct Entry: Sendable {
         var lastActivity: TimeInterval
         var disconnectRequested = false
@@ -124,6 +124,12 @@ enum RemoteGeneration: String, Sendable, CaseIterable {
     /// as the newer remote everywhere a decision is forced, because that path degrades
     /// gracefully on older hardware while the reverse does not.
     case unknown
+
+    /// Unknown devices (including Lightning-only charging interfaces) must not be kept awake
+    /// or disconnected by the idle policy merely because they resemble a remote.
+    var supportsIdleConnectionManagement: Bool {
+        self == .glassTouchSurface || self == .aluminumClickpad
+    }
 
     var displayName: String {
         switch self {

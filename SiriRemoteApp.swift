@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var remoteInputHandler: RemoteInputHandler?
     private var mediaKeyInterceptor: MediaKeyInterceptor?
     private var consumedRemoteMediaButtons: Set<String> = []
+    private var modeSwitchPresses = RemoteModeSwitchPressTracker()
     private var microphoneHealthTimer: Timer?
     private var bridgeHealthTimer: Timer?
     private var bridgeWakeObserver: NSObjectProtocol?
@@ -34,11 +35,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var bluetoothBridgeRecoveryTimer: Timer?
     private var initialBluetoothConnections: Set<String> = []
     private var initialBluetoothConnectionTimer: Timer?
+    private var pendingIdleDisconnects: Set<String> = []
     private var inputAccessPollTimer: Timer?
     private var controlAccessPollTimer: Timer?
     private var hidDetectionStarted = false
     private var mediaKeyInterceptorStarted = false
     private var didCleanUp = false
+    private var interactionMode = RemoteInteractionMode.load()
+    private let touchController = RemoteTouchController()
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 VibeRemote starting...")
@@ -67,17 +71,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Which Siri Remote family is attached decides the button profile and the microphone
         // path, and it is only knowable once its HID interfaces are open.
         remoteInputHandler?.onGenerationChanged = { [weak self] generation in
+            guard self?.interactionMode == .audio else { return }
             self?.menuBarManager.updateRemoteGeneration(generation)
             self?.microphoneBridgeManager.updateRemoteGeneration(generation)
         }
-        remoteInputHandler?.onFirstGenerationIdleDisconnectRequested = { [weak self] deviceKey in
-            self?.disconnectFirstGenerationRemote(deviceKey: deviceKey)
+        remoteInputHandler?.onRemoteIdleDisconnectRequested = { [weak self] deviceKey in
+            self?.disconnectIdleRemote(deviceKey: deviceKey)
         }
         
         // Start remote detection
         remoteDetector = RemoteDetector(
             deviceCallback: { [weak self] event in
-                guard let self else { return }
+                guard let self, self.interactionMode == .audio else { return }
 
                 let inputReady: Bool
                 switch event {
@@ -119,29 +124,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarManager.setStatusRefreshHandler { [weak self] in
             self?.refreshPermissionStates()
         }
-        menuBarManager.setFirstGenerationIdleTimeoutHandler { [weak self] timeout in
-            self?.remoteInputHandler?.updateFirstGenerationIdleTimeout(timeout)
+        menuBarManager.setRemoteIdleTimeoutHandler { [weak self] timeout in
+            self?.remoteInputHandler?.updateRemoteIdleTimeout(timeout)
+        }
+        menuBarManager.interactionModeHandler = { [weak self] mode in self?.switchInteractionMode(mode) }
+        touchController.onStatus = { [weak self] connected, detail in
+            self?.menuBarManager.touchStatus = detail
+            self?.menuBarManager.updateBluetoothConnectionStatus(connected: connected)
         }
         bluetoothAccessManager.onStateChanged = { [weak self] state in
             self?.menuBarManager.updateBluetoothAccessState(state)
-            if state == .allowed {
+            if state == .allowed && self?.interactionMode == .audio {
                 self?.remoteHIDChannel?.startIfAuthorized()
                 self?.startBluetoothConnectionMonitoringIfAuthorized()
             }
         }
         menuBarManager.updateBluetoothAccessState(bluetoothAccessManager.state)
-        remoteHIDChannel?.startIfAuthorized()
+        if interactionMode == .audio { remoteHIDChannel?.startIfAuthorized() }
         startBluetoothConnectionMonitoringIfAuthorized()
 
         // Configure the media-key interceptor now, but only start it after Input Monitoring
         // access is confirmed. Requesting permission is an explicit menu action.
         mediaKeyInterceptor = MediaKeyInterceptor()
-        mediaKeyInterceptor?.onMediaKey = { [weak self] keyType, isPressed in
+        mediaKeyInterceptor?.capturePath = microphoneBridgeManager.buttonCapturePath
+        remoteInputHandler?.usesPassiveModeSwitch = { [weak self] generation in
+            guard let self else { return false }
+            return self.usesPassiveModeSwitch(generation: generation)
+        }
+        mediaKeyInterceptor?.onSourceReset = { [weak self] in self?.modeSwitchPresses.reset() }
+        mediaKeyInterceptor?.shouldAwaitRemoteSource = { [weak self] key in
+            guard let self, self.usesPassiveModeSwitch(generation: self.remoteInputHandler?.generation ?? .unknown) else { return false }
+            let button = key == .playPause ? "playPause" : (key == .mute ? "mute" : "")
+            return self.menuBarManager.getMapping(for: button) == .toggleInteractionMode
+        }
+        mediaKeyInterceptor?.onMediaKey = { [weak self] keyType, isPressed, remoteSource in
             guard let self = self else { return false }
-            return self.handleInterceptedMediaKey(keyType, isPressed: isPressed)
+            return self.handleInterceptedMediaKey(keyType, isPressed: isPressed, remoteSource: remoteSource)
         }
         refreshInputMonitoringAccess()
         refreshAccessibilityAccess()
+        if interactionMode == .touch { touchController.start() }
         VolumeRevertGuard.shared.prewarm()
         logPrivilegedHelperState()
         let bridgeManager = microphoneBridgeManager
@@ -178,12 +200,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// enable with no error anywhere. Detect the vanished services and re-arm the whole HID
     /// path — rediscovery re-seizes the fresh interfaces and re-writes the 0xAF enable.
     private func recoverFromStaleHIDInterfacesIfNeeded() {
-        guard let remoteInputHandler, remoteInputHandler.hasStaleInterfaces() else { return }
+        guard interactionMode == .audio else { return }
+        guard let remoteInputHandler else { return }
+        guard remoteInputHandler.hasStaleInterfaces() else {
+            recoverMissingRemoteInterfaces()
+            return
+        }
         rmDebug("🛰 HID watchdog: held interfaces vanished from the IOKit registry; re-arming detection")
         remoteInputHandler.resetForRediscovery()
         remoteDetector?.stopDetection()
         hidDetectionStarted = false
         startHIDDetectionIfNeeded()
+    }
+
+    /// Also handles zero open interfaces after an idle disconnect, which the registry-ID
+    /// watchdog cannot detect. Read connection state without initiating any Bluetooth link.
+    private func recoverMissingRemoteInterfaces() {
+        guard interactionMode == .audio, let remoteInputHandler else { return }
+        let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        let connected = Set(paired.compactMap { device -> String? in
+            device.isConnected() ? device.addressString : nil
+        })
+        remoteDetector?.recoverMissingInterfaces(
+            opened: remoteInputHandler.openedInterfaceIDs,
+            connectedAddresses: connected,
+            disconnectingAddresses: pendingIdleDisconnects
+        )
     }
 
     /// PacketLogger can remain alive while its local HCI capture session silently stops
@@ -288,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleBluetoothDeviceConnected(deviceDescription: String, address: String?) {
+        recoverMissingRemoteInterfaces()
         if let address,
            initialBluetoothConnections.remove(address) != nil {
             rmDebug("📡 Ignoring existing Bluetooth connection replay: \(deviceDescription)")
@@ -305,38 +348,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The HID descriptor exposes the physical remote's Bluetooth address as its serial. Close
-    /// only that paired device after the 1st-gen idle timer expires; if lookup fails, HID
+    /// only that paired device after its idle timer expires; if lookup fails, HID
     /// keepalive has already stopped and the remote can still enter its normal firmware sleep.
-    private func disconnectFirstGenerationRemote(deviceKey: String) {
+    private func disconnectIdleRemote(deviceKey: String) {
+        pendingIdleDisconnects.insert(deviceKey)
         remoteHIDChannel?.suspendForIdleDisconnect()
         // CoreBluetooth cancellation completes asynchronously. Give it a short head start so
         // IOBluetooth does not close and immediately reopen a link that still has a GATT client.
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.closeFirstGenerationBluetoothConnection(deviceKey: deviceKey)
+                self?.closeIdleBluetoothConnection(deviceKey: deviceKey)
             }
         }
     }
 
-    private func closeFirstGenerationBluetoothConnection(deviceKey: String) {
+    private func closeIdleBluetoothConnection(deviceKey: String) {
+        defer { pendingIdleDisconnects.remove(deviceKey) }
+        guard interactionMode == .audio else { return }
         let normalizedKey = deviceKey.lowercased().filter(\.isHexDigit)
         let pairedDevices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         guard let device = pairedDevices.first(where: {
             $0.addressString?.lowercased().filter(\.isHexDigit) == normalizedKey
         }) else {
-            rmDebug("⚠️ First-generation idle disconnect could not match Bluetooth address \(deviceKey)")
+            rmDebug("⚠️ Remote idle disconnect could not match Bluetooth address \(deviceKey)")
             return
         }
         guard device.isConnected() else {
-            rmDebug("📡 First-generation idle disconnect skipped; remote is already disconnected")
+            rmDebug("📡 Remote idle disconnect skipped; remote is already disconnected")
             return
         }
         let result = device.closeConnection()
         if result == kIOReturnSuccess {
-            rmDebug("📡 First-generation remote disconnected after configured idle timeout")
+            rmDebug("📡 Remote disconnected after configured idle timeout")
         } else {
             rmDebug(String(
-                format: "⚠️ First-generation idle disconnect failed (IOReturn=0x%X)",
+                format: "⚠️ Remote idle disconnect failed (IOReturn=0x%X)",
                 result
             ))
         }
@@ -433,6 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop new HID callbacks first, then synchronously close every opened interface and
         // release the keys actually held by RemoteInputHandler before the process terminates.
         remoteDetector?.stopDetection()
+        touchController.stop()
         remoteInputHandler?.stop()
         remoteHIDChannel?.stop()
         mediaKeyInterceptor?.stop()
@@ -458,8 +505,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Double(nanos) / 1_000_000_000.0
     }
     
+    private func usesPassiveModeSwitch(generation: RemoteGeneration) -> Bool {
+        RemoteModeSwitchMapping.usesPassiveCapture(generation: generation,
+            packetLogger: UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger",
+            mediaTap: mediaKeyInterceptorStarted)
+    }
+
     @MainActor
-    private func handleInterceptedMediaKey(_ keyType: MediaKeyInterceptor.MediaKeyType, isPressed: Bool) -> Bool {
+    private func handleInterceptedMediaKey(_ keyType: MediaKeyInterceptor.MediaKeyType, isPressed: Bool, remoteSource: UInt64?) -> Bool {
         let buttonName: String
         switch keyType {
         case .playPause:  buttonName = "playPause"
@@ -469,6 +522,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .volumeDown: buttonName = "volumeDown"
         case .mute:       buttonName = "mute"
         }
+
+        let isModeSwitch = menuBarManager.getMapping(for: buttonName) == .toggleInteractionMode
+        let passiveOwner = usesPassiveModeSwitch(generation: remoteInputHandler?.generation ?? .unknown)
+        if isModeSwitch, passiveOwner {
+            guard let remoteSource else { return false }
+            if modeSwitchPresses.handle(device: remoteSource, button: buttonName, pressed: isPressed, enabled: true) {
+                // Serialize complete clicks. Read the mode when applying each click, not
+                // when enqueuing it: several releases may have waited behind HID opening.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.switchInteractionMode(self.interactionMode.toggled)
+                }
+            }
+            return true
+        }
+
+        // Legacy HID-owned mappings retain release suppression across the mode boundary.
+        if !isPressed, consumedRemoteMediaButtons.remove(buttonName) != nil { return true }
+        if interactionMode == .touch { return false }
 
         // System repeats arrive without another HID down. Keep consuming them for the
         // physical hold instead of letting them escape after the initial 350ms marker.
@@ -515,6 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputAccessPollTimer?.invalidate()
         inputAccessPollTimer = nil
         startHIDDetectionIfNeeded()
+        startMediaKeyInterceptorIfNeeded()
     }
 
     private func requestInputMonitoringAccess() {
@@ -598,7 +671,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarManager.updateRemoteControlState(.permissionRequired)
     }
 
+    private func switchInteractionMode(_ mode: RemoteInteractionMode) {
+        guard mode != interactionMode else { return }
+        interactionMode = mode
+        // Passive press pairs and pending NX markers survive mode transitions. Clearing
+        // them here loses the next click when several fast events are queued together.
+        UserDefaults.standard.set(mode.rawValue, forKey: "remoteInteractionMode")
+        rmDebug("Interaction mode: \(mode.rawValue)")
+        bluetoothBridgeRecoveryTimer?.invalidate()
+        touchController.stop()
+        if mode == .touch {
+            remoteDetector?.stopDetection(); hidDetectionStarted = false
+            remoteInputHandler?.resetForRediscovery()
+            remoteHIDChannel?.stop()
+            touchController.start()
+        } else {
+            remoteHIDChannel?.startIfAuthorized()
+            startHIDDetectionIfNeeded()
+            startMediaKeyInterceptorIfNeeded()
+        }
+        microphoneBridgeManager.interactionModeChanged()
+        menuBarManager.refresh()
+    }
+
     private func startHIDDetectionIfNeeded() {
+        guard interactionMode == .audio else { return }
         guard !hidDetectionStarted else { return }
         hidDetectionStarted = true
         menuBarManager.updateRemoteInputState(.starting)

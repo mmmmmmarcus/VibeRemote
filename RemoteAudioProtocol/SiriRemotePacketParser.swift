@@ -15,7 +15,12 @@ public struct SiriRemotePacketParser {
     public init() {}
     private var pendingByHandle: [UInt16: PendingL2CAPPacket] = [:]
     private var oldVoiceHandles: Set<UInt16> = []
-    private var newVoiceActive = false
+    private struct NewVoiceSession {
+        var sequence: UInt16
+        var endedAt: TimeInterval?
+    }
+    private var newVoiceSessions: [UInt16: NewVoiceSession] = [:]
+    private var receivedAt: TimeInterval = 0
     private var directVoiceActive = false
     private var lastSniffedPacketAt: Date?
     private var lastLine: String?
@@ -24,7 +29,8 @@ public struct SiriRemotePacketParser {
     /// 1st-gen remote's voice session is over.
     private static let sniffedVoiceIdleTimeout: TimeInterval = 0.75
 
-    public mutating func events(from line: String) -> [VoiceEvent] {
+    public mutating func events(from line: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> [VoiceEvent] {
+        receivedAt = now
         // PacketLogger can occasionally repeat an identical rendered record. Feeding
         // duplicates to the stateful Opus decoder produces stutter and buffer growth.
         guard line != lastLine else { return [] }
@@ -224,15 +230,23 @@ public struct SiriRemotePacketParser {
             let packet = Data(bytes[8..<(8 + packetLength)])
             guard packet.contains(where: { $0 != 0 }) else { return [] }
             var events: [VoiceEvent] = []
-            if !newVoiceActive {
-                newVoiceActive = true
+            let sequence = UInt16(bytes[5]) | UInt16(bytes[6]) << 8
+            if let previous = newVoiceSessions[handle], let endedAt = previous.endedAt,
+               receivedAt - endedAt <= 0.25, sequence == previous.sequence &+ 1 {
+                // Real capture: 1B 39 can precede the final 1B 35 by one BLE interval.
+                // Preserve that tail in the old buffer; do not reset the HAL ring/session.
+                newVoiceSessions[handle]?.sequence = sequence
+                return [.packet(packet)]
+            }
+            if newVoiceSessions[handle] == nil || newVoiceSessions[handle]?.endedAt != nil {
                 events.append(.started)
             }
+            newVoiceSessions[handle] = NewVoiceSession(sequence: sequence, endedAt: nil)
             events.append(.packet(packet))
             return events
         case 0x39:
-            guard newVoiceActive else { return [] }
-            newVoiceActive = false
+            guard newVoiceSessions[handle] != nil, newVoiceSessions[handle]?.endedAt == nil else { return [] }
+            newVoiceSessions[handle]?.endedAt = receivedAt
             return [.ended]
         default:
             return []

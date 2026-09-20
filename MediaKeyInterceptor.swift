@@ -7,15 +7,25 @@
 //
 
 import Cocoa
+import IOKit
+import NativeTouch
 @preconcurrency import CoreGraphics
 
 @MainActor
 final class MediaKeyInterceptor {
+    private let packetButtons = PacketLoggerButtonMonitor()
+    var capturePath: String?
+    var onSourceReset: (() -> Void)?
+    func resetRemoteCorrelation() { remoteEvents = RemoteMediaEventCorrelation() }
+    private static let forwardedMarker: Int64 = 0x56524D45444941
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var wakeObserver: NSObjectProtocol?
     
-    var onMediaKey: ((MediaKeyType, Bool) -> Bool)?
+    var onMediaKey: ((MediaKeyType, Bool, UInt64?) -> Bool)?
+    private var remoteSources: Set<UInt64> = []
+    private var remoteEvents = RemoteMediaEventCorrelation()
+    var shouldAwaitRemoteSource: ((MediaKeyType) -> Bool)?
     
     enum MediaKeyType {
         case playPause, next, previous, volumeUp, volumeDown, mute
@@ -61,7 +71,20 @@ final class MediaKeyInterceptor {
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        
+        packetButtons.onReset = { [weak self] in
+            self?.resetRemoteCorrelation(); self?.onSourceReset?()
+        }
+        packetButtons.onEdge = { [weak self] edge in
+            guard let self else { return }
+            let key: MediaKeyType = edge.button == "playPause" ? .playPause : .mute
+            guard self.shouldAwaitRemoteSource?(key) == true else { return }
+            let age = Date().timeIntervalSince(edge.capturedAt)
+            self.remoteEvents.record(button: edge.button, pressed: edge.pressed, sender: edge.sender,
+                                     now: ProcessInfo.processInfo.systemUptime - age)
+            rmDebug("PacketLogger button: \(edge.button) \(edge.pressed ? "down" : "up") source=\(edge.sender) ageMs=\(Int(age * 1000))")
+        }
+        if let capturePath { packetButtons.start(path: capturePath) }
+
         // Re-enable tap after sleep/wake (system often disables taps during sleep).
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -77,6 +100,8 @@ final class MediaKeyInterceptor {
     }
     
     func stop() {
+        packetButtons.stop()
+        remoteEvents = RemoteMediaEventCorrelation()
         if let obs = wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
             wakeObserver = nil
@@ -92,6 +117,7 @@ final class MediaKeyInterceptor {
         }
         eventTap = nil
         runLoopSource = nil
+        remoteSources.removeAll()
     }
     
     /// Re-enable the event tap after it was disabled by timeout or sleep.
@@ -109,6 +135,9 @@ final class MediaKeyInterceptor {
         
         // NX_SYSDEFINED = 14
         guard type.rawValue == 14 else {
+            return Unmanaged.passUnretained(event)
+        }
+        if event.getIntegerValueField(.eventSourceUserData) == Self.forwardedMarker {
             return Unmanaged.passUnretained(event)
         }
         
@@ -153,11 +182,57 @@ final class MediaKeyInterceptor {
         }
         
         if let key = mediaKey, let handler = onMediaKey {
-            let consumed = handler(key, isKeyDown)
-            rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") consumed=\(consumed) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID)) data2=\(nsEvent.data2) epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
+            let sender = vr_media_event_sender(event)
+            let remote = isRemoteSource(sender) ? sender : nil
+            let consumed = handler(key, isKeyDown, remote)
+            if !consumed, remote == nil, shouldAwaitRemoteSource?(key) == true, let copy = event.copy() {
+                // The passive capture and NX tap use independent delivery paths;
+                // either may arrive first. Hold only configured switch keys briefly, then
+                // consume confirmed remote events or forward unrelated keyboard events once.
+                let repeating = keyFlags & 1 != 0
+                // The main loop can be delayed while HID interfaces reopen. Compare original
+                // event times, preserving a narrow match window even after that stall.
+                let receivedAt = event.timestamp > 0 ? Double(event.timestamp) / 1_000_000_000 : ProcessInfo.processInfo.systemUptime
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+                    self?.packetButtons.pollNow()
+                    let button = key == .playPause ? "playPause" : "mute"
+                    let observed = self?.remoteEvents.resolve(button: button, pressed: isKeyDown,
+                        repeating: repeating, now: receivedAt)
+                    let consumed = observed.map { self?.onMediaKey?(key, isKeyDown, $0) == true } ?? false
+                    rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") deferred consumed=\(consumed) remote=\(observed != nil)")
+                    if !consumed {
+                        copy.setIntegerValueField(.eventSourceUserData, value: Self.forwardedMarker)
+                        copy.post(tap: .cghidEventTap)
+                    }
+                }
+                return nil
+            }
+            rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") consumed=\(consumed) remote=\(remote != nil) sender=\(sender) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID)) data2=\(nsEvent.data2) epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
             if consumed { return nil }
         }
         
         return Unmanaged.passUnretained(event)
+    }
+
+    private func isRemoteSource(_ sender: UInt64) -> Bool {
+        guard sender != 0 else { return false }
+        if remoteSources.contains(sender) { return true }
+        let service = IOServiceGetMatchingService(0, IORegistryEntryIDMatching(sender))
+        guard service != IO_OBJECT_NULL else { return false }
+        defer { IOObjectRelease(service) }
+        func property(_ name: String) -> Any? {
+            IORegistryEntrySearchCFProperty(service, kIOServicePlane, name as CFString,
+                kCFAllocatorDefault, IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents))
+        }
+        let matches = RemoteDetector.matchesSiriRemote(
+            vendorID: property("VendorID") as? Int ?? 0,
+            productID: property("ProductID") as? Int ?? 0,
+            productName: property("Product") as? String
+        )
+        if matches {
+            if remoteSources.count >= 32 { remoteSources.removeAll() }
+            remoteSources.insert(sender)
+        }
+        return matches
     }
 }

@@ -171,7 +171,8 @@ private final class OpusDecoder {
     }
 }
 
-private final class VirtualAudioOutput {
+private final class VirtualAudioOutput: VoiceAudioOutput {
+    private let delivery = AudioDelivery()
     private let format: AVAudioFormat
     /// Guards `engine`/`player`, which the rebuild path replaces wholesale while the read
     /// loop is enqueueing into them.
@@ -295,6 +296,7 @@ private final class VirtualAudioOutput {
         // Only the engine is stopped, never the outgoing player node: stopping a player is
         // the documented deadlock in this file, and stopping its engine already tears the
         // node down. Buffers still scheduled on the old node are abandoned by design.
+        delivery.interrupt()
         previousEngine.stop()
         lastRenderSampleTime = -1
         stalledEnqueues = 0
@@ -338,6 +340,7 @@ private final class VirtualAudioOutput {
     }
 
     func voiceStarted() {
+        delivery.begin()
         restartIfStopped()
     }
 
@@ -351,6 +354,7 @@ private final class VirtualAudioOutput {
         // frames decoded during a rebuild costs 20 ms each and beats scheduling them into an
         // engine that will never render them.
         guard engine.isRunning else {
+            delivery.interrupt()
             rebuild(reason: "the audio engine was found stopped")
             return
         }
@@ -358,28 +362,20 @@ private final class VirtualAudioOutput {
             player.play()
         }
         if stalledRenderClock(of: player) {
+            delivery.interrupt()
             rebuild(reason: "the audio engine stopped advancing its render clock")
             return
         }
-        if traceFirstPacket {
-            let submitted = Date()
-            let age = captureTime.map { String(format: "%.1f", submitted.timeIntervalSince($0) * 1000) } ?? "unknown"
-            log("Latency first PCM enqueue epoch=\(String(format: "%.6f", submitted.timeIntervalSince1970)) captureAgeMs=\(age) frames=\(buffer.frameLength)")
-            let queue = controlQueue
-            player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
-                let played = Date()
-                queue.async {
-                    log("Latency first PCM played epoch=\(String(format: "%.6f", played.timeIntervalSince1970)) enqueueToPlayedMs=\(String(format: "%.1f", played.timeIntervalSince(submitted) * 1000))")
-                }
+        let submitted = Date(), token = delivery.submit(), delivery = self.delivery
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            delivery.complete(token)
+            if traceFirstPacket {
+                log("Latency first PCM played enqueueToPlayedMs=\(String(format: "%.1f", Date().timeIntervalSince(submitted) * 1000))")
             }
-        } else {
-            player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: nil)
         }
     }
 
-    func voiceEnded() {
-        // The output stream stays warm between voice sessions; nothing to tear down.
-    }
+    func voiceEnded() { delivery.end() }
 
     /// True once half a second of frames have been handed to a player whose render clock has
     /// not moved. One frame is 20 ms, so this tolerates ordinary jitter and still reacts well
@@ -405,6 +401,7 @@ private final class VirtualAudioOutput {
         let player = self.player
         lock.unlock()
         guard engine.isRunning else {
+            delivery.interrupt()
             rebuild(reason: "the audio engine was found stopped")
             return
         }
@@ -432,9 +429,22 @@ private func captureLineTimestamp(_ line: String, year: Int) -> Date? {
 
 // Offline validation reads capture text from stdin without opening an audio device.
 let validateCapture = CommandLine.arguments.contains("--validate-capture")
+let modeFile: String? = CommandLine.arguments.firstIndex(of: "--interaction-mode-file").flatMap {
+    CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
+}
+
 do {
     let decoder = try OpusDecoder()
-    let audioOutput = validateCapture ? nil : try VirtualAudioOutput(format: decoder.pcmFormat)
+    let audioOutput: (any VoiceAudioOutput)?
+    if validateCapture { audioOutput = nil }
+    else if CommandLine.arguments.contains("--shared-audio") {
+        do { audioOutput = try SharedAudioOutput() }
+        catch {
+            log("Shared HAL unavailable: \(error.localizedDescription); using compatibility output")
+            audioOutput = try VirtualAudioOutput(format: decoder.pcmFormat)
+        }
+    } else { audioOutput = try VirtualAudioOutput(format: decoder.pcmFormat) }
+    let settledOutput = audioOutput.map { SettlingAudioOutput($0) }
     var maximumPeak: Float = 0
     var parser = SiriRemotePacketParser()
     var decodedPackets = 0
@@ -461,6 +471,12 @@ do {
                 log("Skipped \(skippedReplayLines) buffered capture lines from before launch")
             }
         }
+        // Passive capture stays alive in Touch. The warm output receives no voice frames;
+        // resetting the parser prevents an old session from crossing back into audio mode.
+        if let modeFile, (try? String(contentsOfFile: modeFile, encoding: .utf8)) != "audio" {
+            parser = SiriRemotePacketParser()
+            continue
+        }
         if line.hasPrefix("HID REPORT ") {
             directHIDReports += 1
             if directHIDReports == 1 || directHIDReports % 50 == 0 {
@@ -474,7 +490,7 @@ do {
                 let received = Date()
                 let age = captureLineTimestamp(line, year: captureYear).map { String(format: "%.1f", received.timeIntervalSince($0) * 1000) } ?? "unknown"
                 log("Latency voice start epoch=\(String(format: "%.6f", received.timeIntervalSince1970)) captureAgeMs=\(age)")
-                audioOutput?.voiceStarted()
+                settledOutput?.voiceStarted()
                 log("Voice started")
             case .packet(let packet):
                 do {
@@ -484,7 +500,7 @@ do {
                                 maximumPeak = max(maximumPeak, abs(samples[index]))
                             }
                         }
-                        audioOutput?.enqueue(buffer, traceFirstPacket: traceFirstPacket,
+                        settledOutput?.enqueue(buffer, traceFirstPacket: traceFirstPacket,
                                              captureTime: traceFirstPacket ? captureLineTimestamp(line, year: captureYear) : nil)
                         traceFirstPacket = false
                         decodedPackets += 1
@@ -496,7 +512,6 @@ do {
                     log("Error: \(error.localizedDescription)")
                 }
             case .ended:
-                audioOutput?.voiceEnded()
                 let received = Date()
                 let age = captureLineTimestamp(line, year: captureYear).map {
                     String(format: "%.1f", received.timeIntervalSince($0) * 1000)
@@ -510,7 +525,8 @@ do {
                         deliverImmediately: true
                     )
                 }
-                log("Voice ended")
+                log("Voice protocol ended; draining queued audio")
+                settledOutput?.voiceEnded()
             }
         }
     }

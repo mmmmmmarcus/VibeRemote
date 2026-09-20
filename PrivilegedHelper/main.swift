@@ -13,6 +13,7 @@
 //
 
 import Foundation
+import SharedAudio
 import HelperProtocol
 import Security
 
@@ -269,11 +270,20 @@ final class HelperRequestHandler: NSObject, HelperProtocol {
         self.clientPID = clientPID
     }
 
+    func prepareSharedAudio(reply: @escaping (Bool, String?) -> Void) {
+        let result = vr_audio_prepare(clientUID)
+        reply(result == 0, result == 0 ? nil : String(cString: strerror(errno)))
+    }
+
     func helperVersion(reply: @escaping (Int) -> Void) {
         reply(HelperConstants.version)
     }
 
     func installAudioDriver(fromPath sourcePath: String, reply: @escaping (Bool, String?) -> Void) {
+        guard vr_audio_prepare(clientUID) == 0 else {
+            reply(false, "Could not prepare private audio memory: \(String(cString: strerror(errno)))")
+            return
+        }
         service.installAudioDriver(fromPath: sourcePath, reply: reply)
     }
 

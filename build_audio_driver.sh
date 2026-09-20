@@ -5,8 +5,7 @@
 # The driver is BlackHole (github.com/ExistentialAudio/BlackHole, GPL-3.0) rebuilt with
 # VibeRemote branding so the user only ever sees one product: the CoreAudio device, driver,
 # and manufacturer are all named "VibeRemote". BlackHole exposes these as compile-time
-# constants; the only source edit is routing the box's hardcoded manufacturer string
-# through kManufacturer_Name so no upstream branding leaks into the binary.
+# constants. scripts/patch_audio_driver.py also adds the direct shared-memory input.
 #
 # GPL-3.0 compliance: the driver we ship is a modified BlackHole build. See
 # THIRD_PARTY_NOTICES.md for the upstream source, license, and the modifications applied.
@@ -20,7 +19,7 @@ DRIVER_NAME="VibeRemoteAudio"
 DEVICE_NAME="VibeRemote"
 BUNDLE_ID="com.viberemote.audio"
 CHANNELS="${CHANNELS:-2}"
-BLACKHOLE_REF="${BLACKHOLE_REF:-master}"
+BLACKHOLE_REF="${BLACKHOLE_REF:-ffcb74433fbcf8c8ca5c736677c1a4864384dc09}"
 WORK_DIR="${WORK_DIR:-$ROOT_DIR/.build/audio-driver}"
 OUTPUT_DIR="$ROOT_DIR/AudioDriver"
 SIGNING_MODE="${SIGNING_MODE:-local}"
@@ -55,8 +54,10 @@ if [ -d "$src/.git" ]; then
     git -C "$src" checkout -f FETCH_HEAD
 else
     rm -rf "$src"
-    git clone --depth 1 --branch "$BLACKHOLE_REF" \
-        https://github.com/ExistentialAudio/BlackHole.git "$src"
+    git init "$src"
+    git -C "$src" remote add origin https://github.com/ExistentialAudio/BlackHole.git
+    git -C "$src" fetch --depth 1 origin "$BLACKHOLE_REF"
+    git -C "$src" checkout -f FETCH_HEAD
 fi
 
 # The device manufacturer already honors kManufacturer_Name; the box manufacturer is
@@ -66,6 +67,8 @@ if grep -q 'CFSTR("Existential Audio Inc.")' "$driver_source"; then
     /usr/bin/sed -i '' 's|CFSTR("Existential Audio Inc.")|CFSTR(kManufacturer_Name)|g' "$driver_source"
     echo "Patched hardcoded manufacturer string"
 fi
+
+python3 "$ROOT_DIR/scripts/patch_audio_driver.py" "$src"
 
 # Ship our own icon. BlackHole references its icon by a fixed filename in the Xcode
 # project, so replace the file contents rather than rewiring the project.
@@ -89,6 +92,10 @@ build_args=(
     -project "$src/BlackHole.xcodeproj"
     -scheme BlackHole
     -configuration Release
+    ARCHS="arm64 x86_64"
+    ONLY_ACTIVE_ARCH=NO
+    MACOSX_DEPLOYMENT_TARGET=27.0
+    SDKROOT="${VIBEREMOTE_SDKROOT:-macosx}"
     -derivedDataPath "$WORK_DIR/DerivedData"
     PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID"
     PRODUCT_NAME="$DRIVER_NAME"
@@ -122,6 +129,8 @@ fi
 mkdir -p "$OUTPUT_DIR"
 rm -rf "$OUTPUT_DIR/$DRIVER_NAME.driver"
 cp -R "$built" "$OUTPUT_DIR/"
+
+/usr/libexec/PlistBuddy -c "Add :VibeRemoteSharedAudioVersion integer 1" "$OUTPUT_DIR/$DRIVER_NAME.driver/Contents/Info.plist"
 
 if [ "$signing_identity" = "-" ]; then
     codesign --force --sign - "$OUTPUT_DIR/$DRIVER_NAME.driver"

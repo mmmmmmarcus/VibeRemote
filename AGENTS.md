@@ -148,9 +148,10 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 
 ## Button mappings and hold behavior
 
-Mappings are **fixed by design** — `remoteButtonDescriptors` in `MenuBarManager.swift` is the
-single source of truth. Only the **Siri button** is user-customizable (persisted under the
-`siriButtonAction` default); everything else remains fixed.
+`remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. The Siri
+button is customizable (`siriButtonAction`). Play/Pause and Mute each offer their original
+generation-specific action or Touch / Audio mode switching (`modeSwitchButtons`). Other
+buttons remain fixed. Switching executes once on release, never on repeats or orphan releases.
 
 Every physical remote gets a two-second input quarantine when its HID interfaces open.
 `RemoteConnectionInputGate` keys it by `deviceKey`, so connecting one generation does not
@@ -168,12 +169,21 @@ generation retains `Resources/SiriRemote.png` with its own Power, side-Siri and 
 positions. `RemoteSettingsLayout` selects both artwork and callout coordinates from
 the snapshot generation. Never reuse the aluminum photo with hidden controls as the
 first-generation layout. Both resources must be bundled; verify light/dark rendering
-and switching generations in the same settings window. Only Siri is editable in either
-layout; preserve the first-generation TV and Play/Pause composite actions.
+and switching generations in the same settings window. Siri and Play/Pause are editable in
+both layouts; Mute is editable only where it physically exists. Preserve first-generation
+composite defaults unless Play/Pause is explicitly assigned to mode switching.
 
 Opening Settings switches the app's activation policy to `.regular` so its Dock icon
 appears. Closing the window restores `.accessory`; minimizing keeps the Dock icon so
 the user can restore the window. Keep `LSUIElement` for menu-bar-only launch.
+
+Settings uses a system window backdrop with an edge-to-edge transparent title bar.
+Mapping pop-ups remain native `NSPopUpButton`s inside interactive `NSGlassEffectView`
+capsules, batched by `NSGlassEffectContainerView`. Keep the hosting content transparent;
+do not restore an opaque white fill or stack an extra button bezel over the glass.
+System materials own light/dark, contrast and Reduce Transparency behavior.
+The trailing ellipsis uses `NSMenuToolbarItem` and a native menu for Reset. Keep
+the menu available when defaults are active; disable only its Reset item.
 
 The first menu row is the complete device summary. While connected, it shows `Connected`
 and the remote generation on the left, plus a green circular battery gauge with the numeric
@@ -184,8 +194,9 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected. Only the Siri pop-up edits a mapping; the other pop-ups explain the fixed
-actions. Reset only restores the Siri mapping. Window state comes from `MenuBarManager`
+disconnected. Siri offers its action list; Play/Pause and Mute offer their default or a mode
+toggle. Other pop-ups show one explanation, without a redundant Fixed mapping row. Reset
+restores Siri and the two optional mode switches. Window state comes from `MenuBarManager`
 and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
@@ -280,7 +291,7 @@ path look impossible; do not regress them:
 3. `defaults write com.apple.PacketLogger 'Last UsedPacket Priority Set' -int 3`
    is required or the CLI dumps the device inventory and disconnects.
 
-The helper is now version 3: first-run PacketLoggerHelper plist creation seeds a valid XML
+The helper is now version 4 (shared-memory preparation); v3 added: first-run PacketLoggerHelper plist creation seeds a valid XML
 dictionary before PlistBuddy writes entries. Never pre-create a zero-length plist; current
 macOS rejects it with "Cannot parse a NULL or zero-length data". The model test executes
 this exact generated fragment without privileges and checks the resulting launchd keys.
@@ -318,18 +329,39 @@ few seconds).
 - On start the helper skips PacketLogger's buffered replay (records older than
   launch) so a stale prior session is not re-decoded into the output device.
 - The black-glass remote flushes about 2.1 seconds of audio after physical Siri-button
-  release. Its mapped dictation key must stay held until the helper sees the real `1B 23`
-  voice-end marker and posts `com.viberemote.voice-ended`; a 3-second timer is only the
-  missing-marker safety release. Do not apply this tail handling to the newer remote.
+  release. Its mapped dictation key must stay held through protocol end and output drain.
+  `voice-ended` reports protocol end; `voice-drained` reports output completion, tagged
+  with the hold's start time. A 4-second old / 3-second new remote safety deadline prevents
+  stuck keys. Stale completions must not release a later Siri hold.
 - Audio format: Opus CELT-only, 48 kHz mono, 960 samples/frame, 99-byte HID
   payload, enable byte `0xAF`, report ID `0xFA`. Cross-checked against
   https://github.com/azais-corentin/siri-remote.
 
-### No mode toggles
+### Audio and touch modes
 
-There is no microphone mode and no input mode. With the app open the bridge is always
-meant to be running, and the output stream stays warm for the bridge's lifetime (no
-`Stop` action). Earlier builds had `MicrophoneMode` and `MicrophoneInputMode` enums;
+`RemoteInteractionMode` selects Audio & Buttons or experimental Touch. In audio mode
+with the app open the bridge is always meant to run. Touch mode explicitly releases HID
+and GATT handles and uses NativeTouch. Passive PacketLogger capture stays alive across
+mode changes; a private interaction-mode file disables voice decoding in Touch, and the
+app restores the previous default microphone. Recovery may restart passive capture in
+Touch, but must never reclaim HID/GATT interfaces. The output remains warm and silent.
+The remote's NX media events have no sender metadata on this Mac. The private HID event
+monitor also delivered no callbacks (requires Apple's private entitlement); do not restore
+that failed experiment. PacketLoggerButtons reads fresh, source-filtered ATT 0039 button
+masks from the private capture log. On the aluminum remote's report FB descriptor, mute
+is bit 7 and play/pause bit 8. Old-remote 0023 voice records are not button masks.
+Aluminum mode-switch keys have one passive-capture owner in both modes, including the
+2-second HID opening quarantine. Do not also toggle them from HID or stop correlation
+in Audio. Keep in-flight press pairs and markers across mode changes. HID reopening can
+stall the main loop: retain capture records for 3 seconds but compare against the original
+CGEvent timestamp (not callback arrival), retaining the narrow 180 ms match window.
+The NX tap holds only configured switch keys for 160 ms and consumes a matching captured
+edge within a bounded timestamp window. Unmatched events are forwarded once. This is
+experimental temporal correlation, not sender identity proof: simultaneous keyboard and
+remote presses can remain ambiguous. Keep the toolbar as the escape hatch. Preserve
+cross-mode release consumption and bounded repeat handling. Hardware testing must verify
+both directions, touch motion, and unrelated keyboard media keys after any change.
+Switching back restores audio and fixed mappings. Earlier builds had `MicrophoneMode` and `MicrophoneInputMode` enums;
 both were removed because the firmware gates the mic to physical Siri-button holds, so
 a "continuous" mode could not do what its name implied.
 
@@ -358,6 +390,13 @@ supervisor boundary, even if helper approval changes during startup. Reconnect
 recovery must also cover an already-stopped bridge. Mac wake requests recovery.
 The independent HID registry watchdog remains at 15 seconds.
 
+Idle disconnect can close every app-owned HID handle while IOHIDManager retains the same
+services. A Bluetooth reconnect then emits no HID remove/add callback. Reconcile connected
+Bluetooth remotes against `RemoteInputHandler.openedInterfaceIDs` both on connect and on the
+15-second watchdog, including when no handles remain. Only replay missing interfaces for
+currently connected addresses; exclude the pending GATT/idle-close interval, sleeping remotes
+and wired charging interfaces. Do not equate detector inventory with open input handles.
+
 `remoteKeepAliveExperimentUntil` is an optional Unix timestamp, not a permanent
 mode. Until it expires, RemoteHIDChannel may read the current peripheral's battery
 characteristic every 20 seconds. It stops on disconnect, expiry, or three errors.
@@ -367,12 +406,16 @@ The 2026-09-14 black-glass test failed: reads succeeded through 08:59:56, but
 the remote disconnected at 09:00:04, about two minutes after startup. The local
 experiment was disabled. Do not re-enable battery polling as a proven keepalive.
 
-The black-glass remote keepalive re-sends only the already-successful Feature report `FF AF`
-every 45 seconds on its interfaces. A physical test confirmed an immediate button response
-after more than twice the remote's former 3–4-minute sleep interval. Its menu setting controls
-an idle deadline (5/15/30 minutes or Never); the default is 5 minutes. Every real old-remote
-button press resets the per-device deadline. At expiry, stop keepalive before asking
-`IOBluetoothDevice` to close that remote's connection. Newer remotes never enter this path.
+Both known remote families re-send only the already-successful Feature report `FF AF`
+every 45 seconds on their writable interfaces. The black-glass physical test confirmed an
+immediate button response after more than twice its former 3–4-minute sleep interval;
+aluminum-remote wakefulness, button input and voice after sustained idle still need hardware
+verification. Do not infer that from successful Feature writes. The shared Auto Disconnect
+setting controls an idle deadline (5/15/30 minutes or Never); the default is 5 minutes and the
+legacy `firstGenerationIdleTimeoutSeconds` key preserves saved choices. Every real button press
+resets only that physical remote's deadline. At expiry, stop keepalive and release its HID
+interfaces before asking `IOBluetoothDevice` to close the link. Unknown/charging-only devices
+never enter this path; battery polling remains disabled.
 
 ### Bluetooth topology changes
 
@@ -465,7 +508,7 @@ remember an already-approved daemon keeps running the **old** binary until re-re
 ### Migration status (what still raises a password prompt)
 
 The helper owns audio-driver installation **and** PacketLogger capture
-(`startPacketLoggerCapture`, introduced in v2; current minimum v3): with the daemon approved, starting the
+(`startPacketLoggerCapture`, introduced in v2; capture minimum v3; direct shared-memory HAL minimum v4): with the daemon approved, starting the
 bridge no longer prompts. The design constraint held — the voice helper stays in the
 user's CoreAudio session; only the capture supervisor runs as root, launched by the
 daemon instead of osascript, with the same FIFO data channel and the same stop-signal
@@ -488,8 +531,9 @@ time, so read this first.
 
 - **Trackpad as a mouse: not possible while we read buttons.** Touch coordinates are only
   available through the private MultitouchSupport framework, and that framework returns
-  **zero touch frames whenever any process holds the remote's HID interfaces open** — which
-  we must do to read buttons. Verified exhaustively: stopping the app yields 447 touch
+  **zero touch frames whenever any process holds the remote's HID interfaces open**.
+  Touch mode now releases those handles before loading NativeTouch; do not reopen them
+  from permission polling, watchdogs or Bluetooth callbacks while touch mode is selected. Verified exhaustively: stopping the app yields 447 touch
   events, running it yields 0; leaving the digitizer unseized, and not opening it at all,
   both still yield 0. Touch does **not** arrive over any HID input report either (a report
   callback on every interface captured only 3-byte `0xFB` button masks). Same wall applies
@@ -500,8 +544,9 @@ time, so read this first.
   never emit data. Only the 1st-gen remote had an IMU.
 - **Replacing PacketLogger: no public API.** Live HCI capture on macOS is only available
   through Apple's PacketLogger and its private, undocumented mechanism. Bundling Apple's
-  binary is not redistributable; reverse-engineering the private path is fragile. The
-  dependency stays.
+  binary now has an optional personal-build packaging path; preserve Apple's original
+  signature and complete bundle. Public release packaging requires a separate
+  redistribution review. The capture dependency stays.
 
 ## Diagnostics & logs
 
@@ -550,3 +595,28 @@ handle (0x0043 observed), never hardcode 0x0040 or assume 31-byte ACL records.
 The shared RemoteAudioProtocol target tests fragmentation and interleaved generations.
 `VibeRemoteVoiceBridge --validate-capture < capture.log` decodes locally without opening
 an audio device, reporting packet count and peak. Capture may contain speech; keep local.
+
+## Direct shared-memory HAL experiment
+
+`SharedAudio/` is the common C wire implementation for the decoder and HAL. The helper
+v4 creates only the authenticated XPC peer's fixed UID path (root directories, 0660
+user:_coreaudiod file, no symlinks). `scripts/patch_audio_driver.py` applies the HAL
+changes to pinned BlackHole source. Rebuild the driver after changing C source; bundle
+and install it separately from Swift. `scripts/test_shared_audio.c` exercises the
+production ring across forked processes without root. Keep render allocation/file
+operations/locks out of the IO callback, preserve generation-tagged acknowledgements,
+and use the same-cycle cache for multiple input clients. An old driver/helper, missing
+mapping or explicit Compatibility selection retains the previous AVAudioEngine route.
+No source or binary from CouchVox is bundled.
+
+### Siri release regression (2026-09-20)
+
+A new remote's `1B 39` end marker can precede its final `1B 35` packet by one BLE
+interval (observed 16 ms, sequence 57 → end → 58 → zero-length sentinel). Match that
+consecutive sequence to the ending session per ACL handle, rather than emitting a
+new start and resetting the shared ring. `SettlingAudioOutput` serializes all output
+calls and waits for a 250 ms quiet interval after protocol end before snapshotting
+the drain target. A reset sequence or an expired tail window starts a real new hold.
+On aluminum remotes, a fresh Siri press during pending drain must release the previous
+mapped key and emit a fresh key-down; only the old remote retains its firmware-tail
+hold reuse. See `testNewRemoteTrailingPacketDoesNotStartAnotherVoiceSession`.

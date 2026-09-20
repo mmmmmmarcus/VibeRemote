@@ -168,6 +168,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private var stopSignalPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.stopSignal) }
     private var helperLogPath: String { runtimePath("voice-helper.log") }
     private var packetLoggerLogPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerLog) }
+    var buttonCapturePath: String { packetCapturePath }
+    private var interactionModePath: String { runtimePath("interaction-mode") }
     private var packetCapturePath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetCapture) }
     private var directHIDCapturePath: String { runtimePath("direct-hid-audio.log") }
     private var packetLoggerSessionPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerSession) }
@@ -263,6 +265,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func startAtLaunchIfPromptFree() {
         workQueue.async { [weak self] in
             guard let self else { return }
+            if !self.wantsBridgeRunning { self.retrySchedule.reset() }
             self.wantsBridgeRunning = true
             self.attemptAutomaticStartLocked(reason: "app launch")
         }
@@ -538,6 +541,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func startLocked(allowAdministratorPrompt: Bool = true) {
+        guard RemoteInteractionMode.load() == .audio || UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" else { wantsBridgeRunning = false; return }
         // macOS's IOHID proxy never delivers Siri Remote 0xFA audio reports to user space,
         // so the PacketLogger capture bridge remains the only working audio path. The
         // Direct HID engine stays the default while that conclusion is revalidated;
@@ -642,12 +646,15 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     /// Direct HID framing is validated. The normal menu flow never calls this method.
     private func startPacketLoggerBridgeLocked(allowAdministratorPrompt: Bool = true) {
         appendAppLog("Microphone bridge start requested")
-        guard prepareRuntimeDirectory() else { return }
+        guard prepareRuntimeDirectory(), writePrivateFile(RemoteInteractionMode.load().rawValue, at: interactionModePath) else { return }
 
         if isRunningLocked() {
             if let outputDeviceName = preferredOutputDeviceName() {
-                loadPreviousInputDeviceIfNeeded()
-                _ = setDefaultInputDevice(named: outputDeviceName)
+                if RemoteInteractionMode.load() == .audio {
+                    guard captureDefaultInputDevice(), setDefaultInputDevice(named: outputDeviceName) else {
+                        setLastError("Could not select the microphone after changing mode."); return
+                    }
+                } else { restoreDefaultInputDevice() }
                 bridgeReady = livePacketLoggerIdentity() != nil
                 clearLastError()
                 appendAppLog("Microphone bridge already running")
@@ -720,7 +727,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // needs elevated privileges; running the whole pipeline as root prevents audio
         // from reaching the user's BlackHole device reliably.
         let helperCommand = """
-        exec \(escapedHelper) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
+        exec \(escapedHelper) \(sharedAudioArguments()) --interaction-mode-file \(shellEscape(interactionModePath)) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
         """
         let helperRunner = Process()
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -785,15 +792,17 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             removeBridgeFIFOs()
             return
         }
-        guard captureDefaultInputDevice() else {
-            setLastError("Could not save the current default input device for later restoration.")
-            stopLocked()
-            return
-        }
-        guard setDefaultInputDevice(named: outputDeviceName) else {
-            setLastError("Could not select \(outputDeviceName) as the default input device.")
-            stopLocked()
-            return
+        if RemoteInteractionMode.load() == .audio {
+            guard captureDefaultInputDevice() else {
+                setLastError("Could not save the current default input device for later restoration.")
+                stopLocked()
+                return
+            }
+            guard setDefaultInputDevice(named: outputDeviceName) else {
+                setLastError("Could not select \(outputDeviceName) as the default input device.")
+                stopLocked()
+                return
+            }
         }
         Thread.sleep(forTimeInterval: 1.5)
         if packetLoggerDisconnected() {
@@ -956,6 +965,27 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
+    /// Keep passive HCI capture alive across mode changes, without reclaiming HID/GATT.
+    func interactionModeChanged() {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.prepareRuntimeDirectory(), self.writePrivateFile(RemoteInteractionMode.load().rawValue, at: self.interactionModePath) else {
+                self.stopLocked(); return
+            }
+            if RemoteInteractionMode.load() == .touch { self.restoreDefaultInputDevice() }
+            if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") != "packetlogger", RemoteInteractionMode.load() == .touch {
+                self.wantsBridgeRunning = false; self.stopLocked(); return
+            }
+            self.wantsBridgeRunning = true
+            if self.isRunningLocked() {
+                self.startLocked(allowAdministratorPrompt: false)
+            } else {
+                self.retrySchedule.reset()
+                self.attemptAutomaticStartLocked(reason: "interaction mode changed")
+            }
+        }
+    }
+
     func stop() {
         syncOnWorkQueue {
             wantsBridgeRunning = false
@@ -988,7 +1018,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let since = self.healthySince, Date().timeIntervalSince(since) >= 60 {
                 self.retrySchedule.reset()
             }
-            if let outputDeviceName = self.preferredOutputDeviceName(),
+            if RemoteInteractionMode.load() == .audio, let outputDeviceName = self.preferredOutputDeviceName(),
                self.defaultInputDeviceName() != outputDeviceName {
                 _ = self.setDefaultInputDevice(named: outputDeviceName)
             }
@@ -1091,6 +1121,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func installAudioDriver(completion: (@Sendable (Bool, String?) -> Void)? = nil) {
         workQueue.async { [weak self] in
             guard let self else { return }
+            self.stopLocked()
             guard let source = self.bundledAudioDriverPath() else {
                 let message = "The bundled VibeRemote audio driver is missing from this build."
                 self.setLastError(message)
@@ -1104,9 +1135,11 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                     if succeeded {
                         self.appendAppLog("Installed the VibeRemote audio driver via the helper")
                         self.workQueue.async {
-                            Thread.sleep(forTimeInterval: 2.0)
-                            let installed = self.audioDeviceID(named: "VibeRemote") != nil
-                            if installed { self.clearLastError() }
+                            let installed = self.waitForInstalledAudioDevice()
+                            if installed {
+                                self.clearLastError()
+                                if self.wantsBridgeRunning { self.startLocked(allowAdministratorPrompt: false) }
+                            }
                             DispatchQueue.main.async {
                                 completion?(installed, installed ? nil : "The driver was installed but no virtual audio device appeared yet.")
                             }
@@ -1159,8 +1192,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 }
                 self.appendAppLog("Installed the VibeRemote audio driver")
                 // coreaudiod needs a moment to publish the new device.
-                Thread.sleep(forTimeInterval: 2.0)
-                let installed = self.audioDeviceID(named: "VibeRemote") != nil
+                let installed = self.waitForInstalledAudioDevice()
                 if installed {
                     self.clearLastError()
                 }
@@ -1171,6 +1203,17 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 DispatchQueue.main.async { completion?(false, message) }
             }
         }
+    }
+
+    private func waitForInstalledAudioDevice() -> Bool {
+        // Restarting coreaudiod also relaunches isolated driver hosts on current macOS.
+        // A single two-second probe can report failure for a successfully installed driver.
+        let deadline = Date().addingTimeInterval(12)
+        repeat {
+            Thread.sleep(forTimeInterval: 0.5)
+            if audioDeviceID(named: "VibeRemote") != nil { return true }
+        } while Date() < deadline
+        return false
     }
 
     func openPacketCaptureLog() {
@@ -1675,8 +1718,30 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return nil
     }
 
+    /// The daemon derives the file owner from the authenticated XPC connection.
+    /// A stale helper/driver keeps the existing AVAudioEngine route working.
+    private func sharedAudioArguments() -> String {
+        guard UserDefaults.standard.string(forKey: "audioOutputBackend") != "compatibility" else { return "" }
+        let info = NSDictionary(contentsOfFile: "/Library/Audio/Plug-Ins/HAL/VibeRemoteAudio.driver/Contents/Info.plist")
+        guard (info?["VibeRemoteSharedAudioVersion"] as? Int) == 1,
+              PrivilegedHelperClient.shared.state == .ready,
+              (fetchPrivilegedHelperVersion(timeout: 2) ?? 0) >= 4 else {
+            appendAppLog("Audio output: compatibility (shared HAL driver/helper not ready)")
+            return ""
+        }
+        let result = ValueBox<Bool>()
+        let wait = DispatchSemaphore(value: 0)
+        PrivilegedHelperClient.shared.prepareSharedAudio { ok, _ in result.store(ok); wait.signal() }
+        guard wait.wait(timeout: .now() + 3) == .success, result.value == true else {
+            appendAppLog("Audio output: compatibility (shared memory preparation failed)")
+            return ""
+        }
+        appendAppLog("Audio output: direct shared-memory HAL")
+        return "--shared-audio"
+    }
+
     private func packetLoggerExecutablePath() -> String? {
-        var candidates: [String] = []
+        var candidates: [String] = [appBundle.resourcePath.map { "\($0)/PacketLogger.app/Contents/Resources/packetlogger" }].compactMap { $0 }
         if let configured = UserDefaults.standard.string(forKey: DefaultsKey.packetLoggerPath) {
             candidates.append(configured)
         }

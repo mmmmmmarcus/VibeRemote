@@ -5,25 +5,236 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
-    func testFirstGenerationIdleTimeoutOptionsAndDefault() {
-        XCTAssertEqual(FirstGenerationIdleTimeout.defaultValue, .fiveMinutes)
-        XCTAssertEqual(FirstGenerationIdleTimeout.fiveMinutes.interval, 300)
-        XCTAssertEqual(FirstGenerationIdleTimeout.fifteenMinutes.interval, 900)
-        XCTAssertEqual(FirstGenerationIdleTimeout.thirtyMinutes.interval, 1_800)
-        XCTAssertNil(FirstGenerationIdleTimeout.never.interval)
-        XCTAssertEqual(Set(FirstGenerationIdleTimeout.allCases.map(\.title)).count, 4)
+    func testRapidModeClicksSurviveDelayedHIDReopening() {
+        var correlation = RemoteMediaEventCorrelation()
+        var presses = RemoteModeSwitchPressTracker()
+        var mode = RemoteInteractionMode.touch
+        var pendingToggles = 0
+        // Three actual clicks arrive while HID opening blocks the main loop. Capture
+        // ingestion runs ahead of deferred NX delivery, as in the observed failure.
+        let edges: [(Double, Bool)] = [(10, true), (10.075, false), (10.2, true),
+                                      (10.275, false), (10.4, true), (10.475, false)]
+        for (time, down) in edges {
+            correlation.record(button: "playPause", pressed: down, sender: 79, now: time)
+        }
+        for (time, down) in edges {
+            let source = correlation.resolve(button: "playPause", pressed: down, repeating: false, now: time + 0.04)
+            XCTAssertEqual(source, 79)
+            if let source, presses.handle(device: source, button: "playPause", pressed: down, enabled: true) {
+                pendingToggles += 1
+            }
+        }
+        // Apply each release against the then-current mode; never capture a stale target.
+        for _ in 0..<pendingToggles { mode = mode.toggled }
+        XCTAssertEqual(pendingToggles, 3)
+        XCTAssertEqual(mode, .audio)
+        XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: 10.6))
     }
 
-    func testFirstGenerationIdleTrackerResetsAndEmitsOnce() {
-        var tracker = FirstGenerationIdleTracker()
-        tracker.synchronize(deviceKeys: ["old-a", "old-b"], now: 100)
-        tracker.recordActivity(deviceKey: "old-b", now: 200)
+    func testPassiveModeKeyOwnershipDoesNotDependOnHIDQuarantine() {
+        XCTAssertTrue(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: true))
+        XCTAssertTrue(RemoteModeSwitchMapping.usesPassiveCapture(generation: .unknown, packetLogger: true, mediaTap: true))
+        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .glassTouchSurface, packetLogger: true, mediaTap: true))
+        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: false, mediaTap: true))
+        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: false))
+    }
+
+    func testPacketLoggerButtonMasksSourceAndReplayFiltering() throws {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let now = try XCTUnwrap(f.date(from: "2026-09-20 15:45:27.400"))
+        func line(_ mask: String, label: String = "Marcus Siri Remot", handle: String = "4E", stamp: String = "15:45:27.330") -> String {
+            "Sep 20 \(stamp)  \(label)  0x00\(handle)  RECV  \(handle) 20 09 00 05 00 04 00 1B 39 00 \(mask)"
+        }
+        var parser = PacketLoggerButtonParser()
+        func feed(_ value: String) -> [PacketLoggerButtonParser.Edge] {
+            parser.events(line: value, allowedLabels: ["Marcus Siri Remot"], now: now)
+        }
+        XCTAssertTrue(feed(line("00 01", label: "Keyboard")).isEmpty)
+        XCTAssertTrue(feed(line("00 01", stamp: "15:44:27.330")).isEmpty)
+        XCTAssertTrue(feed(line("00 01", stamp: "15:46:27.330")).isEmpty)
+        XCTAssertTrue(feed(line("00 01").replacingOccurrences(of: "1B 39", with: "1B 23")).isEmpty)
+        XCTAssertTrue(feed(line("00 01").replacingOccurrences(of: "09 00", with: "08 00")).isEmpty)
+        XCTAssertTrue(feed(line("00 01") + " ZZ").isEmpty)
+        // Main-loop delivery can lag the actual packet during HID reopening. The NX
+        // matcher still uses the original event time, not a widened matching window.
+        var delayed = PacketLoggerButtonParser()
+        XCTAssertEqual(delayed.events(line: line("00 01"), allowedLabels: ["Marcus Siri Remot"], now: now.addingTimeInterval(1)).count, 1)
+        XCTAssertTrue(delayed.events(line: line("00 00"), allowedLabels: ["Marcus Siri Remot"], now: now.addingTimeInterval(4)).isEmpty)
+        let play = feed(line("00 01"))
+        XCTAssertEqual(play.map(\.button), ["playPause"])
+        XCTAssertEqual(play.map(\.pressed), [true])
+        XCTAssertEqual(play.first?.sender, 0x4f)
+        XCTAssertTrue(feed(line("00 01")).isEmpty) // duplicate packet
+        XCTAssertEqual(feed(line("80 01")).map(\.button), ["mute"])
+        XCTAssertEqual(feed(line("80 00")).map(\.pressed), [false]) // play released, mute held
+        XCTAssertEqual(feed(line("00 00")).map(\.button), ["mute"])
+        XCTAssertTrue(feed(line("00 00")).isEmpty)
+        XCTAssertTrue(feed(line("00 00", handle: "4F")).isEmpty) // another device's orphan release
+        XCTAssertEqual(feed(line("00 01", handle: "4F")).first?.sender, 0x50)
+    }
+
+    func testPacketCorrelationRejectsLaterOrExpiredObservations() {
+        var c = RemoteMediaEventCorrelation()
+        c.record(button: "playPause", pressed: true, sender: 1, now: 10.1)
+        XCTAssertNil(c.resolve(button: "playPause", pressed: true, repeating: false, now: 10))
+        XCTAssertEqual(c.resolve(button: "playPause", pressed: true, repeating: false, now: 10.15), 1)
+        XCTAssertNil(c.resolve(button: "playPause", pressed: true, repeating: true, now: 16))
+    }
+
+    func testRemoteMediaCorrelationKeepsBothEdgesAndForwardsUnrelatedKeys() {
+        var correlation = RemoteMediaEventCorrelation()
+        // Source-less events without a remote observation belong to the OS, not our toggle.
+        XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: 1))
+        correlation.record(button: "playPause", pressed: true, sender: 42, now: 2)
+        correlation.record(button: "playPause", pressed: false, sender: 42, now: 2.02)
+        XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: 2.06))
+        XCTAssertEqual(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: 2.06), 42)
+        XCTAssertEqual(correlation.resolve(button: "playPause", pressed: true, repeating: true, now: 2.07), 42)
+        XCTAssertEqual(correlation.resolve(button: "playPause", pressed: false, repeating: false, now: 2.08), 42)
+        XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: true, now: 2.09))
+        // A consumed marker cannot swallow another device's ordinary press.
+        XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: 2.1))
+        correlation.record(button: "mute", pressed: true, sender: 43, now: 3)
+        XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: 3.3))
+    }
+
+    func testModeSwitchMappingsPreserveDefaultsAndOnlyAllowPlayAndMute() throws {
+        let suite = "VibeRemoteTests.ModeSwitch.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(RemoteModeSwitchMapping.load(from: defaults), [])
+        defaults.set(["siri", "playPause", "mute", "back"], forKey: RemoteModeSwitchMapping.defaultsKey)
+        XCTAssertEqual(RemoteModeSwitchMapping.load(from: defaults), ["playPause", "mute"])
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let baseline = generation.action(for: "playPause", defaultAction: .launchAgentClient, siriAction: .rightOpt)
+            XCTAssertEqual(RemoteModeSwitchMapping.action(button: "playPause", defaultAction: baseline, enabled: []), baseline)
+            XCTAssertEqual(RemoteModeSwitchMapping.action(button: "playPause", defaultAction: baseline, enabled: ["playPause"]), .toggleInteractionMode)
+        }
+        XCTAssertEqual(RemoteModeSwitchMapping.action(button: "siri", defaultAction: .rightOpt, enabled: ["siri"]), .rightOpt)
+        XCTAssertFalse(ButtonAction.toggleInteractionMode.isAssignableToSiriButton)
+        XCTAssertEqual(RemoteInteractionMode.audio.toggled, .touch)
+        XCTAssertEqual(RemoteInteractionMode.touch.toggled, .audio)
+    }
+
+    func testModeSwitchFiresOnceOnCompletePressAndClearsAcrossModes() {
+        var tracker = RemoteModeSwitchPressTracker()
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 2, button: "mute", pressed: false, enabled: true))
+        XCTAssertTrue(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 1, button: "playPause", pressed: true, enabled: true))
+        tracker.reset()
+        XCTAssertFalse(tracker.handle(device: 1, button: "playPause", pressed: false, enabled: true))
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: false))
+        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
+    }
+    func testIdleDisconnectReconnectRecoversUnchangedHIDServices() {
+        let first = "60:BE:C4:02:EB:CC"
+        let second = "48:A9:1C:91:77:5C"
+        // Discovery retains the same IDs across closeConnection; no remove/add callbacks.
+        let discovered = [1: first, 2: first, 3: second]
+        var opened: Set<Int> = [1, 2, 3]
+        var idle = RemoteIdleTracker()
+        idle.synchronize(deviceKeys: [first, second], now: 0)
+        idle.recordActivity(deviceKey: second, now: 899)
+        XCTAssertEqual(idle.takeDueDisconnects(now: 900, timeout: 900), [first])
+        opened.subtract([1, 2])
+        // The half-second GATT shutdown must finish before any reconciliation can reopen.
+        XCTAssertEqual(RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: opened, connectedAddresses: [first, second],
+            disconnectingAddresses: [first]
+        ), [])
+        // Cached HID services alone must never reconnect a sleeping remote.
+        XCTAssertEqual(RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: opened, connectedAddresses: [second],
+            disconnectingAddresses: []
+        ), [])
+        // Bluetooth reconnect (or the watchdog after a missed notification) restores only
+        // the released remote. The other remote keeps its handles and held-button state.
+        let recovered = RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: opened,
+            connectedAddresses: ["60-be-c4-02-eb-cc", second], disconnectingAddresses: []
+        )
+        XCTAssertEqual(recovered, [1, 2])
+        opened.formUnion(recovered)
+        XCTAssertEqual(RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: opened, connectedAddresses: [first, second],
+            disconnectingAddresses: []
+        ), [])
+    }
+
+    func testHIDRecoveryWithNoOpenHandlesRetriesFailedOpenAndIgnoresWiredSerial() {
+        let address = "60:BE:C4:02:EB:CC"
+        let discovered = [1: address, 2: address, 3: "DJ7YK3PPJ90M"]
+        XCTAssertEqual(RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: [], connectedAddresses: [address],
+            disconnectingAddresses: []
+        ), [1, 2])
+        // One failed open is retried, even though the other interface now makes isConnected true.
+        XCTAssertEqual(RemoteInterfaceRecovery.missingInterfaces(
+            discovered: discovered, opened: [1], connectedAddresses: [address],
+            disconnectingAddresses: []
+        ), [2])
+        XCTAssertNil(RemoteInterfaceRecovery.bluetoothAddress("DJ7YK3PPJ90M"))
+        XCTAssertNil(RemoteInterfaceRecovery.bluetoothAddress("junk60:BE:C4:02:EB:CC"))
+    }
+
+    func testTouchGestureDoesNotClickAfterMovingOrChangingContactCount() {
+        var gesture = RemoteTouchGesture()
+        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 1))
+        XCTAssertEqual(gesture.frame(count: 0, x: 0, y: 0, time: 1.1), .click)
+        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 2))
+        XCTAssertNotNil(gesture.frame(count: 1, x: 0.6, y: 0.5, time: 2.1))
+        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 2.2))
+        XCTAssertNil(gesture.frame(count: 2, x: 0.5, y: 0.5, time: 3))
+        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 3.1))
+        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 3.2))
+        XCTAssertNil(gesture.frame(count: 1, x: 0.1, y: 0.1, time: 4))
+        XCTAssertNil(gesture.frame(count: 1, x: 0.9, y: 0.9, time: 4.1))
+        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 4.2))
+    }
+
+    func testRemoteIdleTimeoutOptionsAndDefault() {
+        XCTAssertEqual(RemoteIdleTimeout.defaultValue, .fiveMinutes)
+        XCTAssertEqual(RemoteIdleTimeout.fiveMinutes.interval, 300)
+        XCTAssertEqual(RemoteIdleTimeout.fifteenMinutes.interval, 900)
+        XCTAssertEqual(RemoteIdleTimeout.thirtyMinutes.interval, 1_800)
+        XCTAssertNil(RemoteIdleTimeout.never.interval)
+        XCTAssertEqual(Set(RemoteIdleTimeout.allCases.map(\.title)).count, 4)
+    }
+
+    func testBothRemoteFamiliesUseIdleManagementAndPreserveSavedTimeout() throws {
+        XCTAssertTrue(RemoteGeneration.glassTouchSurface.supportsIdleConnectionManagement)
+        XCTAssertTrue(RemoteGeneration.aluminumClickpad.supportsIdleConnectionManagement)
+        XCTAssertFalse(RemoteGeneration.unknown.supportsIdleConnectionManagement)
+        let suite = "VibeRemoteTests.IdleTimeout.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(RemoteIdleTimeout.load(from: defaults), .fiveMinutes)
+        defaults.set(0, forKey: "firstGenerationIdleTimeoutSeconds")
+        XCTAssertEqual(RemoteIdleTimeout.load(from: defaults), .never)
+        defaults.set(900, forKey: "firstGenerationIdleTimeoutSeconds")
+        XCTAssertEqual(RemoteIdleTimeout.load(from: defaults), .fifteenMinutes)
+        defaults.set(123, forKey: "firstGenerationIdleTimeoutSeconds")
+        XCTAssertEqual(RemoteIdleTimeout.load(from: defaults), .fiveMinutes)
+    }
+
+    func testRemoteIdleTrackerResetsAndEmitsOnce() {
+        var tracker = RemoteIdleTracker()
+        tracker.synchronize(deviceKeys: ["old-a", "new-b"], now: 100)
+        tracker.recordActivity(deviceKey: "new-b", now: 200)
+        // More HID collections for either remote must not extend the other's deadline.
+        tracker.synchronize(deviceKeys: ["old-a", "new-b"], now: 350)
 
         XCTAssertEqual(tracker.takeDueDisconnects(now: 399, timeout: 300), [])
         XCTAssertEqual(tracker.takeDueDisconnects(now: 400, timeout: 300), ["old-a"])
         XCTAssertFalse(tracker.shouldKeepAlive(deviceKey: "old-a"))
-        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-b"))
-        XCTAssertEqual(tracker.takeDueDisconnects(now: 500, timeout: 300), ["old-b"])
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "new-b"))
+        XCTAssertEqual(tracker.takeDueDisconnects(now: 500, timeout: 300), ["new-b"])
         XCTAssertEqual(tracker.takeDueDisconnects(now: 900, timeout: 300), [])
 
         tracker.recordActivity(deviceKey: "old-a", now: 1_000)
@@ -33,27 +244,27 @@ final class ModelTests: XCTestCase {
 
         tracker.reset(now: 2_000)
         XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-a"))
-        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "old-b"))
+        XCTAssertTrue(tracker.shouldKeepAlive(deviceKey: "new-b"))
         XCTAssertEqual(tracker.takeDueDisconnects(now: 9_000, timeout: nil), [])
 
         tracker.synchronize(deviceKeys: [], now: 9_000)
         XCTAssertTrue(tracker.isEmpty)
     }
 
-    func testOnlyFirstGenerationSiriHoldWaitsForVoiceTail() {
+    func testBothGenerationsWaitForOutputDrainWithBoundedTimeout() {
         XCTAssertEqual(
             RemoteInputHandler.voiceTailReleaseTimeout(
                 action: .rightOpt,
                 button: "siri",
                 generation: .glassTouchSurface
             ),
-            3
+            4
         )
-        XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
+        XCTAssertEqual(RemoteInputHandler.voiceTailReleaseTimeout(
             action: .rightOpt,
             button: "siri",
             generation: .aluminumClickpad
-        ))
+        ), 3)
         XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
             action: .enterKey,
             button: "siri",
@@ -179,11 +390,13 @@ final class ModelTests: XCTestCase {
     func testSettingsNativeControlsAndWindowLifetime() throws {
         _ = NSApplication.shared
         var chosenAction: ButtonAction?
+        var chosenModeSwitch: String?
         var resets = 0
         let controller = SettingsWindowController(
             snapshot: RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt),
             setSiriAction: { chosenAction = $0 },
-            resetSiriAction: { resets += 1 }
+            resetSiriAction: { resets += 1 },
+            setModeSwitch: { button, enabled in chosenModeSwitch = enabled ? button : nil }
         )
         let window = try XCTUnwrap(controller.window)
         let frame = try XCTUnwrap(window.contentView?.superview)
@@ -193,7 +406,11 @@ final class ModelTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] {
             [view] + view.subviews.flatMap(descendants)
         }
+        // The toolbar's native More menu also uses a pop-up internally. Count only
+        // remote mappings so this assertion describes the settings content.
+        let mappingKeys = Set(remoteButtonDescriptors.map(\.key))
         let controls = descendants(frame).compactMap { $0 as? NSPopUpButton }
+            .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
         XCTAssertEqual(controls.count, 8)
         let siri = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "siri" })
         XCTAssertEqual(siri.numberOfItems, ButtonAction.allCases.filter(\.isAssignableToSiriButton).count)
@@ -203,8 +420,17 @@ final class ModelTests: XCTestCase {
         NSApp.sendAction(try XCTUnwrap(siri.action), to: siri.target, from: siri)
         XCTAssertEqual(chosenAction, .rightCmd)
         let power = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "power" })
+        XCTAssertEqual(power.itemTitles, [ButtonAction.enterKey.actionDescription])
+        XCTAssertEqual((power.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.enterKey.settingsTitle)
         NSApp.sendAction(try XCTUnwrap(power.action), to: power.target, from: power)
         XCTAssertEqual(chosenAction, .rightCmd, "Fixed mappings must not change the Siri mapping")
+        for key in ["playPause", "mute"] {
+            let control = try XCTUnwrap(controls.first { $0.identifier?.rawValue == key })
+            XCTAssertEqual(control.numberOfItems, 2)
+            control.selectItem(withTitle: ButtonAction.toggleInteractionMode.settingsTitle)
+            NSApp.sendAction(try XCTUnwrap(control.action), to: control.target, from: control)
+            XCTAssertEqual(chosenModeSwitch, key)
+        }
 
         controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: .glassTouchSurface))
         frame.layoutSubtreeIfNeeded()
@@ -213,14 +439,19 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), Set(["back", "select", "tv", "siri", "playPause", "volumeUp", "volumeDown"]))
         let tv = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "tv" })
         let playPause = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "playPause" })
-        XCTAssertEqual(tv.titleOfSelectedItem, ButtonAction.shiftEnterOrModifier.settingsTitle)
+        XCTAssertEqual(tv.titleOfSelectedItem, ButtonAction.shiftEnterOrModifier.actionDescription)
         XCTAssertEqual(playPause.titleOfSelectedItem, ButtonAction.agentClientOrSlash.settingsTitle)
+        XCTAssertEqual((tv.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.shiftEnterOrModifier.settingsTitle)
+        XCTAssertEqual((playPause.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.agentClientOrSlash.settingsTitle)
 
-        let reset = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "VibeRemote.ResetSettings" })
+        let more = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "VibeRemote.MoreSettings" } as? NSMenuToolbarItem)
+        let reset = try XCTUnwrap(more.menu.items.first { $0.identifier?.rawValue == "VibeRemote.ResetSettings" })
+        XCTAssertTrue(reset.isEnabled)
         NSApp.sendAction(try XCTUnwrap(reset.action), to: reset.target, from: reset)
         XCTAssertEqual(resets, 1)
         controller.update(RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .spaceKey))
         XCTAssertFalse(reset.isEnabled)
+        XCTAssertTrue(more.isEnabled, "The menu must remain accessible when Reset is unavailable")
 
         // Optional offscreen render for visual comparison. It never orders a window
         // onto the user's desktop or starts any HID/audio services.

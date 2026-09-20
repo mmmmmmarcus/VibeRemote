@@ -11,6 +11,8 @@ let package = Package(
         .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
     ],
     targets: [
+        .target(name: "SharedAudio", path: "SharedAudio", publicHeadersPath: "include"),
+        .target(name: "NativeTouch", path: "NativeTouch", publicHeadersPath: "include", linkerSettings: [.linkedFramework("CoreFoundation")]),
         .target(name: "RemoteAudioProtocol", path: "RemoteAudioProtocol"),
         .target(
             name: "HelperProtocol",
@@ -18,7 +20,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemoteHelper",
-            dependencies: ["HelperProtocol"],
+            dependencies: ["HelperProtocol", "SharedAudio"],
             path: "PrivilegedHelper",
             exclude: ["Info.plist"],
             linkerSettings: [
@@ -36,9 +38,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemote",
-            dependencies: ["HelperProtocol"],
+            dependencies: ["HelperProtocol", "NativeTouch"],
             path: ".",
             exclude: [
+                "SharedAudio", "NativeTouch", "scripts",
                 "build.sh",
                 "create_app_bundle.sh",
                 "install.sh",
@@ -64,6 +67,7 @@ let package = Package(
             ],
             sources: [
                 "main.swift",
+                "RemoteInteractionMode.swift", "RemoteTouchController.swift",
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
@@ -76,7 +80,7 @@ let package = Package(
                 "RemoteGeneration.swift",
                 "RemoteInputHandler.swift",
                 "ListEditingController.swift",
-                "MediaKeyInterceptor.swift",
+                "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift",
                 "SystemVolume.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png")],
@@ -93,7 +97,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemoteVoiceBridge",
-            dependencies: ["RemoteAudioProtocol"],
+            dependencies: ["RemoteAudioProtocol", "SharedAudio"],
             path: "VoiceBridgeHelper",
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
@@ -103,7 +107,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VibeRemoteTests",
-            dependencies: ["VibeRemote", "HelperProtocol", "RemoteAudioProtocol"],
+            dependencies: ["VibeRemote", "HelperProtocol", "RemoteAudioProtocol", "SharedAudio"],
             path: "Tests/VibeRemoteTests"
         )
     ]

@@ -12,6 +12,26 @@ final class AudioPacketTests: XCTestCase {
         }
     }
 
+    func testNewRemoteTrailingPacketDoesNotStartAnotherVoiceSession() {
+        var parser = SiriRemotePacketParser()
+        func feed(_ payload: [UInt8], at time: TimeInterval, handle: UInt16 = 0x4E) -> [VoiceEvent] {
+            records(payload, handle: handle).flatMap { parser.events(from: $0, now: time) }
+        }
+        let packet = Data([0xB8, 1, 2, 3])
+        func frame(_ sequence: UInt8) -> [UInt8] { [0x1B, 0x35, 0, 0, 0, sequence, 0, 4] + Array(packet) }
+        XCTAssertEqual(feed(frame(57), at: 1), [.started, .packet(packet)])
+        XCTAssertEqual(feed([0x1B, 0x39, 0, 0, 0], at: 1.1), [.ended])
+        XCTAssertEqual(feed(frame(58), at: 1.116), [.packet(packet)])
+        XCTAssertEqual(feed(frame(59), at: 1.132), [.packet(packet)])
+        // A different handle must not be swallowed as the first remote's tail.
+        XCTAssertEqual(feed(frame(60), at: 1.14, handle: 0x4F), [.started, .packet(packet)])
+        // A reset counter identifies a real, rapid second press.
+        XCTAssertEqual(feed(frame(0), at: 1.15), [.started, .packet(packet)])
+        XCTAssertEqual(feed([0x1B, 0x39, 0, 0, 0], at: 1.2), [.ended])
+        // Even a consecutive counter is a new session after the tail window expires.
+        XCTAssertEqual(feed(frame(1), at: 2), [.started, .packet(packet)])
+    }
+
     func testOldRemoteAudioUsesDynamicConnectionHandleAndReassembledPayload() {
         let packet: [UInt8] = [0xB8] + Array(1...66)
         let frame: [UInt8] = [0x1B, 0x23, 0, 1, 2, 3, 4, 5, 6, UInt8(packet.count)] + packet

@@ -84,6 +84,7 @@ final class RemoteInputHandler {
 
     /// Which remote family is currently attached. Drives the button profile and the
     /// microphone path; `.unknown` until at least one interface is open.
+    var usesPassiveModeSwitch: ((RemoteGeneration) -> Bool)?
     private(set) var generation: RemoteGeneration = .unknown
 
     var onGenerationChanged: ((RemoteGeneration) -> Void)?
@@ -99,36 +100,44 @@ final class RemoteInputHandler {
     private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags, text: String?)] = [:]
     private var pendingVoiceTailReleaseTimers: [String: Timer] = [:]
     private var voiceEndedObserver: NSObjectProtocol?
+    private var siriHoldStartedAt = Date.distantPast
+    private var drainedHoldStartedAt = Date.distantPast
     private let listEditingController = ListEditingController()
     private var connectionInputGate = RemoteConnectionInputGate()
-    private var firstGenerationKeepAliveTimer: Timer?
-    private var firstGenerationIdleTimer: Timer?
-    private var firstGenerationIdleTimeout = FirstGenerationIdleTimeout.load()
-    private var firstGenerationIdleTracker = FirstGenerationIdleTracker()
+    private var remoteKeepAliveTimer: Timer?
+    private var remoteIdleTimer: Timer?
+    private var remoteIdleTimeout = RemoteIdleTimeout.load()
+    private var remoteIdleTracker = RemoteIdleTracker()
 
     /// Called after the selected idle window. The app owns IOBluetooth and closes the matching
     /// baseband connection; stopping HID keepalive first still lets firmware sleep naturally if
     /// the explicit disconnect is unavailable.
-    var onFirstGenerationIdleDisconnectRequested: ((String) -> Void)?
+    var onRemoteIdleDisconnectRequested: ((String) -> Void)?
 
     /// Last observed pressed/released state per logical button. A Siri Remote may mirror a
     /// button over multiple HID interfaces, so this collapses duplicates into one transition.
     private var buttonState: [String: Bool] = [:]
+    private var modeSwitchPresses = RemoteModeSwitchPressTracker()
 
     var isConnected: Bool {
         !devices.isEmpty
     }
 
+    var openedInterfaceIDs: Set<ObjectIdentifier> { Set(devices.keys) }
+
     init(menuBarManager: MenuBarManager, microphoneBridgeManager: MicrophoneBridgeManager) {
         self.menuBarManager = menuBarManager
         self.microphoneBridgeManager = microphoneBridgeManager
         voiceEndedObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.viberemote.voice-ended"),
+            forName: Notification.Name("com.viberemote.voice-drained"),
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let startedAt = notification.userInfo?["startedAt"] as? TimeInterval
             MainActor.assumeIsolated {
-                self?.finishPendingVoiceTailRelease()
+                guard let self, let startedAt, Date(timeIntervalSince1970: startedAt) >= self.siriHoldStartedAt else { return }
+                self.drainedHoldStartedAt = Date(timeIntervalSince1970: startedAt)
+                self.finishPendingVoiceTailRelease()
             }
         }
     }
@@ -208,7 +217,7 @@ final class RemoteInputHandler {
         refreshGeneration()
         applyAudioRegistrations()
         enableRemoteInputStreaming(on: device)
-        updateFirstGenerationConnectionManagement()
+        updateRemoteConnectionManagement()
         return true
     }
 
@@ -413,33 +422,33 @@ final class RemoteInputHandler {
         readBackEnableFeature(on: device, usagePage: usagePage, usage: usage)
     }
 
-    /// Battery reads did not keep the black-glass remote awake. Repeating the exact HID Feature
-    /// write it accepts at connection time was physically verified to hold the link beyond its
-    /// normal sleep interval. Keep it awake only until the user's selected idle deadline.
-    private func updateFirstGenerationConnectionManagement() {
+    /// Reuse the FF AF Feature write both families accept at connection time. It was physically
+    /// verified to prevent sleep on black-glass hardware; sustained wakefulness on aluminum
+    /// hardware still needs a real idle test. Battery polling is not a substitute for this write.
+    private func updateRemoteConnectionManagement() {
         let deviceKeys = Set(deviceGenerations.compactMap { key, generation in
-            generation == .glassTouchSurface ? key : nil
+            generation.supportsIdleConnectionManagement ? key : nil
         })
-        firstGenerationIdleTracker.synchronize(
+        remoteIdleTracker.synchronize(
             deviceKeys: deviceKeys,
             now: ProcessInfo.processInfo.systemUptime
         )
 
         if deviceKeys.isEmpty {
-            firstGenerationKeepAliveTimer?.invalidate()
-            firstGenerationKeepAliveTimer = nil
-            firstGenerationIdleTimer?.invalidate()
-            firstGenerationIdleTimer = nil
+            remoteKeepAliveTimer?.invalidate()
+            remoteKeepAliveTimer = nil
+            remoteIdleTimer?.invalidate()
+            remoteIdleTimer = nil
             return
         }
 
-        startFirstGenerationKeepAliveIfNeeded()
-        scheduleFirstGenerationIdleTimer()
+        startRemoteKeepAliveIfNeeded()
+        scheduleRemoteIdleTimer()
     }
 
-    private func startFirstGenerationKeepAliveIfNeeded() {
-        guard firstGenerationKeepAliveTimer == nil,
-              !firstGenerationIdleTracker.isEmpty else { return }
+    private func startRemoteKeepAliveIfNeeded() {
+        guard remoteKeepAliveTimer == nil,
+              !remoteIdleTracker.isEmpty else { return }
 
         let timer = Timer(timeInterval: 45, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
@@ -448,58 +457,58 @@ final class RemoteInputHandler {
                     return
                 }
                 let targets = self.devices.filter { interfaceID, _ in
-                    guard self.generation(ofInterface: interfaceID) == .glassTouchSurface,
+                    guard self.generation(ofInterface: interfaceID).supportsIdleConnectionManagement,
                           let key = self.interfaceDescriptors[interfaceID]?.deviceKey else { return false }
-                    return self.firstGenerationIdleTracker.shouldKeepAlive(deviceKey: key)
+                    return self.remoteIdleTracker.shouldKeepAlive(deviceKey: key)
                 }
                 guard !targets.isEmpty else {
                     timer.invalidate()
-                    self.firstGenerationKeepAliveTimer = nil
+                    self.remoteKeepAliveTimer = nil
                     return
                 }
                 for (_, device) in targets {
-                    self.sendFirstGenerationKeepAlive(on: device)
+                    self.sendRemoteKeepAlive(on: device)
                 }
-                rmDebug("📡 First-generation HID keepalive sent to \(targets.count) interface(s)")
+                rmDebug("📡 Remote HID keepalive sent to \(targets.count) interface(s)")
             }
         }
-        firstGenerationKeepAliveTimer = timer
+        remoteKeepAliveTimer = timer
         RunLoop.main.add(timer, forMode: .common)
-        rmDebug("📡 First-generation HID keepalive enabled: FF AF every 45 seconds")
+        rmDebug("📡 Remote HID keepalive enabled: FF AF every 45 seconds")
     }
 
-    private func scheduleFirstGenerationIdleTimer() {
-        firstGenerationIdleTimer?.invalidate()
-        firstGenerationIdleTimer = nil
-        guard let timeout = firstGenerationIdleTimeout.interval,
-              !firstGenerationIdleTracker.isEmpty else { return }
+    private func scheduleRemoteIdleTimer() {
+        remoteIdleTimer?.invalidate()
+        remoteIdleTimer = nil
+        guard let timeout = remoteIdleTimeout.interval,
+              !remoteIdleTracker.isEmpty else { return }
 
         // Check often enough that a five-minute choice behaves like five minutes, while the
         // per-device tracker guarantees only one close request until real activity resumes.
         let timer = Timer(timeInterval: min(5, timeout), repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let due = self.firstGenerationIdleTracker.takeDueDisconnects(
+                let due = self.remoteIdleTracker.takeDueDisconnects(
                     now: ProcessInfo.processInfo.systemUptime,
-                    timeout: self.firstGenerationIdleTimeout.interval
+                    timeout: self.remoteIdleTimeout.interval
                 )
                 for deviceKey in due {
-                    rmDebug("📡 First-generation remote idle timeout reached; requesting disconnect for \(deviceKey)")
+                    rmDebug("📡 Remote idle timeout reached; requesting disconnect for \(deviceKey)")
                     self.releaseInterfacesForIdleDisconnect(deviceKey: deviceKey)
-                    self.onFirstGenerationIdleDisconnectRequested?(deviceKey)
+                    self.onRemoteIdleDisconnectRequested?(deviceKey)
                 }
             }
         }
-        firstGenerationIdleTimer = timer
+        remoteIdleTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    func updateFirstGenerationIdleTimeout(_ timeout: FirstGenerationIdleTimeout) {
-        firstGenerationIdleTimeout = timeout
-        firstGenerationIdleTracker.reset(now: ProcessInfo.processInfo.systemUptime)
-        startFirstGenerationKeepAliveIfNeeded()
-        scheduleFirstGenerationIdleTimer()
-        rmDebug("📡 First-generation auto-disconnect changed to \(timeout.title)")
+    func updateRemoteIdleTimeout(_ timeout: RemoteIdleTimeout) {
+        remoteIdleTimeout = timeout
+        remoteIdleTracker.reset(now: ProcessInfo.processInfo.systemUptime)
+        startRemoteKeepAliveIfNeeded()
+        scheduleRemoteIdleTimer()
+        rmDebug("📡 Remote auto-disconnect changed to \(timeout.title)")
     }
 
     /// Release every IOHID claim before closing the Bluetooth baseband link. Leaving even one
@@ -515,11 +524,11 @@ final class RemoteInputHandler {
         releaseAllHeldKeys()
         releaseAllPendingTapKeys()
         refreshGeneration()
-        updateFirstGenerationConnectionManagement()
-        rmDebug("📡 Released \(interfaceIDs.count) first-generation HID interface(s) for idle disconnect")
+        updateRemoteConnectionManagement()
+        rmDebug("📡 Released \(interfaceIDs.count) remote HID interface(s) for idle disconnect")
     }
 
-    private func sendFirstGenerationKeepAlive(on device: IOHIDDevice) {
+    private func sendRemoteKeepAlive(on device: IOHIDDevice) {
         guard property(kIOHIDMaxFeatureReportSizeKey, of: device) >= 1 else { return }
         let request = FeatureEnableRequest(
             handler: self,
@@ -616,7 +625,7 @@ final class RemoteInputHandler {
         releaseAllHeldKeys()
         releaseAllPendingTapKeys()
         refreshGeneration()
-        updateFirstGenerationConnectionManagement()
+        updateRemoteConnectionManagement()
         return isConnected
     }
 
@@ -648,10 +657,10 @@ final class RemoteInputHandler {
     }
 
     private func disconnectAll() {
-        firstGenerationKeepAliveTimer?.invalidate()
-        firstGenerationKeepAliveTimer = nil
-        firstGenerationIdleTimer?.invalidate()
-        firstGenerationIdleTimer = nil
+        remoteKeepAliveTimer?.invalidate()
+        remoteKeepAliveTimer = nil
+        remoteIdleTimer?.invalidate()
+        remoteIdleTimer = nil
         for timer in pendingVoiceTailReleaseTimers.values { timer.invalidate() }
         pendingVoiceTailReleaseTimers.removeAll()
         let openedDevices = Array(devices.values)
@@ -796,15 +805,15 @@ final class RemoteInputHandler {
         let isPressed = intValue != 0
         let sourceGeneration = interfaceID.map(generation(ofInterface:)) ?? generation
         if isPressed,
-           sourceGeneration == .glassTouchSurface,
+           sourceGeneration.supportsIdleConnectionManagement,
            let interfaceID,
            let deviceKey = interfaceDescriptors[interfaceID]?.deviceKey {
-            firstGenerationIdleTracker.recordActivity(
+            remoteIdleTracker.recordActivity(
                 deviceKey: deviceKey,
                 now: ProcessInfo.processInfo.systemUptime
             )
-            startFirstGenerationKeepAliveIfNeeded()
-            scheduleFirstGenerationIdleTimer()
+            startRemoteKeepAliveIfNeeded()
+            scheduleRemoteIdleTimer()
         }
 
         // Collapse mirrored-interface duplicates: only proceed on a real state transition.
@@ -835,6 +844,12 @@ final class RemoteInputHandler {
             VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed)
         }
 
+        let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
+            ?? ButtonAction.none
+        // A configured aluminum mode key has one owner in BOTH modes. In particular,
+        // do not create HID suppression markers or a second toggle after quarantine.
+        if action == .toggleInteractionMode, usesPassiveModeSwitch?(sourceGeneration) == true { return }
+
         if isPressed {
             Self.lastProcessedButton = buttonName
             Self.lastProcessedTime = mach_absolute_time()
@@ -842,8 +857,6 @@ final class RemoteInputHandler {
 
         microphoneBridgeManager?.handleButton(button: buttonName, pressed: isPressed)
 
-        let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
-            ?? ButtonAction.none
         if isPressed {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
@@ -929,7 +942,7 @@ final class RemoteInputHandler {
             stopRepeat(for: button)
             resolveRelease(for: button)
             resolveModifierRelease(for: button)
-            if let timeout = Self.voiceTailReleaseTimeout(
+            if microphoneBridgeManager?.menuStatus().running == true, let timeout = Self.voiceTailReleaseTimeout(
                 action: action,
                 button: button,
                 generation: generation
@@ -937,6 +950,10 @@ final class RemoteInputHandler {
                 scheduleVoiceTailRelease(for: button, timeout: timeout)
             } else {
                 releaseHeldKey(for: button)
+            }
+            if modeSwitchPresses.handle(device: 0, button: button, pressed: false, enabled: action == .toggleInteractionMode) {
+                // Finish the HID callback before tearing down its devices and callback buffers.
+                DispatchQueue.main.async { [weak self] in self?.menuBarManager?.toggleInteractionMode(from: .audio) }
             }
             return
         }
@@ -950,11 +967,13 @@ final class RemoteInputHandler {
         }
 
         if action.requiresHold {
-            beginHoldAction(action, button: button)
+            beginHoldAction(action, button: button, generation: generation)
             return
         }
 
         switch action {
+        case .toggleInteractionMode:
+            _ = modeSwitchPresses.handle(device: 0, button: button, pressed: true, enabled: true)
         case .none:
             break
         case .enterKey:
@@ -1036,9 +1055,9 @@ final class RemoteInputHandler {
         generation: RemoteGeneration
     ) -> TimeInterval? {
         guard button == "siri",
-              generation == .glassTouchSurface,
+              generation != .unknown,
               action.requiresHold else { return nil }
-        return 3
+        return generation == .glassTouchSurface ? 4 : 3
     }
 
     /// These timers are created and fired on the main run loop. Common modes keep a held
@@ -1267,7 +1286,8 @@ final class RemoteInputHandler {
     }
 
     /// Press a virtual key and retain its exact specification until this HID button is released.
-    private func beginHoldAction(_ action: ButtonAction, button: String) {
+    private func beginHoldAction(_ action: ButtonAction, button: String, generation: RemoteGeneration) {
+        if button == "siri" { siriHoldStartedAt = Date(); drainedHoldStartedAt = .distantPast }
         let spec: (keyCode: Int, flags: CGEventFlags)
         switch action {
         case .spaceKey: spec = (kVK_Space, [])
@@ -1280,7 +1300,8 @@ final class RemoteInputHandler {
             timer.invalidate()
             // A new Siri press during the firmware tail belongs to the same dictation
             // session. Keep the matching synthetic key down instead of bouncing it up/down.
-            if heldKeys[button]?.keyCode == spec.keyCode,
+            if generation == .glassTouchSurface,
+               heldKeys[button]?.keyCode == spec.keyCode,
                heldKeys[button]?.flags == spec.flags {
                 rmDebug("🎙 Reused held dictation key during first-generation voice tail")
                 return
@@ -1291,22 +1312,25 @@ final class RemoteInputHandler {
         releaseHeldKey(for: button)
         postKey(keyCode: spec.keyCode, flags: spec.flags, keyDown: true)
         heldKeys[button] = spec
+        rmDebug("⌨️ Held key down: code=\(spec.keyCode) source=\(button)")
     }
 
     private func scheduleVoiceTailRelease(for button: String, timeout: TimeInterval) {
+        rmDebug("🎙 Physical Siri release; waiting for protocol end and output drain")
+        if drainedHoldStartedAt >= siriHoldStartedAt { releaseHeldKey(for: button); return }
         pendingVoiceTailReleaseTimers[button]?.invalidate()
         let timer = scheduleInputTimer(interval: timeout, repeats: false) { [weak self] _ in
             guard let self else { return }
-            rmDebug("⚠️ Voice end marker timeout; releasing held dictation key")
+            rmDebug("⚠️ Voice output drain timeout; releasing held dictation key")
             self.releaseHeldKey(for: button)
         }
         pendingVoiceTailReleaseTimers[button] = timer
-        rmDebug("🎙 Waiting for first-generation voice end marker before releasing dictation key")
+        rmDebug("🎙 Waiting for voice buffer drain before releasing dictation key")
     }
 
     private func finishPendingVoiceTailRelease() {
         guard pendingVoiceTailReleaseTimers["siri"] != nil else { return }
-        rmDebug("🎙 First-generation voice end marker received; releasing dictation key")
+        rmDebug("🎙 Voice buffer drained; releasing dictation key")
         releaseHeldKey(for: "siri")
     }
 
@@ -1314,6 +1338,7 @@ final class RemoteInputHandler {
         pendingVoiceTailReleaseTimers.removeValue(forKey: button)?.invalidate()
         guard let held = heldKeys.removeValue(forKey: button) else { return }
         postKey(keyCode: held.keyCode, flags: [], keyDown: false)
+        rmDebug("⌨️ Held key up: code=\(held.keyCode) source=\(button)")
     }
 
     private func releaseAllHeldKeys() {
@@ -1325,6 +1350,7 @@ final class RemoteInputHandler {
         }
         heldKeys.removeAll()
         buttonState.removeAll()
+        modeSwitchPresses.reset()
     }
 
     private func releaseAllPendingTapKeys() {

@@ -136,6 +136,19 @@ elif [ "${INCLUDE_PRIVILEGED_HELPER:-1}" = "1" ]; then
     echo "Note: $helper_daemon_binary not built; the app will fall back to admin prompts."
 fi
 
+# Personal builds may embed an installed Apple-signed PacketLogger, unmodified.
+# Release distribution requires a separately reviewed redistribution policy.
+packetlogger_source="${PACKETLOGGER_APP_SOURCE:-/Applications/Additional Tools for Xcode/Hardware/PacketLogger.app}"
+if [ "${INCLUDE_PACKETLOGGER:-1}" = "1" ] && [ -d "$packetlogger_source" ]; then
+    if [ "$SIGNING_MODE" = "release" ] && [ "${INCLUDE_PACKETLOGGER:-}" != "1" ]; then
+        echo "Release builds omit PacketLogger unless INCLUDE_PACKETLOGGER=1 is explicitly set."
+    else
+        codesign --verify --deep --strict -R='identifier "com.apple.PacketLogger" and anchor apple' "$packetlogger_source"
+        ditto "$packetlogger_source" "${APP_BUNDLE}/Contents/Resources/PacketLogger.app"
+        echo "Bundled original Apple-signed PacketLogger"
+    fi
+fi
+
 # Bundle the VibeRemote virtual audio driver so the app can install it itself. Build it
 # with ./build_audio_driver.sh; bundles without it fall back to an existing BlackHole or
 # Soundflower device and hide the in-app install action.

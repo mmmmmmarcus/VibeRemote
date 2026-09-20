@@ -18,7 +18,7 @@ public enum HelperConstants {
 
     /// Bumped whenever the helper's capabilities change so the app can prompt for a
     /// re-registration instead of talking to a stale daemon.
-    public static let version = 3
+    public static let version = 4
 
     /// Minimum capture implementation: v2 introduced the XPC method; v3 fixes first-run
     /// plist creation on current macOS. An approved daemon retains its old binary until
@@ -39,6 +39,8 @@ public enum HelperConstants {
     /// Liveness and compatibility probe. Returns `HelperConstants.version` of the installed
     /// helper, which may be older than the app's if the daemon was not re-registered.
     func helperVersion(reply: @escaping (Int) -> Void)
+
+    func prepareSharedAudio(reply: @escaping (Bool, String?) -> Void)
 
     /// Installs the VibeRemote virtual audio driver from the given source path into the
     /// system HAL plug-in directory and restarts coreaudiod.
