@@ -66,8 +66,12 @@ struct RemoteSettingsLayout {
 enum RemoteSettingsGuide {
     static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
 
-        if key == "touch.edit" { return "Slide to position caret" }
-        if key == "select" { return "Position caret" }
+        if key == "touch.edit" { return "Shake once: position caret" }
+        if key == "select" {
+            return snapshot.generation == .glassTouchSurface
+                ? "Enter\nShake once: position caret"
+                : "Not assigned"
+        }
         if key == "back" || key == "menu" { return "Delete word\nDouble-click: clear all" }
         let action = RemoteButtonMapping.action(button: key, generation: snapshot.generation, siriAction: snapshot.siriAction)
         return action == .none ? "Not assigned" : action.settingsTitle
@@ -328,8 +332,11 @@ private struct RemoteSettingsView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         sectionTitle("Text cursor")
-                        Text("Press the center button to position the cursor. Slide to move, then press again to confirm.")
-                        Text("Siri or Return exits without dictating or submitting. An active text field is required.")
+                        Text("Quickly move one finger out and back without lifting to position the cursor. Keep sliding to move, then lift to confirm.")
+                        if model.snapshot.generation == .glassTouchSurface {
+                            Text("Pressing the touch surface remains Enter. Siri or Return exits without dictating or submitting.")
+                        } else { Text("Siri or Return exits without dictating or submitting.") }
+                        Text("An active text field is required.")
                             .foregroundStyle(.secondary)
                     }.font(.system(size: 12))
                     Divider()

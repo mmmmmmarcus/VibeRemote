@@ -55,10 +55,11 @@ final class CaretNavigationTests: XCTestCase {
         gate.update(blocked: false)
         XCTAssertFalse(gate.allowsPackets)
     }
-    func testSingleConfigurationReservesCenterForCaret() {
-        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
-            XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: generation, siriAction: .rightOpt), .positionCaret)
-        }
+    func testShakeEntryLeavesOnlyGlassMechanicalClickAsEnter() {
+        XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: .glassTouchSurface,
+                                                  siriAction: .rightOpt), .enterKey)
+        XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: .aluminumClickpad,
+                                                  siriAction: .rightOpt), .none)
         XCTAssertFalse(ButtonAction.positionCaret.isAssignableToSiriButton)
         XCTAssertNil(AdvancedMenuInputState.action(button: "playPause", generation: .aluminumClickpad))
     }
@@ -215,12 +216,10 @@ final class CaretNavigationTests: XCTestCase {
         let map = [0: CGRect(x: 10, y: 0, width: 2, height: 20), 1: CGRect(x: 10, y: 25, width: 2, height: 20)]
         XCTAssertEqual(CaretNavigation.nearest(to: CGPoint(x: 10, y: 35), positions: map, current: 0), 1)
     }
-    func testCenterNeverFallsThroughToEnterAndRepeatCannotCommit() {
+    func testCenterDoesNotEnterCaretThroughButtonGate() {
         var gate = CaretButtonGate()
-        XCTAssertEqual(gate.handle(button: "select", down: true, device: "a", active: false), .toggle)
-        XCTAssertEqual(gate.handle(button: "select", down: true, device: "a", active: true), .consume)
-        XCTAssertEqual(gate.handle(button: "select", down: false, device: "a", active: true), .consume)
-        XCTAssertEqual(gate.handle(button: "select", down: true, device: "a", active: true), .toggle)
+        XCTAssertEqual(gate.handle(button: "select", down: true, device: "a", active: false), .pass)
+        XCTAssertEqual(gate.handle(button: "select", down: false, device: "a", active: true), .pass)
     }
     func testSiriAndPowerExitAndOwnReleaseAfterModeEnds() {
         for key in ["siri", "power"] {
@@ -233,16 +232,95 @@ final class CaretNavigationTests: XCTestCase {
     }
     func testAnotherRemoteCannotReleaseOwnedButton() {
         var gate = CaretButtonGate()
-        _ = gate.handle(button: "select", down: true, device: "a", active: false)
-        XCTAssertEqual(gate.handle(button: "select", down: false, device: "b", active: true), .pass)
-        XCTAssertEqual(gate.handle(button: "select", down: true, device: "a", active: true), .consume)
+        _ = gate.handle(button: "siri", down: true, device: "a", active: true)
+        XCTAssertEqual(gate.handle(button: "siri", down: false, device: "b", active: true), .pass)
+        XCTAssertEqual(gate.handle(button: "siri", down: true, device: "a", active: true), .consume)
     }
     func testPassiveTouchDecoderRetainsContactAndLift() {
         let payload: [UInt8] = [0x32, 0x34, 0x73, 1, 0x46, 0xcf, 0xdc, 0x72, 0x72, 0xf, 0x6c]
         let frame = RemoteTextTouchFrame.decode(payload, sender: 1, time: Date())
+        XCTAssertEqual(frame?.generation, .aluminumClickpad)
         XCTAssertEqual(frame?.count, 1); XCTAssertEqual(frame?.x, -186); XCTAssertEqual(frame?.y, -564)
         var hover = payload; hover[10] |= 2
         XCTAssertEqual(RemoteTextTouchFrame.decode(hover, sender: 1, time: Date())?.count, 0)
         XCTAssertNil(RemoteTextTouchFrame.decode([0x32], sender: 1, time: Date()))
+    }
+
+    func testGlassTouchDecoderRejectsVoiceAndPreservesLift() {
+        let contact: [UInt8] = [1, 0, 0x32, 0, 0, 9, 245, 1, 200, 4, 3, 40, 0]
+        let frame = RemoteTextTouchFrame.decodeGlass(contact, sender: 4, time: Date())
+        XCTAssertEqual(frame?.generation, .glassTouchSurface)
+        XCTAssertEqual(frame?.count, 1)
+        XCTAssertEqual(frame?.x, 270)
+        XCTAssertEqual(frame?.y, 180)
+        // Physical capture keeps the advertised finger count at one while the
+        // contact ellipse and pressure become zero on the final two reports.
+        var lift = contact; lift[9] = 0; lift[10] = 0; lift[11] = 0
+        XCTAssertEqual(lift[0], 1)
+        XCTAssertEqual(RemoteTextTouchFrame.decodeGlass(lift, sender: 4, time: Date())?.count, 0)
+        XCTAssertNil(RemoteTextTouchFrame.decodeGlass(Array(repeating: 0, count: 99), sender: 4, time: Date()))
+        var wrongMarker = contact; wrongMarker[2] = 0xfa
+        XCTAssertNil(RemoteTextTouchFrame.decodeGlass(wrongMarker, sender: 4, time: Date()))
+    }
+
+    func testOneFastOutAndBackActivatesBothRemoteGenerations() {
+        let origin = Date(timeIntervalSince1970: 100)
+        func frame(_ time: TimeInterval, x: Int = 0, y: Int = 0, count: Int = 1,
+                   generation: RemoteGeneration) -> RemoteTextTouchFrame {
+            .init(sender: 8, time: origin.addingTimeInterval(time), generation: generation,
+                  count: count, x: x, y: y)
+        }
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            var gate = RemoteCaretShakeGate(strokeDistance: 240)
+            XCTAssertFalse(gate.observe(frame(0.00, x: 0, generation: generation)))
+            XCTAssertFalse(gate.observe(frame(0.12, x: 250, generation: generation)), "First stroke establishes direction")
+            XCTAssertTrue(gate.observe(frame(0.27, x: -10, generation: generation)), "One return stroke enters caret mode")
+            XCTAssertEqual(gate.latest?.generation, generation)
+        }
+    }
+
+    func testShakeRejectsOrdinaryDragSlowMotionAndLift() {
+        let origin = Date(timeIntervalSince1970: 100)
+        func frame(_ time: TimeInterval, x: Int, count: Int = 1) -> RemoteTextTouchFrame {
+            .init(sender: 8, time: origin.addingTimeInterval(time), generation: .glassTouchSurface,
+                  count: count, x: x, y: 0)
+        }
+        var drag = RemoteCaretShakeGate(strokeDistance: 240)
+        XCTAssertFalse(drag.observe(frame(0, x: 0)))
+        XCTAssertFalse(drag.observe(frame(0.1, x: 250)))
+        XCTAssertFalse(drag.observe(frame(0.2, x: 520)))
+        XCTAssertFalse(drag.observe(frame(0.3, x: 790)), "One-way dragging cannot enter")
+
+        var slow = RemoteCaretShakeGate(strokeDistance: 240, maximumDuration: 0.9)
+        XCTAssertFalse(slow.observe(frame(0, x: 0)))
+        XCTAssertFalse(slow.observe(frame(0.1, x: 250)))
+        XCTAssertFalse(slow.observe(frame(0.3, x: 300)))
+        XCTAssertFalse(slow.observe(frame(0.5, x: 350)))
+        XCTAssertFalse(slow.observe(frame(0.7, x: 400)))
+        XCTAssertFalse(slow.observe(frame(0.9, x: 450)))
+        XCTAssertFalse(slow.observe(frame(1.05, x: -10)), "Slow return exceeds the gesture window")
+
+        var lifted = RemoteCaretShakeGate(strokeDistance: 240)
+        XCTAssertFalse(lifted.observe(frame(0, x: 0)))
+        XCTAssertFalse(lifted.observe(frame(0.1, x: 250)))
+        XCTAssertFalse(lifted.observe(frame(0.2, x: 250, count: 0)))
+        XCTAssertFalse(lifted.isTracking)
+    }
+
+    func testPacketLoggerDecodesGlassTouchButNotSameHandleVoice() throws {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let now = try XCTUnwrap(f.date(from: "2026-09-20 15:45:27.400"))
+        let report = "01 00 32 00 00 09 F5 01 C8 04 03 28 00"
+        let line = "Sep 20 15:45:27.330  Marcus Siri Remot  0x004E  RECV  4E 20 14 00 10 00 04 00 1B 23 00 \(report)"
+        var parser = PacketLoggerButtonParser()
+        let frame = try XCTUnwrap(parser.touch(line: line, allowedLabels: ["Marcus Siri Remot"], now: now))
+        XCTAssertEqual(frame.generation, .glassTouchSurface)
+        XCTAssertEqual(frame.count, 1)
+        XCTAssertEqual(frame.x, 270)
+        XCTAssertNil(parser.touch(line: line.replacingOccurrences(of: "01 00 32", with: "01 00 FA"),
+                                  allowedLabels: ["Marcus Siri Remot"], now: now))
+        XCTAssertTrue(parser.events(line: line, allowedLabels: ["Marcus Siri Remot"], now: now).isEmpty)
     }
 }

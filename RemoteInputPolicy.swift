@@ -49,7 +49,12 @@ enum RemoteButtonMapping {
         if button == AdvancedMenuInputState.trigger(for: generation) { return .advancedMenu }
         // Reserve the aluminum Play/Pause key until its fixed purpose is decided.
         if button == "playPause" { return .none }
-        if button == "select" { return .positionCaret }
+        if button == "select" {
+            // Both generations enter caret mode by shaking the touch surface while
+            // keeping one finger down. The old remote has no separate Power/submit
+            // key, so only its mechanical surface click remains Enter.
+            return generation == .glassTouchSurface ? .enterKey : .none
+        }
         let baseline = remoteButtonDescriptors.first { $0.key == button }?.defaultAction ?? .none
         return generation.action(for: button, defaultAction: baseline, siriAction: siriAction)
     }

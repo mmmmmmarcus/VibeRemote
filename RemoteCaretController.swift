@@ -8,6 +8,7 @@ import Carbon.HIToolbox
 struct RemoteTextTouchFrame: Equatable {
     let sender: UInt64
     let time: Date
+    let generation: RemoteGeneration
     let count: Int
     let x: Int
     let y: Int
@@ -23,8 +24,117 @@ struct RemoteTextTouchFrame: Equatable {
             func signed(_ v: Int) -> Int { v & 0x800 == 0 ? v : v - 4096 }
             points.append((signed(packed & 0xfff), signed((packed >> 12) & 0xfff)))
         }
-        return Self(sender: sender, time: time, count: points.count,
+        return Self(sender: sender, time: time, generation: .aluminumClickpad, count: points.count,
                     x: points.first?.0 ?? 0, y: points.first?.1 ?? 0)
+    }
+
+    /// Black-glass A1513 touch reports arrive on the same 0x0023 ATT
+    /// characteristic as voice. Only the documented 13/20-byte 0x32 reports
+    /// reach this decoder, so 99-byte Opus frames cannot be mistaken for touch.
+    static func decodeGlass(_ bytes: [UInt8], sender: UInt64, time: Date) -> Self? {
+        guard [13, 20].contains(bytes.count), bytes[2] == 0x32 else { return nil }
+        var points: [(Int, Int)] = []
+        for offset in stride(from: 6, to: bytes.count, by: 7) {
+            // The black-glass firmware keeps byte 0 at one on its final lift
+            // reports. The contact ellipse and pressure at offsets 3...5 of the
+            // finger record are the reliable physical-contact edge instead.
+            guard bytes[offset + 3] != 0 || bytes[offset + 4] != 0 || bytes[offset + 5] != 0 else { continue }
+            // Keep coordinates on roughly the same raw scale as the aluminum
+            // report so the shared shake and movement thresholds feel alike.
+            let x = Int(bytes[offset]) + 255 * Int(bytes[offset + 1] & 0x07) - 230
+            let wrappedY = (bytes[offset + 2] & 0x80 != 0
+                            ? Int(bytes[offset + 2])
+                            : Int(bytes[offset + 2]) + 255) - 188
+            points.append((x, wrappedY * 15))
+        }
+        return Self(sender: sender, time: time, generation: .glassTouchSurface,
+                    count: points.count, x: points.first?.0 ?? 0, y: points.first?.1 ?? 0)
+    }
+}
+
+/// One quick, forceful out-and-back motion enters caret mode while the same finger
+/// remains down. Coordinates for both remotes are normalized to a similar raw scale by
+/// their decoders, so one physical gesture threshold serves both generations.
+struct RemoteCaretShakeGate {
+    private struct Contact {
+        let sender: UInt64
+        let generation: RemoteGeneration
+        var pivotX: Int
+        var pivotY: Int
+        var directionX: Double?
+        var directionY: Double?
+        var reversals: Int
+        var firstStrokeAt: Date?
+        var latest: RemoteTextTouchFrame
+    }
+    private var contact: Contact?
+    let strokeDistance: Double
+    let maximumDuration: TimeInterval
+    let maximumFrameGap: TimeInterval
+    let reversalCosine: Double
+
+    init(strokeDistance: Double = 240, maximumDuration: TimeInterval = 0.9,
+         maximumFrameGap: TimeInterval = 0.25, reversalCosine: Double = -0.65) {
+        self.strokeDistance = strokeDistance
+        self.maximumDuration = maximumDuration
+        self.maximumFrameGap = maximumFrameGap
+        self.reversalCosine = reversalCosine
+    }
+
+    var isTracking: Bool { contact != nil }
+    var latest: RemoteTextTouchFrame? { contact?.latest }
+
+    mutating func reset() { contact = nil }
+
+    mutating func observe(_ frame: RemoteTextTouchFrame) -> Bool {
+        guard frame.count == 1 else {
+            reset()
+            return false
+        }
+        guard var current = contact, current.sender == frame.sender,
+              current.generation == frame.generation,
+              frame.time > current.latest.time,
+              frame.time.timeIntervalSince(current.latest.time) <= maximumFrameGap else {
+            contact = Contact(sender: frame.sender, generation: frame.generation,
+                              pivotX: frame.x, pivotY: frame.y,
+                              directionX: nil, directionY: nil, reversals: 0,
+                              firstStrokeAt: nil, latest: frame)
+            return false
+        }
+        current.latest = frame
+        if let start = current.firstStrokeAt,
+           frame.time.timeIntervalSince(start) > maximumDuration {
+            current.pivotX = frame.x
+            current.pivotY = frame.y
+            current.directionX = nil
+            current.directionY = nil
+            current.reversals = 0
+            current.firstStrokeAt = nil
+            contact = current
+            return false
+        }
+        let dx = Double(frame.x - current.pivotX)
+        let dy = Double(frame.y - current.pivotY)
+        let distance = hypot(dx, dy)
+        guard distance >= strokeDistance else { contact = current; return false }
+        let unitX = dx / distance, unitY = dy / distance
+        if let oldX = current.directionX, let oldY = current.directionY {
+            let dot = unitX * oldX + unitY * oldY
+            // Ordinary dragging can bend or turn. Only a strong return along the
+            // preceding path counts as an intentional shake reversal.
+            guard dot <= reversalCosine else { contact = current; return false }
+            current.reversals += 1
+        } else {
+            current.firstStrokeAt = frame.time
+        }
+        current.pivotX = frame.x
+        current.pivotY = frame.y
+        current.directionX = unitX
+        current.directionY = unitY
+        let activated = current.reversals >= 1 &&
+            frame.time.timeIntervalSince(current.firstStrokeAt ?? frame.time) <= maximumDuration
+        contact = current
+        return activated
     }
 }
 
@@ -153,13 +263,12 @@ enum CaretOverlayGeometry {
 }
 
 struct CaretButtonGate {
-    enum Intent: Equatable { case toggle, exit, exitVoice, consume, pass }
+    enum Intent: Equatable { case exit, exitVoice, consume, pass }
     private(set) var held: Set<String> = []
     mutating func handle(button: String, down: Bool, device: String, active: Bool) -> Intent {
         let key = device + ":" + button
         if !down { return held.remove(key) != nil ? .consume : .pass }
         if held.contains(key) { return .consume }
-        if button == "select" { held.insert(key); return .toggle }
         if active && ["siri", "power"].contains(button) {
             held.insert(key); return button == "siri" ? .exitVoice : .exit
         }
@@ -197,6 +306,8 @@ final class RemoteCaretController {
     private var ignoreTouchUntil = Date.distantPast
     private var owner: UInt64?
     private var active = false
+    private var activeGeneration: RemoteGeneration?
+    private var shakeGesture = RemoteCaretShakeGate()
     private var buttons = CaretButtonGate()
     private var swallowedReturns: Set<Int> = []
     private var notifiedSuppression = false
@@ -204,7 +315,6 @@ final class RemoteCaretController {
     private var voiceBlockedByPress = false
     private let overlay = CaretOverlay()
     private var lastRead = Date.distantPast
-    private var previewTime = Date.distantPast
     private var geometryCorrection: (element: AXUIElement, mode: CaretRangeGeometry.Correction)?
     private var markerGeometry: MarkerGeometry?
     private var diagnosingEntry = false
@@ -213,13 +323,16 @@ final class RemoteCaretController {
     func reset() { buttons = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false; cancel() }
     func stop() { reset() }
 
-    /// Center owns both edges; even without an editor it must never become Enter.
-    func button(_ button: String, pressed down: Bool, device: String) -> Bool {
+    /// Surface clicks never enter caret mode. The black-glass click remains Enter;
+    /// the aluminum click is reserved while Power remains its submit button.
+    func button(_ button: String, pressed down: Bool, device: String,
+                generation: RemoteGeneration) -> Bool {
+        if button == "select" {
+            if down { cancel() }
+            return false
+        }
         let intent = buttons.handle(button: button, down: down, device: device, active: active)
         switch intent {
-        case .toggle:
-            if active { commit() } else { begin() }
-            return true
         case .exitVoice:
             voiceBlockedByPress = true; cancel(); return true
         case .exit:
@@ -258,11 +371,12 @@ final class RemoteCaretController {
     func receive(_ frame: RemoteTextTouchFrame) {
         guard Date().timeIntervalSince(frame.time) <= 0.18 else { cancel(); return }
         if active {
+            guard activeGeneration == frame.generation else { return }
             guard owner == nil || owner == frame.sender else { return }
             owner = frame.sender
             if frame.count != 1 {
-                if isDragging { _ = settle() }
-                lastTouch = nil; motion.reset(); return
+                commit()
+                return
             }
             guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else {
                 lastTouch = nil; motion.reset(); return
@@ -291,24 +405,23 @@ final class RemoteCaretController {
                 overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
             }
         } else {
-            // The confirmed aluminum surface's center occupies this bounded region.
-            let central = frame.count == 1 && abs(frame.x) < 550 && abs(frame.y + 400) < 450
-            if central, buttons.held.isEmpty {
-                previewTime = Date()
-                if editor == nil, let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) {
-                    editor = candidate
-                    overlay.show(caret: rect, editor: candidate.bounds, progress: 1.0 / 3)
-                    startWatchdog()
-                }
-            } else if editor != nil { cancel() }
+            guard buttons.held.isEmpty else { shakeGesture.reset(); return }
+            if shakeGesture.observe(frame) { beginShakeGesture() }
         }
     }
 
-    private func begin() {
+    private func beginShakeGesture() {
+        guard let frame = shakeGesture.latest else { return }
+        begin(owner: frame.sender, generation: frame.generation)
+        if active { lastTouch = frame }
+    }
+
+    private func begin(owner: UInt64? = nil, generation: RemoteGeneration = .aluminumClickpad) {
         diagnosingEntry = true
         defer { diagnosingEntry = false }
         guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { cancel(); return }
-        editor = candidate; active = true; owner = nil; lastTouch = nil
+        editor = candidate; active = true; activeGeneration = generation
+        self.owner = owner; lastTouch = nil
         isDragging = false
         motion.reset()
         destination = candidate.selection.location
@@ -319,12 +432,12 @@ final class RemoteCaretController {
         gatherPositions()
         overlay.show(caret: rect, editor: candidate.bounds, progress: 1)
         startWatchdog()
-        rmDebug("Caret positioning entered: caretAX=\(rect) overlayError=\(overlay.alignmentError(caret: rect))")
+        rmDebug("Caret positioning entered: generation=\(generation.rawValue) caretAX=\(rect) overlayError=\(overlay.alignmentError(caret: rect))")
     }
 
     private func commit() {
-        // A mechanical center press can arrive before the surface's lift report.
-        // Resolve the same nearest insertion point in either event order.
+        // Lift resolves the freely moving preview to the nearest insertion point
+        // before committing the real selection.
         if isDragging, !settle() { return }
         guard valid(), let editor, let displayedCaret,
               let freshRect = caret(displayedCaret.offset, in: editor),
@@ -347,7 +460,8 @@ final class RemoteCaretController {
     }
 
     func cancel() {
-        active = false; editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll()
+        active = false; activeGeneration = nil; shakeGesture.reset()
+        editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll()
         isDragging = false
         geometryCorrection = nil
         markerGeometry = nil
@@ -365,8 +479,7 @@ final class RemoteCaretController {
         }
     }
 
-    /// Lifting settles only the preview. The editor selection still changes once,
-    /// on the user's explicit center-button confirmation.
+    /// Resolve the free preview to a real insertion boundary before commit.
     @discardableResult
     private func settle() -> Bool {
         guard active, valid(), let editor else { cancel(); return false }
@@ -391,8 +504,8 @@ final class RemoteCaretController {
         let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                guard self.valid(), self.active || Date().timeIntervalSince(self.previewTime) < 0.3 else { self.cancel(); return }
-                if self.active { self.gatherPositions() }
+                guard self.active, self.valid() else { self.cancel(); return }
+                self.gatherPositions()
             }
         }
         timer = t; RunLoop.main.add(t, forMode: .common)

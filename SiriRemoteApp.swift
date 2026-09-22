@@ -134,7 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         remoteInputHandler?.onAdvancedButton = { [weak self] button, pressed, device, generation in
             if button == "select", pressed { self?.advancedMenu.dismiss() }
-            if self?.caretController.button(button, pressed: pressed, device: device) == true { return true }
+            if self?.caretController.button(button, pressed: pressed, device: device,
+                                             generation: generation) == true { return true }
             return self?.advancedMenu.handle(button: button, pressed: pressed, device: device, generation: generation) ?? false
         }
 

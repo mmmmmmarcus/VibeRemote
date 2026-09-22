@@ -175,25 +175,28 @@ components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTI
 
 ## Text-cursor positioning
 
-Press the center button in an accessible focused text field to reveal a thin
-surrogate caret with a four-way-arrow bubble growing from its top. Slide freely in two dimensions; lifting snaps the preview to the nearest visible
-character boundary. Press the center button again to commit the real caret. The real selection
-stays unchanged until confirmation. Siri, Power/Return, typing, clicking, a focus or
+On either remote, quickly move one finger out and back once without lifting to reveal
+a thin surrogate caret with a four-way-arrow bubble growing from its top. Keep the same
+finger down and slide freely in two dimensions; lifting snaps to the nearest visible
+character boundary, commits the real caret and hides the overlay. The black-glass remote's
+mechanical surface click remains Enter because it has no separate Power/submit button. The
+aluminum center no longer enters caret mode. The real selection stays unchanged until lift.
+Siri, Power/Return, typing, clicking, a focus or
 content change cancels positioning. Siri and Return used to exit are consumed; the
 cancelled voice hold and its tail remain muted. The next ordinary Siri hold resumes voice.
-Touching the center lightly shows a larger plain preparation bubble and an opaque stem;
-pressing grows it fully and reveals the direction symbol. Outside positioning,
-touch has no editing or pointer action. No active accessible editor means no overlay.
+Before the return gesture is recognized, touch has no editing, overlay or pointer
+action. No active accessible editor means no overlay.
 Secure fields, active compositions and unsupported caret geometry fail closed.
 The current AX calibration requires existing text; an empty editor does not show a surrogate caret.
 The caret stays inside the editor; its decorative bubble can extend above it.
 The overlay does not activate a window and respects Reduce Motion.
 
-Aluminum touch frames come from the existing passive PacketLogger FC stream, without
+Both generations' touch frames come from the existing passive PacketLogger stream, without
 releasing audio HID/GATT handles. The low-level NativeTouch adapter is retained as a
 capability; there is no mouse mapping or Touch/Audio mode switch. Old saved mode and
-pointer-speed settings are ignored. First-generation passive touch decoding is not yet
-implemented. Physical movement direction, center region and target-editor compatibility
+pointer-speed settings are ignored. First-generation decoding accepts only 13/20-byte
+`0x32` touch reports on ATT `0x0023`, so voice packets on the same handle are excluded.
+Physical movement direction, shake thresholds and target-editor compatibility
 must be tested on each hardware/app combination.
 
 **Audio Output → Direct HAL (Experimental)** sends decoded 48 kHz mono Float32 samples

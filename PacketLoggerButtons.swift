@@ -4,7 +4,8 @@ import CoreBluetooth
 
 /// Aluminum remote report FB: mute is bit 7, play/pause bit 8 in its HID
 /// descriptor. Captured ATT characteristic 0039 carries that same 16-bit mask.
-/// Old-remote 0023 voice reports are deliberately not interpreted as button masks.
+/// Old-remote 0023 reports are never interpreted as button masks; only their
+/// narrowly framed 0x32 touch payloads are decoded by `touch` below.
 struct PacketLoggerButtonParser {
     struct Edge: Equatable {
         let button: String
@@ -56,16 +57,23 @@ struct PacketLoggerButtonParser {
         let header = line[..<split.lowerBound].split(whereSeparator: { $0.isWhitespace })
         guard header.count >= 5, allowedLabels.contains(header.dropFirst(3).dropLast().joined(separator: " ")) else { return nil }
         let hex = line[split.upperBound...].split(whereSeparator: { $0.isWhitespace })
-        guard [22, 29].contains(hex.count) else { return nil }
         let b = hex.compactMap { UInt8($0, radix: 16) }
-        guard b.count == hex.count, b[1] & 0xf0 == 0x20,
+        guard b.count == hex.count, b.count >= 11, b[1] & 0xf0 == 0x20,
               Int(b[2]) == b.count - 4, b[3] == 0, Int(b[4]) == b.count - 8,
-              Array(b[5...10]) == [0, 4, 0, 0x1b, 0x3d, 0] else { return nil }
+              Array(b[5...8]) == [0, 4, 0, 0x1b] else { return nil }
         let handle = UInt16(b[0]) | UInt16(b[1] & 15) << 8
         guard UInt16(header.last!.dropFirst(2), radix: 16) == handle,
               let stamp = formatter.date(from: "\(header[0]) \(header[1]) \(header[2]) \(Calendar.current.component(.year, from: now))"),
               now.timeIntervalSince(stamp) >= -0.03, now.timeIntervalSince(stamp) <= 0.18 else { return nil }
-        return RemoteTextTouchFrame.decode(Array(b[11...]), sender: UInt64(handle) + 1, time: stamp)
+        let payload = Array(b[11...])
+        switch (b[9], b[10]) {
+        case (0x3d, 0):
+            return RemoteTextTouchFrame.decode(payload, sender: UInt64(handle) + 1, time: stamp)
+        case (0x23, 0):
+            return RemoteTextTouchFrame.decodeGlass(payload, sender: UInt64(handle) + 1, time: stamp)
+        default:
+            return nil
+        }
     }
 
 }

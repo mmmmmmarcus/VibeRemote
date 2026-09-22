@@ -206,7 +206,7 @@ Auto Disconnect. Window state comes from
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
 
-Current intent: clickpad arrows → arrow keys, clickpad center → enter/confirm caret positioning, Back/Menu →
+Current intent: clickpad arrows → arrow keys, old touch-surface click → Enter, aluminum center → no fixed action, Back/Menu →
 word-wise Backspace (Option+Delete — macOS `deleteWordBackward:`, whose tokenizer also
 segments Chinese words; repeat runs at a slower word cadence than character repeat),
 TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
@@ -358,7 +358,9 @@ Media source correlation remains necessary: the remote's NX events lack source m
 Do not restore the failed private HID monitor. Preserve the 180 ms correlation window,
 160 ms NX wait, original CGEvent timestamps, bounded replay rejection and reader reopen
 retry. Aluminum mute/play/volume edges have one passive owner. Unmatched keyboard media
-keys must still pass through. Old 0023 voice data is never a button/touch mask.
+keys must still pass through. Black-glass ATT 0023 is shared by touch and voice: decode
+only 13/20-byte reports whose marker byte is 0x32 as touch. Voice data is never a button
+or touch mask.
 
 The bridge auto-starts at launch via `startAtLaunchIfPromptFree()`, but only when the
 start is guaranteed silent (Direct HID engine, or PacketLogger engine with the approved
@@ -718,16 +720,19 @@ Diagnostics submenu still refreshes through its delegate, including while discon
 RemoteCaretController replaces the removed swipe-delete experiment. Aluminum FC reports
 (ATT 003D, marker 32, 11/18-byte payloads) supply signed 12-bit coordinates while HID stays
 open. Hover bit 1 is a lift edge. Protocol reference is linked in the decoder.
-Center down enters, second down commits; repeats and corresponding ups are consumed.
+Both generations enter with one quick, forceful out-and-back touch gesture while the same
+finger remains down. The first stroke establishes direction; one return stroke whose
+direction cosine is at most -0.65 and whose length is at least 240 normalized raw units
+must finish within 0.9 seconds, with no inter-frame gap over 250 ms. Ordinary one-way
+dragging, slow movement and lift before recognition reset the gesture.
 No focused writable AX text element/caret geometry means no overlay or Enter fallback.
 Preview only changes a nonactivating, mouse-transparent clipped overlay; AX selection is
 written once on confirm. Snapshot text, selection, focus and geometry must remain unchanged.
 Siri/Power/keyboard Return cancel and consume their complete press; Return repeats must
 not submit. Voice suppression is a separate private gate, not an interaction mode. The
 helper suppresses a whole cancelled voice session; the next ordinary Siri hold re-enables.
-A central contact shows a plain bubble at 60% size with no inner symbol. The stem
-immediately uses its final opacity/color, covering the native caret; activation
-grows the bubble to full size and fades in the symbol. The caret stays 2 pt wide at the editor's
+No preparation bubble appears before recognition. The recognized gesture shows the full
+caret bubble immediately. The caret stays 2 pt wide at the editor's
 line height; a 24 pt bubble with the four-way SF Symbol grows from its top. The exact
 Figma silhouette (1345:6560) is in Resources/CaretBubble.svg; CaretBubble.png is its
 top 32 pt exported at 4x, joining the variable-height native stem. The decorative
@@ -741,6 +746,16 @@ while appearance/disappearance remain animated, so commit matches the displayed 
 Recheck target geometry before committing to reject stale scroll/reflow positions. Geometry, raw center thresholds, movement
 direction and target-app AX writes still require physical verification. Do not claim
 hardware haptics. No mouse movement, scrolling, deletion, clipboard use or generic Undo.
+
+The recognized frame remains the motion baseline, so the same uninterrupted contact moves
+the preview immediately after entry. Lift resolves the nearest grapheme boundary, writes
+the selection once and hides the overlay for both generations. The black-glass remote has
+an unusual lift edge: its 13-byte report keeps byte 0 at one while finger-record ellipse
+and pressure bytes 9...11 become zero. `decodeGlass` must derive active contacts from those
+three bytes, not the advertised finger count. The black-glass remote also has
+no separate Power/submit key, so its mechanical touch-surface click cancels any pending or
+active gesture before passing through as Enter. Aluminum center no longer enters or confirms
+caret mode; Power remains Enter. Do not route either center click through CaretButtonGate.
 
 Caret geometry must be calibrated against nonempty glyph ranges. On macOS 27 the
 native NSTextView collapsed AX range reports a rectangle one line above
@@ -768,9 +783,8 @@ index: Chromium can interpret it against the document root. Walk opaque markers
 from verified start/end/current-selection anchors, validate each UTF-16 segment
 against the editor snapshot, and bound traversal. Cache only within that editor
 and positioning session. Keep glyph calibration for both geometry sources.
-Entry failure diagnostics are limited to explicit center presses and contain only
+Entry failure diagnostics are limited to recognized shake gestures and contain only
 capabilities and geometry, never editor strings or marker payloads.
 
-Caret lift settles the preview only; it does not write the real selection. A center
-press during contact settles the same nearest target before committing, so a late
-lift event cannot change the committed offset. Clear drag state on cancellation.
+Caret lift commits for both generations after a recognized shake gesture. Clear drag and
+shake-recognition state on cancellation.
