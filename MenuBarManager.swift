@@ -102,7 +102,8 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// 1st-gen stand-in for the mute button's "/" half.
     case agentClientOrSlash = "Toggle Codex / Claude Desktop / Hold: Slash"
     case none = "None"
-    case toggleInteractionMode = "Toggle Touch / Audio Mode"
+    case advancedMenu = "Advanced Menu"
+    case positionCaret = "Position text cursor"
 
     var requiresHold: Bool {
         switch self {
@@ -117,7 +118,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// short of keys. They are assigned by the generation profile, never chosen by hand.
     var isAssignableToSiriButton: Bool {
         switch self {
-        case .shiftEnterOrModifier, .agentClientOrSlash, .toggleInteractionMode:
+        case .shiftEnterOrModifier, .agentClientOrSlash, .advancedMenu, .positionCaret:
             return false
         default:
             return true
@@ -147,7 +148,7 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
     let supportsHold: Bool
 }
 
-// Default Siri Remote mappings. Siri is customizable; Play/Pause and Mute can instead toggle modes.
+// Fixed remote mappings; only Siri is customizable.
 // - Clickpad Up/Down/Left/Right → arrow keys; center press → Enter
 // - Volume Up/Down  → bullet-list control in AI prompt editors (new/indent, outdent/remove)
 // - Back / Menu     → word-wise Backspace (Option+Delete; the system tokenizer segments
@@ -165,7 +166,7 @@ let remoteButtonDescriptors: [RemoteButtonDescriptor] = [
     RemoteButtonDescriptor(key: "tv", label: "TV Button", defaultAction: .shiftEnter, supportsHold: false),
     RemoteButtonDescriptor(key: "siri", label: "Siri Button", defaultAction: .spaceKey, supportsHold: true),
     RemoteButtonDescriptor(key: "playPause", label: "Play/Pause Button", defaultAction: .launchAgentClient, supportsHold: false),
-    RemoteButtonDescriptor(key: "select", label: "Clickpad Center", defaultAction: .enterKey, supportsHold: false),
+    RemoteButtonDescriptor(key: "select", label: "Clickpad Center", defaultAction: .positionCaret, supportsHold: false),
     RemoteButtonDescriptor(key: "navUp", label: "Clickpad Up", defaultAction: .upKey, supportsHold: false),
     RemoteButtonDescriptor(key: "navDown", label: "Clickpad Down", defaultAction: .downKey, supportsHold: false),
     RemoteButtonDescriptor(key: "navLeft", label: "Clickpad Left", defaultAction: .leftKey, supportsHold: false),
@@ -215,21 +216,19 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private var diagnosticsMenu = NSMenu()
+    var advancedMenuHandler: (() -> Void)?
+    @objc private func showAdvancedMenu() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.advancedMenuHandler?() }
+    }
     private var settingsWindowController: SettingsWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
-    /// Baselines before generation overrides, the Siri assignment and optional mode switches.
-    private static let fixedButtonActions: [String: ButtonAction] = Dictionary(
-        uniqueKeysWithValues: remoteButtonDescriptors.map { ($0.key, $0.defaultAction) }
-    )
     private static let siriButtonKey = "siri"
     private static let siriButtonDefaultsKey = "siriButtonAction"
     private static let siriButtonDefaultAction: ButtonAction =
         remoteButtonDescriptors.first { $0.key == siriButtonKey }?.defaultAction ?? .spaceKey
-    /// Persisted Siri assignment; mode-switch bindings are stored independently below.
+    /// Siri is the only customizable physical button.
     private var siriButtonAction: ButtonAction = MenuBarManager.loadSiriButtonAction()
-    private var modeSwitchButtons = RemoteModeSwitchMapping.load()
-    var interactionModeHandler: ((RemoteInteractionMode) -> Void)?
     var touchStatus = "Waiting for a remote touch surface"
     private var remoteConnected = false
     private var remoteGeneration: RemoteGeneration = .unknown
@@ -421,6 +420,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "VibeRemote")
+        let advanced = NSMenuItem(title: "Advanced Menu", action: #selector(showAdvancedMenu), keyEquivalent: "")
+        advanced.target = self
+        appMenu.addItem(advanced)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
@@ -447,27 +449,28 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             batteryPercent: remoteBatteryPercent,
             siriAction: siriButtonAction,
             generation: remoteGeneration,
-            interactionMode: RemoteInteractionMode.load(),
-            modeSwitchButtons: modeSwitchButtons
+            idleTimeout: remoteIdleTimeout
         )
     }
+
+
 
     @objc func showSettings() {
         rmDebug("⚙️ Settings window requested")
         statusRefreshHandler?()
         refreshRemoteBattery()
         if settingsWindowController == nil {
+            renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
             settingsWindowController = SettingsWindowController(
                 snapshot: settingsSnapshot,
                 setSiriAction: { [weak self] action in self?.setSiriButtonAction(action) },
                 resetSiriAction: { [weak self] in
-                    self?.modeSwitchButtons.removeAll()
-                    UserDefaults.standard.removeObject(forKey: RemoteModeSwitchMapping.defaultsKey)
+                    self?.setRemoteIdleTimeout(.defaultValue)
                     self?.setSiriButtonAction(Self.siriButtonDefaultAction)
                 },
-                setModeSwitch: { [weak self] button, enabled in self?.setModeSwitch(button: button, enabled: enabled) },
-                setInteractionMode: { [weak self] mode in self?.interactionModeHandler?(mode) },
-                audioSettingsMenu: makeAudioOutputMenu()
+                setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
+                audioSettingsMenu: makeAudioOutputMenu(),
+                diagnosticsMenu: diagnosticsMenu
             )
         }
         settingsWindowController?.update(settingsSnapshot)
@@ -477,7 +480,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// Badges the menu-bar glyph whenever the remote is disconnected or its always-on bridge
     /// is still starting. There is no user-facing stopped state.
     private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
-        let badge = RemoteStatusBadge(remoteConnected: remoteConnected, bridgeRunning: microphoneStatus.running || RemoteInteractionMode.load() == .touch)
+        let badge = RemoteStatusBadge(remoteConnected: remoteConnected, bridgeRunning: microphoneStatus.running)
         statusItem.button?.image = Self.makeRemoteIcon(badge: badge)
     }
 
@@ -553,7 +556,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         if !remoteConnected {
             statusTitle = "Disconnected"
         } else {
-            statusTitle = RemoteInteractionMode.load() == .touch ? "Touch Mode" : (microphoneStatus.running ? "Connected" : "Starting")
+            statusTitle = microphoneStatus.running ? "Connected" : "Starting"
         }
         let title = NSTextField(labelWithString: statusTitle)
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -610,31 +613,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
+        let advancedItem = NSMenuItem(title: "Advanced Menu", action: #selector(showAdvancedMenu), keyEquivalent: "")
+        advancedItem.target = self
+        menu.addItem(advancedItem)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
-        let modeItem = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
-        let modeMenu = NSMenu()
-        for mode in RemoteInteractionMode.allCases {
-            let item = NSMenuItem(title: mode.title, action: #selector(selectInteractionMode(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = mode.rawValue
-            item.state = mode == RemoteInteractionMode.load() ? .on : .off
-            modeMenu.addItem(item)
-        }
-        modeItem.submenu = modeMenu; menu.addItem(modeItem)
-        let outputItem = NSMenuItem(title: "Audio Output", action: nil, keyEquivalent: "")
-        let outputMenu = makeAudioOutputMenu()
-        outputItem.submenu = outputMenu; menu.addItem(outputItem)
         menu.addItem(.separator())
-        if RemoteInteractionMode.load() == .touch {
-            addInfoItem(touchStatus, to: menu)
-            addInfoItem("Slide: pointer · Tap: click · Two fingers: scroll", to: menu)
-            addInfoItem("Switch to Audio & Buttons for microphone and keys", to: menu)
-            addActionItem("Quit", action: #selector(quitApp), to: menu)
-            updateStatusIcon(microphoneStatus: microphoneStatus)
-            return
-        }
-
         updateStatusIcon(microphoneStatus: microphoneStatus)
 
         // Permissions appear only while something still needs granting, pinned to the top.
@@ -711,36 +696,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             ))
             menu.addItem(NSMenuItem.separator())
         }
-
-        if remoteGeneration.supportsIdleConnectionManagement {
-            let idleItem = NSMenuItem(title: "Auto Disconnect", action: nil, keyEquivalent: "")
-            let idleMenu = NSMenu()
-            for timeout in RemoteIdleTimeout.allCases {
-                let item = NSMenuItem(
-                    title: timeout.title,
-                    action: #selector(selectRemoteIdleTimeout(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = timeout.rawValue
-                item.state = timeout == remoteIdleTimeout ? .on : .off
-                idleMenu.addItem(item)
-            }
-            idleItem.submenu = idleMenu
-            menu.addItem(idleItem)
-        }
-
-        let bridgeItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
-        // A submenu may still be retained by the menu item AppKit just removed.
-        // Reusing that NSMenu immediately raises "already a submenu" during rapid
-        // device/status refreshes, so each rebuild gets a fresh menu instance.
-        diagnosticsMenu.delegate = nil
-        diagnosticsMenu = NSMenu()
-        diagnosticsMenu.delegate = self
-        renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
-        bridgeItem.submenu = diagnosticsMenu
-        menu.addItem(bridgeItem)
-        menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
@@ -955,18 +910,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return outputMenu
     }
 
-    @objc private func selectInteractionMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let mode = RemoteInteractionMode(rawValue: raw) else { return }
-        interactionModeHandler?(mode)
-    }
-
     @objc private func selectAudioOutput(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String else { return }
         UserDefaults.standard.set(raw, forKey: "audioOutputBackend")
         for item in sender.menu?.items ?? [] where item.representedObject is String {
             item.state = item.representedObject as? String == raw ? .on : .off
         }
-        if RemoteInteractionMode.load() == .audio { microphoneBridgeManager.restartAsync() }
+        microphoneBridgeManager.restartAsync()
         rebuildMenu()
     }
 
@@ -1146,27 +1096,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// shows: a 1st-gen and a 2nd/3rd-gen remote can be paired at the same time and each must
     /// keep its own profile.
     func getMapping(for button: String, generation: RemoteGeneration? = nil) -> ButtonAction {
-        let baseline = (generation ?? remoteGeneration).action(
-            for: button,
-            defaultAction: Self.fixedButtonActions[button] ?? .none,
-            siriAction: siriButtonAction
-        )
-        return RemoteModeSwitchMapping.action(button: button, defaultAction: baseline, enabled: modeSwitchButtons)
+        RemoteButtonMapping.action(button: button, generation: generation ?? remoteGeneration, siriAction: siriButtonAction)
     }
 
-    func toggleInteractionMode(from expectedMode: RemoteInteractionMode) {
-        // Two configured buttons can be released in the same run-loop turn. Only the
-        // first request may change modes; a queued request from the old mode is stale.
-        guard RemoteInteractionMode.load() == expectedMode else { return }
-        interactionModeHandler?(expectedMode.toggled)
-    }
 
-    private func setModeSwitch(button: String, enabled: Bool) {
-        guard RemoteModeSwitchMapping.eligibleButtons.contains(button) else { return }
-        if enabled { modeSwitchButtons.insert(button) } else { modeSwitchButtons.remove(button) }
-        UserDefaults.standard.set(modeSwitchButtons.sorted(), forKey: RemoteModeSwitchMapping.defaultsKey)
-        rebuildMenu()
-    }
 
     func updateRemoteGeneration(_ generation: RemoteGeneration) {
         guard remoteGeneration != generation else { return }
@@ -1191,9 +1124,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         rebuildMenu()
     }
 
-    @objc private func selectRemoteIdleTimeout(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? Int,
-              let timeout = RemoteIdleTimeout(rawValue: rawValue) else { return }
+    private func setRemoteIdleTimeout(_ timeout: RemoteIdleTimeout) {
         remoteIdleTimeout = timeout
         UserDefaults.standard.set(timeout.rawValue, forKey: RemoteIdleTimeout.defaultsKey)
         remoteIdleTimeoutHandler?(timeout)

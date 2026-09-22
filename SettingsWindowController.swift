@@ -22,8 +22,7 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
     var batteryPercent: Int?
     var siriAction: ButtonAction
     var generation: RemoteGeneration = .unknown
-    var interactionMode: RemoteInteractionMode = .audio
-    var modeSwitchButtons: Set<String> = []
+    var idleTimeout: RemoteIdleTimeout = .defaultValue
 
     var connectionText: String {
         guard connected else { return "DISCONNECTED" }
@@ -48,6 +47,7 @@ struct RemoteSettingsLayout {
     let right: [Callout]
 
     init(generation: RemoteGeneration) {
+
         if generation == .glassTouchSurface {
             resourceName = "SiriRemoteFirstGeneration"
             artworkWidth = 123
@@ -56,15 +56,28 @@ struct RemoteSettingsLayout {
         } else {
             resourceName = "SiriRemote"
             artworkWidth = 104
-            left = [.init(key: "back", centerY: 146), .init(key: "playPause", centerY: 192), .init(key: "mute", centerY: 238)]
+            left = [.init(key: "select", centerY: 62), .init(key: "touch.edit", centerY: 103), .init(key: "back", centerY: 146), .init(key: "playPause", centerY: 192), .init(key: "mute", centerY: 238)]
             right = [.init(key: "power", centerY: 18), .init(key: "siri", centerY: 82), .init(key: "tv", centerY: 144), .init(key: "volumeUp", centerY: 186), .init(key: "volumeDown", centerY: 236)]
         }
+    }
+}
+
+/// The guide describes fixed functions, not physical button names.
+enum RemoteSettingsGuide {
+    static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
+
+        if key == "touch.edit" { return "Slide to position caret" }
+        if key == "select" { return "Position caret" }
+        if key == "back" || key == "menu" { return "Delete word\nDouble-click: clear all" }
+        let action = RemoteButtonMapping.action(button: key, generation: snapshot.generation, siriAction: snapshot.siriAction)
+        return action == .none ? "Not assigned" : action.settingsTitle
     }
 }
 
 extension ButtonAction {
     var settingsTitle: String {
         switch self {
+        case .positionCaret: return "Position caret"
         case .enterKey: return "Enter"
         case .shiftEnter: return "Shift + Enter"
         case .backspace: return "Delete word"
@@ -83,8 +96,8 @@ extension ButtonAction {
         case .slashOrModifier: return "Skill / Modifier"
         case .shiftEnterOrModifier: return "Newline / Modifier"
         case .agentClientOrSlash: return "Client / Skill"
+        case .advancedMenu: return "Advanced Menu"
         case .none: return "None"
-        case .toggleInteractionMode: return "Touch / Audio"
         }
     }
 }
@@ -102,31 +115,29 @@ private final class RemoteSettingsModel: ObservableObject {
 /// standard AppKit window/toolbar hosts SwiftUI content without changing LSUIElement.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
-    private static let modeIdentifier = NSToolbarItem.Identifier("VibeRemote.InteractionMode")
-    private var modeItems: [NSMenuItem] = []
-    private let setInteractionMode: (RemoteInteractionMode) -> Void
     private static let moreIdentifier = NSToolbarItem.Identifier("VibeRemote.MoreSettings")
     private let model: RemoteSettingsModel
     private let setSiriAction: (ButtonAction) -> Void
     private let resetSiriAction: () -> Void
     private var resetItem: NSMenuItem?
     private let audioSettingsMenu: NSMenu?
+    private let diagnosticsMenu: NSMenu?
 
     init(
         snapshot: RemoteSettingsSnapshot,
         setSiriAction: @escaping (ButtonAction) -> Void,
         resetSiriAction: @escaping () -> Void,
-        setModeSwitch: @escaping (String, Bool) -> Void = { _, _ in },
-        setInteractionMode: @escaping (RemoteInteractionMode) -> Void = { _ in },
-        audioSettingsMenu: NSMenu? = nil
+        setIdleTimeout: @escaping (RemoteIdleTimeout) -> Void = { _ in },
+        audioSettingsMenu: NSMenu? = nil,
+        diagnosticsMenu: NSMenu? = nil
     ) {
         model = RemoteSettingsModel(snapshot: snapshot)
         self.setSiriAction = setSiriAction
         self.resetSiriAction = resetSiriAction
-        self.setInteractionMode = setInteractionMode
         self.audioSettingsMenu = audioSettingsMenu
+        self.diagnosticsMenu = diagnosticsMenu
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 722, height: 548),
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 660),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -141,11 +152,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("VibeRemote.Settings")
+        window.setFrameAutosaveName("VibeRemote.Settings.Split")
         let hosting = NSHostingController(rootView: RemoteSettingsView(
             model: model,
             setSiriAction: setSiriAction,
-            setModeSwitch: setModeSwitch
+            setIdleTimeout: setIdleTimeout
         ))
         let content = NSViewController()
         content.addChild(hosting)
@@ -180,11 +191,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 722, height: 548))
+        window.setContentSize(NSSize(width: 1000, height: 660))
         // Preserve the existing outer window size, extending only the backdrop beneath
         // the native toolbar. Controls stay within the unobscured safe area above.
         window.styleMask.insert(.fullSizeContentView)
-        if !window.setFrameUsingName("VibeRemote.Settings") {
+        if !window.setFrameUsingName("VibeRemote.Settings.Split") {
             window.center()
         }
         update(snapshot)
@@ -210,16 +221,10 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     func update(_ snapshot: RemoteSettingsSnapshot) {
         if model.snapshot != snapshot { model.snapshot = snapshot }
         let defaultAction = remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction ?? .spaceKey
-        resetItem?.isEnabled = snapshot.siriAction != defaultAction || !snapshot.modeSwitchButtons.isEmpty
+        resetItem?.isEnabled = snapshot.siriAction != defaultAction || snapshot.idleTimeout != .defaultValue
         for item in audioSettingsMenu?.items ?? [] where item.representedObject is String {
             item.state = item.representedObject as? String == (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") ? .on : .off
         }
-        for item in modeItems { item.state = item.representedObject as? String == snapshot.interactionMode.rawValue ? .on : .off }
-    }
-
-    @objc private func selectMode(_ item: NSMenuItem) {
-        guard let raw = item.representedObject as? String, let mode = RemoteInteractionMode(rawValue: raw) else { return }
-        setInteractionMode(mode)
     }
 
     @objc private func resetSettings() {
@@ -227,7 +232,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.modeIdentifier, .flexibleSpace, Self.moreIdentifier]
+        [.flexibleSpace, Self.moreIdentifier]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -239,20 +244,6 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
-        if itemIdentifier == Self.modeIdentifier {
-            let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Mode"; item.toolTip = "Audio or touch mode"
-            item.image = NSImage(systemSymbolName: "hand.draw", accessibilityDescription: "Interaction mode")
-            item.isBordered = true; item.autovalidates = false
-            let menu = NSMenu(title: "Mode"); menu.autoenablesItems = false
-            modeItems = RemoteInteractionMode.allCases.map { mode in
-                let entry = NSMenuItem(title: mode.title, action: #selector(selectMode(_:)), keyEquivalent: "")
-                entry.target = self; entry.representedObject = mode.rawValue
-                entry.state = mode == model.snapshot.interactionMode ? .on : .off
-                menu.addItem(entry); return entry
-            }
-            item.menu = menu; return item
-        }
         guard itemIdentifier == Self.moreIdentifier else { return nil }
         // Let AppKit supply the toolbar's glass button and anchored system menu.
         // Only Reset is disabled at defaults; the More menu remains available.
@@ -269,12 +260,17 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         reset.target = self
         reset.identifier = NSUserInterfaceItemIdentifier("VibeRemote.ResetSettings")
         reset.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
-        reset.toolTip = "Restore Siri to Space and Play/Pause and Mute to their original actions."
+        reset.toolTip = "Restore Siri Button, touch speeds and auto disconnect to their defaults."
         menu.addItem(reset)
         if let audioSettingsMenu {
             menu.addItem(.separator())
             let audio = NSMenuItem(title: "Audio Output", action: nil, keyEquivalent: "")
             audio.submenu = audioSettingsMenu; menu.addItem(audio)
+        }
+        if let diagnosticsMenu {
+            let diagnostics = NSMenuItem(title: "Diagnostics", action: nil, keyEquivalent: "")
+            diagnostics.submenu = diagnosticsMenu
+            menu.addItem(diagnostics)
         }
         item.menu = menu
         resetItem = reset
@@ -286,73 +282,110 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
 private struct RemoteSettingsView: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
-    let setModeSwitch: (String, Bool) -> Void
-
+    let setIdleTimeout: (RemoteIdleTimeout) -> Void
     private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: model.snapshot.generation) }
 
     var body: some View {
-        VStack(spacing: 36) {
-            HStack(alignment: .top, spacing: 0) {
-                callouts(layout.left, side: .left)
-                RemoteArtwork(generation: model.snapshot.generation)
-                    .frame(width: layout.artworkWidth, height: 398)
-                    .accessibilityLabel(model.snapshot.generation.displayName)
-                    .help(model.snapshot.generation == .glassTouchSurface
-                          ? "Press the touch surface for Enter. Hold the microphone button below Menu while speaking."
-                          : "Clickpad: arrow keys. Press the center for Enter. Hold the side Siri button while speaking.")
-                callouts(layout.right, side: .right)
+        HStack(spacing: 0) {
+            VStack(spacing: 24) {
+                HStack(alignment: .top, spacing: 0) {
+                    callouts(layout.left, side: .left)
+                    RemoteArtwork(generation: model.snapshot.generation)
+                        .frame(width: layout.artworkWidth, height: 398)
+                        .accessibilityLabel(model.snapshot.generation.displayName)
+                    callouts(layout.right, side: .right)
+                }
+                VStack(spacing: 7) {
+                    Text(model.snapshot.generation.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                    HStack(spacing: 6) {
+                        Circle().fill(model.snapshot.connected ? Color.green : Color.secondary).frame(width: 6, height: 6)
+                        Text(model.snapshot.connectionText).font(.system(size: 11, design: .monospaced))
+                    }.foregroundStyle(.secondary)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("settings.connection")
+                    Text("Remote controls")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
             }
-            .padding(.top, 40)
-
-            VStack(spacing: 3) {
-                Text(model.snapshot.interactionMode == .touch ? "Touch Control" : model.snapshot.generation.displayName)
-                    .font(.system(size: 13, weight: .medium))
-                Text(model.snapshot.interactionMode == .touch ? "Slide to move · Tap to click · Two fingers to scroll" : model.snapshot.connectionText)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .accessibilityIdentifier("settings.connection")
+            .frame(width: 556)
+            .frame(maxHeight: .infinity)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text("Settings").font(.system(size: 22, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 14) {
+                        sectionTitle("Controls")
+                        HStack {
+                            Text("Siri Button")
+                            Spacer()
+                            SiriActionPopUp(action: model.snapshot.siriAction, onSelect: setSiriAction)
+                                .frame(width: 190, height: 32)
+                        }
+                        Text("Other button actions are fixed.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionTitle("Text cursor")
+                        Text("Press the center button to position the cursor. Slide to move, then press again to confirm.")
+                        Text("Siri or Return exits without dictating or submitting. An active text field is required.")
+                            .foregroundStyle(.secondary)
+                    }.font(.system(size: 12))
+                    Divider()
+                    VStack(alignment: .leading, spacing: 12) {
+                        sectionTitle("Connection")
+                        HStack {
+                            Text("Auto disconnect")
+                            Spacer()
+                            Picker("Auto disconnect", selection: Binding(get: { model.snapshot.idleTimeout }, set: setIdleTimeout)) {
+                                ForEach(RemoteIdleTimeout.allCases, id: \.self) { value in Text(value.title).tag(value) }
+                            }.labelsHidden().pickerStyle(.menu).fixedSize()
+                                .accessibilityIdentifier("settings.idleTimeout")
+                        }
+                        Text("Disconnect after inactivity.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(.system(size: 13))
+                .padding(28)
             }
-            .accessibilityElement(children: .combine)
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private enum Side { case left, right }
-
-    private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(items.filter { model.snapshot.interactionMode == .audio || RemoteModeSwitchMapping.eligibleButtons.contains($0.key) }) { item in
-                mapping(item.key, side: side)
-                    .offset(y: item.centerY - 18)
-            }
-        }
-        .frame(width: 236, height: 398, alignment: .topLeading)
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title).font(.system(size: 13, weight: .semibold))
     }
 
 
-    private func mapping(_ key: String, side: Side) -> some View {
-        let descriptor = remoteButtonDescriptors.first { $0.key == key }!
-        let baseline = model.snapshot.generation.action(for: key, defaultAction: descriptor.defaultAction, siriAction: model.snapshot.siriAction)
-        let action = RemoteModeSwitchMapping.action(button: key, defaultAction: baseline, enabled: model.snapshot.modeSwitchButtons)
+
+    private enum Side { case left, right }
+    private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(items) { item in
+                callout(item.key, side: side).offset(y: item.centerY - 17)
+            }
+        }.frame(width: 180, height: 398, alignment: .topLeading)
+    }
+
+    private func callout(_ key: String, side: Side) -> some View {
+        let title = RemoteSettingsGuide.title(for: key, snapshot: model.snapshot)
         return HStack(spacing: 8) {
-            if side == .right { VStack { Divider() }.frame(width: 80) }
-            MappingPopUp(
-                descriptor: descriptor,
-                action: action,
-                defaultAction: baseline,
-                onSelect: { selected in
-                    if key == "siri" { setSiriAction(selected) }
-                    else { setModeSwitch(key, selected == .toggleInteractionMode) }
-                }
-            )
-            .frame(width: 148, height: 36)
-            if side == .left { VStack { Divider() }.frame(width: 80) }
+            if side == .right { connector }
+            Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                .frame(width: 136, alignment: side == .left ? .trailing : .leading)
+            if side == .left { connector }
         }
-        .frame(height: 36)
-        .opacity(model.snapshot.generation.absentButtonKeys.contains(key) ? 0 : 1)
-        .allowsHitTesting(!model.snapshot.generation.absentButtonKeys.contains(key))
-        .accessibilityHidden(model.snapshot.generation.absentButtonKeys.contains(key))
+        .frame(height: 34)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityIdentifier("settings.guide.\(key)")
+    }
+
+    private var connector: some View {
+        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 36, height: 1)
     }
 }
 
@@ -402,12 +435,10 @@ private struct RemoteArtwork: NSViewRepresentable {
 }
 
 /// NSPopUpButton supplies keyboard navigation, VoiceOver and the system appearance.
-/// Fixed buttons expose their action/hold explanation, not editable mapping options.
+/// Only the Siri button exposes an editable action menu.
 @MainActor
-private struct MappingPopUp: NSViewRepresentable {
-    let descriptor: RemoteButtonDescriptor
+private struct SiriActionPopUp: NSViewRepresentable {
     let action: ButtonAction
-    let defaultAction: ButtonAction
     let onSelect: (ButtonAction) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onSelect: onSelect) }
@@ -420,9 +451,9 @@ private struct MappingPopUp: NSViewRepresentable {
         button.font = .systemFont(ofSize: 13)
         button.target = context.coordinator
         button.action = #selector(Coordinator.selectAction(_:))
-        button.identifier = NSUserInterfaceItemIdentifier(descriptor.key)
-        button.setAccessibilityIdentifier("settings.mapping.\(descriptor.key)")
-        button.setAccessibilityLabel(descriptor.label)
+        button.identifier = NSUserInterfaceItemIdentifier("siri")
+        button.setAccessibilityIdentifier("settings.mapping.siri")
+        button.setAccessibilityLabel("Siri Button")
         button.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let glass = GlassMappingView(button: button)
@@ -433,30 +464,19 @@ private struct MappingPopUp: NSViewRepresentable {
     func updateNSView(_ glass: GlassMappingView, context: Context) {
         let button = glass.button
         context.coordinator.onSelect = onSelect
-        let modeSwitch = RemoteModeSwitchMapping.eligibleButtons.contains(descriptor.key)
-        let editable = descriptor.key == "siri" || modeSwitch
-        let actions = descriptor.key == "siri" ? ButtonAction.allCases.filter(\.isAssignableToSiriButton)
-            : (modeSwitch ? [defaultAction, .toggleInteractionMode] : [action])
-        button.toolTip = "\(descriptor.label)\n\(action.actionDescription)"
+        let actions = ButtonAction.allCases.filter(\.isAssignableToSiriButton)
+        button.toolTip = action.actionDescription
         // Rebuild only when the choice changes; status/battery updates must not dismiss
         // an open native menu or reset its keyboard selection.
         if button.selectedItem?.representedObject as? String == action.rawValue,
            button.itemArray.compactMap({ $0.representedObject as? String }) == actions.map(\.rawValue) { return }
         button.removeAllItems()
         for option in actions {
-            button.addItem(withTitle: editable ? option.settingsTitle : option.actionDescription)
+            button.addItem(withTitle: option.settingsTitle)
             button.lastItem?.representedObject = option.rawValue
             button.lastItem?.toolTip = option.actionDescription
         }
         button.selectItem(at: actions.firstIndex(of: action) ?? 0)
-        if !editable {
-            // Keep the compact label on the glass control, while its menu contains the
-            // complete explanation exactly once. This display item is not a menu entry.
-            if let cell = button.cell as? NSPopUpButtonCell {
-                cell.usesItemFromMenu = false
-                cell.menuItem = NSMenuItem(title: action.settingsTitle, action: nil, keyEquivalent: "")
-            }
-        }
     }
 
     final class GlassMappingView: NSGlassEffectView {
@@ -503,10 +523,9 @@ private struct MappingPopUp: NSViewRepresentable {
         }
 
         @objc func selectAction(_ sender: NSPopUpButton) {
-            guard let key = sender.identifier?.rawValue,
-                  key == "siri" || RemoteModeSwitchMapping.eligibleButtons.contains(key) else { return }
+            guard sender.isEnabled, sender.identifier?.rawValue == "siri" else { return }
             guard let raw = sender.selectedItem?.representedObject as? String,
-                  let action = ButtonAction(rawValue: raw) else { return }
+                  let action = ButtonAction(rawValue: raw), action.isAssignableToSiriButton else { return }
             onSelect(action)
         }
     }

@@ -9,15 +9,25 @@
 import Cocoa
 import IOKit
 import NativeTouch
+import Darwin
 @preconcurrency import CoreGraphics
 
 @MainActor
 final class MediaKeyInterceptor {
     private let packetButtons = PacketLoggerButtonMonitor()
     var capturePath: String?
+    var onCapturedTouch: ((RemoteTextTouchFrame) -> Void)?
+    var onEditorInput: ((Int?, Bool) -> Bool)?
+    var onCapturedButton: ((PacketLoggerButtonParser.Edge) -> Bool)?
+    var onEscape: (() -> Bool)?
     var onSourceReset: (() -> Void)?
     func resetRemoteCorrelation() { remoteEvents = RemoteMediaEventCorrelation() }
     private static let forwardedMarker: Int64 = 0x56524D45444941
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var wakeObserver: NSObjectProtocol?
@@ -41,7 +51,7 @@ final class MediaKeyInterceptor {
             return true
         }
 
-        let eventMask: CGEventMask = 1 << 14 // NX_SYSDEFINED
+        let eventMask: CGEventMask = (1 << 14) | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue) // NX_SYSDEFINED
         
         // HID-level tap intercepts media keys before the system handles them (more reliable than session tap).
         guard let tap = CGEvent.tapCreate(
@@ -74,10 +84,11 @@ final class MediaKeyInterceptor {
         packetButtons.onReset = { [weak self] in
             self?.resetRemoteCorrelation(); self?.onSourceReset?()
         }
+        packetButtons.onTouch = { [weak self] frame in self?.onCapturedTouch?(frame) }
         packetButtons.onEdge = { [weak self] edge in
             guard let self else { return }
-            let key: MediaKeyType = edge.button == "playPause" ? .playPause : .mute
-            guard self.shouldAwaitRemoteSource?(key) == true else { return }
+            let claimed = self.onCapturedButton?(edge) == true
+            guard claimed, ["playPause", "mute", "volumeUp", "volumeDown"].contains(edge.button) else { return }
             let age = Date().timeIntervalSince(edge.capturedAt)
             self.remoteEvents.record(button: edge.button, pressed: edge.pressed, sender: edge.sender,
                                      now: ProcessInfo.processInfo.systemUptime - age)
@@ -133,6 +144,9 @@ final class MediaKeyInterceptor {
             return nil
         }
         
+        if [.keyDown, .keyUp, .leftMouseDown, .rightMouseDown].contains(type),
+           onEditorInput?([.keyDown, .keyUp].contains(type) ? Int(event.getIntegerValueField(.keyboardEventKeycode)) : nil, type != .keyUp) == true { return nil }
+        if type == .keyDown, event.getIntegerValueField(.keyboardEventKeycode) == 53, onEscape?() == true { return nil }
         // NX_SYSDEFINED = 14
         guard type.rawValue == 14 else {
             return Unmanaged.passUnretained(event)
@@ -184,22 +198,24 @@ final class MediaKeyInterceptor {
         if let key = mediaKey, let handler = onMediaKey {
             let sender = vr_media_event_sender(event)
             let remote = isRemoteSource(sender) ? sender : nil
-            let consumed = handler(key, isKeyDown, remote)
-            if !consumed, remote == nil, shouldAwaitRemoteSource?(key) == true, let copy = event.copy() {
+            if shouldAwaitRemoteSource?(key) == true, let copy = event.copy() {
                 // The passive capture and NX tap use independent delivery paths;
                 // either may arrive first. Hold only configured switch keys briefly, then
                 // consume confirmed remote events or forward unrelated keyboard events once.
                 let repeating = keyFlags & 1 != 0
                 // The main loop can be delayed while HID interfaces reopen. Compare original
                 // event times, preserving a narrow match window even after that stall.
-                let receivedAt = event.timestamp > 0 ? Double(event.timestamp) / 1_000_000_000 : ProcessInfo.processInfo.systemUptime
+                let receivedAt = RemoteMediaEventClock.uptime(timestamp: event.timestamp,
+                    now: ProcessInfo.processInfo.systemUptime,
+                    numer: Self.timebase.numer, denom: Self.timebase.denom)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
                     self?.packetButtons.pollNow()
-                    let button = key == .playPause ? "playPause" : "mute"
-                    let observed = self?.remoteEvents.resolve(button: button, pressed: isKeyDown,
-                        repeating: repeating, now: receivedAt)
-                    let consumed = observed.map { self?.onMediaKey?(key, isKeyDown, $0) == true } ?? false
-                    rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") deferred consumed=\(consumed) remote=\(observed != nil)")
+                    let button = key == .playPause ? "playPause" : (key == .mute ? "mute" : (key == .volumeUp ? "volumeUp" : "volumeDown"))
+                    let delta = receivedAt.flatMap { self?.remoteEvents.nearestDelta(button: button, pressed: isKeyDown, now: $0) }
+                    let observed = receivedAt.flatMap { self?.remoteEvents.resolve(button: button, pressed: isKeyDown,
+                        repeating: repeating, now: $0) }
+                    let consumed = observed != nil
+                    rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") deferred consumed=\(consumed) deltaMs=\(delta.map { String(format: "%.1f", $0 * 1000) } ?? "none") eventTime=\(receivedAt.map { String(format: "%.6f", $0) } ?? "invalid") uptime=\(ProcessInfo.processInfo.systemUptime)")
                     if !consumed {
                         copy.setIntegerValueField(.eventSourceUserData, value: Self.forwardedMarker)
                         copy.post(tap: .cghidEventTap)
@@ -207,6 +223,7 @@ final class MediaKeyInterceptor {
                 }
                 return nil
             }
+            let consumed = handler(key, isKeyDown, remote)
             rmDebug("Media key \(key) \(isKeyDown ? "down" : "up") consumed=\(consumed) remote=\(remote != nil) sender=\(sender) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID)) data2=\(nsEvent.data2) epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
             if consumed { return nil }
         }

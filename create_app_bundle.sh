@@ -9,8 +9,7 @@ APP_NAME="VibeRemote"
 APP_BUNDLE="${APP_NAME}.app"
 ENTITLEMENTS="${APP_NAME}.entitlements"
 ICON_SOURCE="${APP_NAME}.icon"
-ICON_PNG="${APP_NAME}AppIcon.png"
-ICON_FILE="${APP_NAME}.icns"
+ICON_INFO_PLIST="$ROOT_DIR/.build/app-icon-info.plist"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.viberemote.app}"
 APP_VERSION="${APP_VERSION:-0.2.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
@@ -47,6 +46,24 @@ if [ ! -f "$ENTITLEMENTS" ]; then
     exit 1
 fi
 
+# Compile the complete Icon Composer document; rasterizing an individual layer loses
+# its materials and appearances. actool also supplies the matching Info.plist keys.
+if [ ! -f "${ICON_SOURCE}/icon.json" ]; then
+    echo "Error: Icon Composer source is missing: $ICON_SOURCE"
+    exit 1
+fi
+icon_developer_dir="${ICON_DEVELOPER_DIR:-${DEVELOPER_DIR:-$(xcode-select -p)}}"
+if ! DEVELOPER_DIR="$icon_developer_dir" xcrun --find actool >/dev/null 2>&1; then
+    # Swift may use a newer standalone CLT SDK while asset compilation needs full Xcode.
+    if [ -z "${ICON_DEVELOPER_DIR:-}" ]; then
+        icon_developer_dir="$(env -u DEVELOPER_DIR xcode-select -p)"
+    fi
+fi
+if ! DEVELOPER_DIR="$icon_developer_dir" xcrun --find actool >/dev/null 2>&1; then
+    echo "Error: Icon Composer compilation requires full Xcode. Set ICON_DEVELOPER_DIR to its Contents/Developer directory."
+    exit 1
+fi
+
 ./build.sh
 
 echo "Creating app bundle: $APP_BUNDLE"
@@ -55,33 +72,14 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 cp "$APP_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
 
-icon_png=""
-if [ -f "$ICON_PNG" ]; then
-    icon_png="$ICON_PNG"
-elif [ -f "${ICON_SOURCE}/Assets/remote 2.png" ]; then
-    icon_png="${ICON_SOURCE}/Assets/remote 2.png"
-fi
-
-if [ -n "$icon_png" ]; then
-    echo "Generating app icon from: $icon_png"
-    iconset="${APP_BUNDLE}/Contents/Resources/${APP_NAME}.iconset"
-    mkdir -p "$iconset"
-    sips -z 16 16 "$icon_png" --out "${iconset}/icon_16x16.png" >/dev/null
-    sips -z 32 32 "$icon_png" --out "${iconset}/icon_16x16@2x.png" >/dev/null
-    sips -z 32 32 "$icon_png" --out "${iconset}/icon_32x32.png" >/dev/null
-    sips -z 64 64 "$icon_png" --out "${iconset}/icon_32x32@2x.png" >/dev/null
-    sips -z 128 128 "$icon_png" --out "${iconset}/icon_128x128.png" >/dev/null
-    sips -z 256 256 "$icon_png" --out "${iconset}/icon_128x128@2x.png" >/dev/null
-    sips -z 256 256 "$icon_png" --out "${iconset}/icon_256x256.png" >/dev/null
-    sips -z 512 512 "$icon_png" --out "${iconset}/icon_256x256@2x.png" >/dev/null
-    sips -z 512 512 "$icon_png" --out "${iconset}/icon_512x512.png" >/dev/null
-    sips -z 1024 1024 "$icon_png" --out "${iconset}/icon_512x512@2x.png" >/dev/null
-    iconutil -c icns "$iconset" -o "${APP_BUNDLE}/Contents/Resources/$ICON_FILE"
-    rm -rf "$iconset"
-else
-    echo "Error: no app icon source was found."
-    exit 1
-fi
+echo "Compiling Icon Composer app icon: $ICON_SOURCE"
+DEVELOPER_DIR="$icon_developer_dir" xcrun actool "$ICON_SOURCE" \
+    --compile "${APP_BUNDLE}/Contents/Resources" \
+    --platform macosx \
+    --minimum-deployment-target 27.0 \
+    --app-icon "$APP_NAME" \
+    --output-partial-info-plist "$ICON_INFO_PLIST" \
+    --output-format human-readable-text
 
 voice_resources="${APP_BUNDLE}/Contents/Resources/SiriRemoteVoiceControl"
 voice_bridge_binary="VibeRemoteVoiceBridge"
@@ -171,8 +169,6 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<string>$APP_NAME</string>
 	<key>CFBundleIdentifier</key>
 	<string>$BUNDLE_IDENTIFIER</string>
-	<key>CFBundleIconFile</key>
-	<string>$ICON_FILE</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -197,6 +193,7 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+/usr/libexec/PlistBuddy -c "Merge $ICON_INFO_PLIST" "${APP_BUNDLE}/Contents/Info.plist"
 plutil -lint "${APP_BUNDLE}/Contents/Info.plist" "$ENTITLEMENTS"
 chmod 755 "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 

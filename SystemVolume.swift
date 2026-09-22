@@ -11,6 +11,27 @@ import CoreAudio
 import Foundation
 
 enum SystemVolume {
+    static func muted() -> Bool? {
+        guard let device = defaultOutputDeviceID() else { return nil }
+        var address = muteAddress()
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value != 0
+    }
+
+    static func setMuted(_ muted: Bool) {
+        guard let device = defaultOutputDeviceID() else { return }
+        var address = muteAddress()
+        var value: UInt32 = muted ? 1 : 0
+        AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
+    }
+
+    static func muteAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute,
+                                  mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    }
+
     static func get() -> Float? {
         guard let deviceID = defaultOutputDeviceID() else { return nil }
         var volume: Float = 0
@@ -113,6 +134,10 @@ final class VolumeRevertGuard {
     static let shared = VolumeRevertGuard()
 
     private var baselineVolume: Float?
+    private var baselineMute: Bool?
+    private var pendingMuteSettle: DispatchWorkItem?
+    private var muteListener: AudioObjectPropertyListenerBlock?
+    private var muteDeviceID: AudioObjectID = 0
     private var suppression = RemoteVolumeSuppression()
     private var connectionSuppressedUntil = Date.distantPast
     private let settleDelay: TimeInterval = 0.15
@@ -128,6 +153,7 @@ final class VolumeRevertGuard {
         isActive = true
         ensureDefaultOutputListener()
         bindVolumeListenerToCurrentOutput()
+        bindMuteListenerToCurrentOutput()
         if baselineVolume == nil {
             baselineVolume = SystemVolume.get()
         }
@@ -141,7 +167,12 @@ final class VolumeRevertGuard {
         guard isActive else { return }
         ensureDefaultOutputListener()
         bindVolumeListenerToCurrentOutput()
+        bindMuteListenerToCurrentOutput()
         suppression.update(button: button, pressed: pressed, now: Date())
+        if button == "mute", suppression.contains("mute", now: Date()), let baselineMute {
+            pendingMuteSettle?.cancel(); pendingMuteSettle = nil
+            if SystemVolume.muted() != baselineMute { SystemVolume.setMuted(baselineMute) }
+        }
         if suppression.isActive(now: Date()), pendingSettle != nil, let baselineValue = baselineVolume {
             pendingSettle?.cancel()
             pendingSettle = nil
@@ -170,7 +201,7 @@ final class VolumeRevertGuard {
     }
 
     func releaseRemoteButtons() {
-        for button in ["volumeUp", "volumeDown"] {
+        for button in ["volumeUp", "volumeDown", "mute"] {
             suppression.update(button: button, pressed: false, now: Date())
         }
     }
@@ -180,9 +211,11 @@ final class VolumeRevertGuard {
         isActive = false
         pendingSettle?.cancel()
         pendingSettle = nil
+        pendingMuteSettle?.cancel(); pendingMuteSettle = nil
         suppression = RemoteVolumeSuppression()
         connectionSuppressedUntil = .distantPast
         removeVolumeListener()
+        removeMuteListener()
 
         if let listener = defaultOutputListener {
             var addr = Self.defaultOutputAddress()
@@ -196,6 +229,7 @@ final class VolumeRevertGuard {
         }
 
         baselineVolume = nil
+        baselineMute = nil
     }
 
     private func ensureDefaultOutputListener() {
@@ -275,8 +309,53 @@ final class VolumeRevertGuard {
         pendingSettle = nil
         suppression = RemoteVolumeSuppression()
         bindVolumeListenerToCurrentOutput()
+        bindMuteListenerToCurrentOutput()
         baselineVolume = SystemVolume.get()
         rmDebug("🔊 Default output changed: device=\(listenerDeviceID) baseline=\(baselineVolume.map { String(format: "%.3f", $0) } ?? "nil")")
+    }
+
+    private func bindMuteListenerToCurrentOutput() {
+        guard let device = SystemVolume.defaultOutputDeviceID() else { removeMuteListener(); return }
+        guard muteDeviceID != device else { return }
+        removeMuteListener()
+        baselineMute = SystemVolume.muted()
+        var address = SystemVolume.muteAddress()
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in self?.onMuteChanged() }
+        }
+        if AudioObjectAddPropertyListenerBlock(device, &address, .main, listener) == noErr {
+            muteListener = listener; muteDeviceID = device
+        }
+    }
+
+    private func removeMuteListener() {
+        pendingMuteSettle?.cancel(); pendingMuteSettle = nil
+        if let listener = muteListener {
+            var address = SystemVolume.muteAddress()
+            AudioObjectRemovePropertyListenerBlock(muteDeviceID, &address, .main, listener)
+        }
+        muteListener = nil; muteDeviceID = 0; baselineMute = nil
+    }
+
+    private func onMuteChanged() {
+        guard isActive, let current = SystemVolume.muted() else { return }
+        if current == baselineMute {
+            pendingMuteSettle?.cancel(); pendingMuteSettle = nil
+            return
+        }
+        if suppression.contains("mute", now: Date()), let baselineMute {
+            rmDebug("🔊 Reverting remote mute change to \(baselineMute)")
+            SystemVolume.setMuted(baselineMute)
+            return
+        }
+        pendingMuteSettle?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.baselineMute = current; self?.pendingMuteSettle = nil
+            }
+        }
+        pendingMuteSettle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: work)
     }
 
     private static func defaultOutputAddress() -> AudioObjectPropertyAddress {

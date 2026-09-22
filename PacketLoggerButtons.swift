@@ -11,6 +11,7 @@ struct PacketLoggerButtonParser {
         let pressed: Bool
         let sender: UInt64
         let capturedAt: Date
+        let deviceLabel: String
     }
     private var masks: [UInt16: UInt16] = [:]
     private let formatter: DateFormatter = {
@@ -39,12 +40,34 @@ struct PacketLoggerButtonParser {
         let previous = masks[handle] ?? 0
         if masks.count > 16 { masks.removeAll() }
         masks[handle] = mask
-        return [("playPause", UInt16(0x100)), ("mute", UInt16(0x80))].compactMap { button, bit in
+        let edges: [Edge] = [("playPause", UInt16(0x100)), ("mute", UInt16(0x80)), ("back", UInt16(0x40)), ("tv", UInt16(0x01)), ("volumeUp", UInt16(0x02)), ("volumeDown", UInt16(0x04))].compactMap { button, bit in
             guard (previous ^ mask) & bit != 0 else { return nil }
             return Edge(button: button, pressed: mask & bit != 0,
-                        sender: UInt64(handle) + 1, capturedAt: stamp)
+                        sender: UInt64(handle) + 1, capturedAt: stamp, deviceLabel: label)
         }
+        // One BLE report can contain multiple transitions. Establish the menu hold
+        // before chord downs, and release it after them, regardless of descriptor order.
+        func priority(_ edge: Edge) -> Int { edge.button == "mute" ? (edge.pressed ? 0 : 2) : 1 }
+        return edges.sorted { priority($0) < priority($1) }
     }
+
+    func touch(line: String, allowedLabels: Set<String>, now: Date) -> RemoteTextTouchFrame? {
+        guard let split = line.range(of: " RECV ") else { return nil }
+        let header = line[..<split.lowerBound].split(whereSeparator: { $0.isWhitespace })
+        guard header.count >= 5, allowedLabels.contains(header.dropFirst(3).dropLast().joined(separator: " ")) else { return nil }
+        let hex = line[split.upperBound...].split(whereSeparator: { $0.isWhitespace })
+        guard [22, 29].contains(hex.count) else { return nil }
+        let b = hex.compactMap { UInt8($0, radix: 16) }
+        guard b.count == hex.count, b[1] & 0xf0 == 0x20,
+              Int(b[2]) == b.count - 4, b[3] == 0, Int(b[4]) == b.count - 8,
+              Array(b[5...10]) == [0, 4, 0, 0x1b, 0x3d, 0] else { return nil }
+        let handle = UInt16(b[0]) | UInt16(b[1] & 15) << 8
+        guard UInt16(header.last!.dropFirst(2), radix: 16) == handle,
+              let stamp = formatter.date(from: "\(header[0]) \(header[1]) \(header[2]) \(Calendar.current.component(.year, from: now))"),
+              now.timeIntervalSince(stamp) >= -0.03, now.timeIntervalSince(stamp) <= 0.18 else { return nil }
+        return RemoteTextTouchFrame.decode(Array(b[11...]), sender: UInt64(handle) + 1, time: stamp)
+    }
+
 }
 
 /// Bounded reads of the private capture file: never opens a remote HID/GATT interface.
@@ -52,6 +75,7 @@ struct PacketLoggerButtonParser {
 @MainActor
 final class PacketLoggerButtonMonitor {
     var onEdge: ((PacketLoggerButtonParser.Edge) -> Void)?
+    var onTouch: ((RemoteTextTouchFrame) -> Void)?
     var onReset: (() -> Void)?
     private var timer: Timer?
     private var reader: FileHandle?
@@ -63,12 +87,14 @@ final class PacketLoggerButtonMonitor {
     private var labelsUpdated = Date.distantPast
     private var startedAt = Date()
     private var path: String?
+    var isReadingCapture: Bool { reader != nil }
     func pollNow() { if let path { poll(path: path) } }
 
     func start(path: String) {
         guard timer == nil else { return }
         startedAt = Date()
         self.path = path
+        rmDebug("PacketLogger button monitor started: \(path)")
         let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(path: path) }
         }
@@ -89,11 +115,15 @@ final class PacketLoggerButtonMonitor {
             let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
             // PacketLogger truncates names to 17 characters. Ambiguous labels fail closed.
             let allLabels = devices.compactMap { $0.name }.map { String($0.prefix(17)) }
-            labels = Set(devices.compactMap { device -> String? in
+            let updatedLabels = Set(devices.compactMap { device -> String? in
                 guard let name = device.name, name.lowercased().contains("remote") || name.lowercased().contains("siri") else { return nil }
                 let label = String(name.prefix(17))
                 return allLabels.filter { $0 == label }.count == 1 ? label : nil
             })
+            if labels != updatedLabels {
+                labels = updatedLabels
+                rmDebug("PacketLogger button sources: \(labels.sorted())")
+            }
             labelsUpdated = now
         }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
@@ -102,7 +132,14 @@ final class PacketLoggerButtonMonitor {
         }
         if inode != id || size < offset {
             resetReader()
-            reader = FileHandle(forReadingAtPath: path); inode = id
+            inode = id
+        }
+        if reader == nil {
+            // The root supervisor creates the file before chown/chmod. Its inode can
+            // already be visible while open is denied. Retry the same inode next poll.
+            guard let opened = FileHandle(forReadingAtPath: path) else { return }
+            reader = opened
+            rmDebug("PacketLogger button reader opened: inode=\(id) size=\(size)")
         }
         guard let reader, size > offset else { return }
         do {
@@ -120,9 +157,9 @@ final class PacketLoggerButtonMonitor {
             while let end = pending.firstIndex(of: 10) {
                 let line = String(decoding: pending[..<end], as: UTF8.self)
                 pending.removeSubrange(...end)
-                for edge in parser.events(line: line, allowedLabels: labels, now: now) where edge.capturedAt >= startedAt {
-                    onEdge?(edge)
-                }
+                let edges = parser.events(line: line, allowedLabels: labels, now: now)
+                for edge in edges where edge.capturedAt >= startedAt { onEdge?(edge) }
+                if let touch = parser.touch(line: line, allowedLabels: labels, now: now), touch.time >= startedAt { onTouch?(touch) }
             }
             if pending.count > 16384 { pending.removeAll() }
         } catch { resetReader() }

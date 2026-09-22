@@ -429,7 +429,7 @@ private func captureLineTimestamp(_ line: String, year: Int) -> Date? {
 
 // Offline validation reads capture text from stdin without opening an audio device.
 let validateCapture = CommandLine.arguments.contains("--validate-capture")
-let modeFile: String? = CommandLine.arguments.firstIndex(of: "--interaction-mode-file").flatMap {
+let suppressionFile: String? = CommandLine.arguments.firstIndex(of: "--voice-suppression-file").flatMap {
     CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
 }
 
@@ -450,6 +450,7 @@ do {
     var decodedPackets = 0
     var directHIDReports = 0
     var traceFirstPacket = true
+    var voiceSessionGate = VoiceSessionGate()
 
     // PacketLogger replays the Bluetooth stack's buffered history when a capture starts,
     // which would re-decode the previous voice session into the output device. Skip
@@ -471,12 +472,10 @@ do {
                 log("Skipped \(skippedReplayLines) buffered capture lines from before launch")
             }
         }
-        // Passive capture stays alive in Touch. The warm output receives no voice frames;
-        // resetting the parser prevents an old session from crossing back into audio mode.
-        if let modeFile, (try? String(contentsOfFile: modeFile, encoding: .utf8)) != "audio" {
-            parser = SiriRemotePacketParser()
-            continue
-        }
+        // Suppress the whole physical utterance, including its release tail. Removing
+        // the gate cannot resurrect a voice session that began during caret positioning.
+        let voiceBlocked = suppressionFile.map { (try? String(contentsOfFile: $0, encoding: .utf8)) != "enabled" } ?? false
+        voiceSessionGate.update(blocked: voiceBlocked)
         if line.hasPrefix("HID REPORT ") {
             directHIDReports += 1
             if directHIDReports == 1 || directHIDReports % 50 == 0 {
@@ -486,6 +485,8 @@ do {
         for event in parser.events(from: line) {
             switch event {
             case .started:
+                voiceSessionGate.started(blocked: voiceBlocked)
+                guard voiceSessionGate.allowsPackets else { continue }
                 traceFirstPacket = true
                 let received = Date()
                 let age = captureLineTimestamp(line, year: captureYear).map { String(format: "%.1f", received.timeIntervalSince($0) * 1000) } ?? "unknown"
@@ -493,6 +494,7 @@ do {
                 settledOutput?.voiceStarted()
                 log("Voice started")
             case .packet(let packet):
+                guard voiceSessionGate.allowsPackets else { continue }
                 do {
                     if let buffer = try decoder.decode(packet) {
                         if validateCapture, let samples = buffer.floatChannelData?[0] {
@@ -512,6 +514,7 @@ do {
                     log("Error: \(error.localizedDescription)")
                 }
             case .ended:
+                guard voiceSessionGate.allowsPackets else { continue }
                 let received = Date()
                 let age = captureLineTimestamp(line, year: captureYear).map {
                     String(format: "%.1f", received.timeIntervalSince($0) * 1000)

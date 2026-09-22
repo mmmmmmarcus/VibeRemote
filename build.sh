@@ -87,6 +87,9 @@ if [ ! -d "$resource_bundle" ]; then
     echo "Error: SwiftPM did not produce the settings resource bundle"
     exit 1
 fi
+# SwiftPM's native and Xcode build systems use different bundle layouts. Merging
+# them leaves a stale Contents/Resources that NSBundle prefers over fresh flat files.
+rm -rf "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
 ditto "$resource_bundle" "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
 
 if [ "${#app_binaries[@]}" -eq 1 ]; then

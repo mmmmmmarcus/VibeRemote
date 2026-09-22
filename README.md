@@ -20,18 +20,25 @@ paired at the same time and each keeps its own mapping.
 
 - A native settings window with a visual Siri Remote button guide, opened from
   the menu bar's **Settings…** item (also available while the remote is disconnected).
-- Default mappings for navigation, editing and app switching; Siri is customizable.
-  Play/Pause and Mute can each switch between Touch and Audio & Buttons instead of their
-  original action. Changes save immediately. **Reset** restores all three assignments.
+- Settings has a read-only remote diagram with button callouts on the left, and controls
+  for Siri Button and auto disconnect on the right, with a text-cursor usage guide.
+  There is one working configuration: microphone and fixed buttons stay available.
+  Touch no longer moves the mouse, clicks, scrolls, or deletes text.
+  The menu bar retains status, Advanced Menu, Settings and Quit. Settings' ellipsis
+  includes Audio Output and Diagnostics. Only Siri's action is customizable.
+  Aluminum Play/Pause is reserved; Mute opens Advanced Menu.
 - Automatic per-generation button profiles. The 1st-gen remote has no Mute and
   no Power key, so the mute button's two roles move to buttons that do exist:
   holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
   sends Esc) while a TV tap still sends Shift+Enter, and holding Play/Pause
-  types "/" while a tap still toggles the agent client. On both generations,
+  previously provided Skill/client actions; Play/Pause now opens Advanced Menu. On both generations,
   **Siri Button Mapping** applies only to the physical Siri button; the touch
-  surface / clickpad center sends Enter. The remote microphone transmits only
+  surface / clickpad center enters and confirms text-cursor positioning. The remote microphone transmits only
   while the physical Siri button is held.
 - Press-and-hold mappings for Space, Right Command, and Right Option.
+- Back/Menu deletes a word immediately; holding repeats word deletion. Double-click
+  within 300 ms to clear the current editable input on the second release. Both
+  clicks must stay in the same editor; a hold or another remote button cancels the pair.
 - Tap the Skill / Modifier button to type `$` in the focused ChatGPT / Codex desktop
   client or `/` in Claude and other apps. Focus is checked on release; holding the
   button still enables modifier chords. This also applies when Siri is assigned this action.
@@ -166,22 +173,28 @@ each supported Siri Remote generation.
 The VibeRemote source is available under the MIT License. Third-party
 components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Experimental audio delivery and touch mode
+## Text-cursor positioning
 
-Select **Mode → Audio & Buttons / Touch (Experimental)** from the menu bar, or use
-Settings' hand icon. Audio mode retains fixed button mappings and held-Siri capture.
-Touch mode releases all app-owned remote HID/GATT handles and disables voice decoding,
-then attaches to remote-sized MultitouchSupport
-surfaces: slide moves the pointer, tap clicks, two fingers scroll. The modes are
-mutually exclusive and remembered across launches. Hardware behavior must be checked
-with each remote generation; an attached surface alone does not prove touch delivery.
+Press the center button in an accessible focused text field to reveal a thin
+surrogate caret with a four-way-arrow bubble growing from its top. Slide freely in two dimensions; lifting snaps the preview to the nearest visible
+character boundary. Press the center button again to commit the real caret. The real selection
+stays unchanged until confirmation. Siri, Power/Return, typing, clicking, a focus or
+content change cancels positioning. Siri and Return used to exit are consumed; the
+cancelled voice hold and its tail remain muted. The next ordinary Siri hold resumes voice.
+Touching the center lightly shows a larger plain preparation bubble and an opaque stem;
+pressing grows it fully and reveals the direction symbol. Outside positioning,
+touch has no editing or pointer action. No active accessible editor means no overlay.
+Secure fields, active compositions and unsupported caret geometry fail closed.
+The current AX calibration requires existing text; an empty editor does not show a surrogate caret.
+The caret stays inside the editor; its decorative bubble can extend above it.
+The overlay does not activate a window and respects Reduce Motion.
 
-With PacketLogger selected, passive capture remains running in Touch. For aluminum
-remotes, assigned Play/Pause and Mute keys are matched against fresh captured button
-reports before suppressing the corresponding system media events. Unmatched media
-events are forwarded after a bounded 160 ms wait. This remains experimental: simultaneous
-media-key presses from other devices can be ambiguous, and the old remote capture
-format is not supported for switching back. The toolbar mode selector remains available.
+Aluminum touch frames come from the existing passive PacketLogger FC stream, without
+releasing audio HID/GATT handles. The low-level NativeTouch adapter is retained as a
+capability; there is no mouse mapping or Touch/Audio mode switch. Old saved mode and
+pointer-speed settings are ignored. First-generation passive touch decoding is not yet
+implemented. Physical movement direction, center region and target-editor compatibility
+must be tested on each hardware/app combination.
 
 **Audio Output → Direct HAL (Experimental)** sends decoded 48 kHz mono Float32 samples
 through a two-second mmap ring directly into the VibeRemote HAL input callback.
@@ -221,3 +234,31 @@ xcrun clang -isysroot "$(xcrun --show-sdk-path)" -std=c11 -Wall -Wextra -Werror 
   scripts/test_shared_audio.c -o /tmp/viberemote-ring-tests
 /tmp/viberemote-ring-tests
 ```
+
+## App icon
+
+`VibeRemote.icon` is the Icon Composer source for the application icon. Bundle creation
+uses Xcode's `actool` to compile its layers and appearances into `Assets.car` and a
+compatibility `.icns`, then merges the generated icon metadata into `Info.plist`.
+Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
+`Contents/Developer` directory independently of the Swift build toolchain.
+
+## Advanced Menu
+
+Tap the bottom-left remote button (Mute on aluminum remotes; Play/Pause on the
+first generation) to show a glass menu beside the text insertion caret (falling back
+to the mouse pointer if no text caret bounds are available). The menu preserves
+the focused editor. Back clears the input, TV opens the focused app's Skill picker,
+Play/Pause switches Touch / Audio on aluminum remotes, and Volume Up / Down select
+the previous / next Codex or Claude session. A quick menu-button tap leaves the menu
+open; hold it for 250 ms or longer to peek, then release to close. While holding it,
+another action button executes immediately on press. In the latched menu, actions
+execute once on release. Either action closes the menu and consumes the remaining
+releases. Click outside, press Escape, or tap the menu button again to cancel.
+The clickpad, Siri and Power keep their normal behavior. The old remote has four
+menu actions because its Play/Pause is the opener and Siri remains unchanged.
+
+The aluminum remote's auxiliary buttons use captured reports in both modes, sharing
+one action owner with media suppression. Normal audio-mode actions retain the HID
+connection quarantine and idle tracking. Settings always labels the physical opener
+Advanced Menu, overriding a previous mode-switch assignment on that button.

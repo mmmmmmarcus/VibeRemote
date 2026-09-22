@@ -67,7 +67,7 @@ let package = Package(
             ],
             sources: [
                 "main.swift",
-                "RemoteInteractionMode.swift", "RemoteTouchController.swift",
+                "RemoteInputPolicy.swift", "RemoteCaretController.swift",
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
@@ -80,10 +80,11 @@ let package = Package(
                 "RemoteGeneration.swift",
                 "RemoteInputHandler.swift",
                 "ListEditingController.swift",
-                "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift",
+                "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
                 "SystemVolume.swift"
             ],
-            resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png")],
+            resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
+                        .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),

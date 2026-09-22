@@ -5,38 +5,374 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
-    func testRapidModeClicksSurviveDelayedHIDReopening() {
-        var correlation = RemoteMediaEventCorrelation()
-        var presses = RemoteModeSwitchPressTracker()
-        var mode = RemoteInteractionMode.touch
-        var pendingToggles = 0
-        // Three actual clicks arrive while HID opening blocks the main loop. Capture
-        // ingestion runs ahead of deferred NX delivery, as in the observed failure.
-        let edges: [(Double, Bool)] = [(10, true), (10.075, false), (10.2, true),
-                                      (10.275, false), (10.4, true), (10.475, false)]
-        for (time, down) in edges {
-            correlation.record(button: "playPause", pressed: down, sender: 79, now: time)
+    func testBackDoubleClickClearsOnlyAfterSecondReleaseAndDoesNotOverlapPairs() {
+        var state = RemoteBackDoubleClick<String>()
+        for (time, pressed, clears) in [(1.0, true, false), (1.08, false, false),
+                                       (1.2, true, false), (1.28, false, true),
+                                       (1.35, true, false), (1.42, false, false)] {
+            XCTAssertEqual(state.handle(pressed: pressed, source: "remote:back", context: "editor", time: time), clears)
         }
-        for (time, down) in edges {
-            let source = correlation.resolve(button: "playPause", pressed: down, repeating: false, now: time + 0.04)
-            XCTAssertEqual(source, 79)
-            if let source, presses.handle(device: source, button: "playPause", pressed: down, enabled: true) {
-                pendingToggles += 1
-            }
-        }
-        // Apply each release against the then-current mode; never capture a stale target.
-        for _ in 0..<pendingToggles { mode = mode.toggled }
-        XCTAssertEqual(pendingToggles, 3)
-        XCTAssertEqual(mode, .audio)
-        XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: 10.6))
+        XCTAssertFalse(state.handle(pressed: false, source: "remote:back", context: "editor", time: 1.43))
     }
 
+    func testBackDoubleClickRejectsHoldsAndSlowPairs() {
+        // A hold as either click must never clear, even when its release arrives
+        // close to the other click. Physical timestamps survive batched delivery.
+        for times in [[1.0, 1.6, 1.7, 1.8], [1.0, 1.1, 1.2, 1.8], [1.0, 1.1, 1.5, 1.6]] {
+            var state = RemoteBackDoubleClick<String>()
+            for (index, time) in times.enumerated() {
+                XCTAssertFalse(state.handle(pressed: index % 2 == 0, source: "a:back", context: "editor", time: time))
+            }
+        }
+    }
+
+    func testBackDoubleClickRequiresSameRemoteButtonAndFocusedEditor() {
+        for (source, editor) in [("b:back", "editor"), ("a:menu", "editor"), ("a:back", "other editor")] {
+            var state = RemoteBackDoubleClick<String>()
+            XCTAssertFalse(state.handle(pressed: true, source: "a:back", context: "editor", time: 1))
+            XCTAssertFalse(state.handle(pressed: false, source: "a:back", context: "editor", time: 1.1))
+            XCTAssertFalse(state.handle(pressed: true, source: source, context: editor, time: 1.2))
+            XCTAssertFalse(state.handle(pressed: false, source: source, context: editor, time: 1.3))
+        }
+        var state = RemoteBackDoubleClick<String>()
+        _ = state.handle(pressed: true, source: "a", context: "editor", time: 1)
+        _ = state.handle(pressed: false, source: "a", context: "editor", time: 1.1)
+        _ = state.handle(pressed: true, source: "a", context: "editor", time: 1.2)
+        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "other editor", time: 1.3))
+    }
+
+    func testBackDoubleClickResetsForInterruptionDisconnectAndMissingEditor() {
+        for missingEditor in [false, true] {
+            var state = RemoteBackDoubleClick<String>()
+            _ = state.handle(pressed: true, source: "a", context: "editor", time: 1)
+            _ = state.handle(pressed: false, source: "a", context: "editor", time: 1.1)
+            if missingEditor {
+                XCTAssertFalse(state.handle(pressed: true, source: "a", context: nil, time: 1.15))
+            } else { state.reset() }
+            _ = state.handle(pressed: true, source: "a", context: "editor", time: 1.2)
+            XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 1.3))
+        }
+    }
+
+    func testBackDoubleClickCannotShortenHoldWithDuplicateDownOrReversedClock() {
+        var state = RemoteBackDoubleClick<String>()
+        for (pressed, time) in [(true, 1.0), (true, 1.55), (false, 1.6), (true, 1.7), (false, 1.8)] {
+            XCTAssertFalse(state.handle(pressed: pressed, source: "a", context: "editor", time: time))
+        }
+        XCTAssertFalse(state.handle(pressed: true, source: "a", context: "editor", time: 1.5))
+        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 1.4))
+        XCTAssertFalse(state.handle(pressed: true, source: "a", context: "editor", time: .infinity))
+        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 2))
+    }
+
+    func testMuteRevertWindowIsBoundedAndDoesNotSuppressVolumeKeys() {
+        var suppression = RemoteVolumeSuppression()
+        let now = Date(timeIntervalSince1970: 100)
+        suppression.update(button: "mute", pressed: true, now: now)
+        XCTAssertTrue(suppression.contains("mute", now: now.addingTimeInterval(1)))
+        XCTAssertFalse(suppression.isActive(now: now))
+        suppression.update(button: "mute", pressed: false, now: now.addingTimeInterval(1))
+        XCTAssertTrue(suppression.contains("mute", now: now.addingTimeInterval(1.4)))
+        XCTAssertFalse(suppression.contains("mute", now: now.addingTimeInterval(1.6)))
+        suppression.update(button: "mute", pressed: true, now: now)
+        XCTAssertFalse(suppression.contains("mute", now: now.addingTimeInterval(31)))
+    }
+    func testAdvancedSessionShortcutsUseCommandShiftBrackets() throws {
+        for (action, code) in [(AdvancedMenuAction.previousSession, kVK_ANSI_LeftBracket), (.nextSession, kVK_ANSI_RightBracket)] {
+            let shortcut = RemoteInputHandler.sessionShortcut(action)
+            let event = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: shortcut.keyCode, flags: shortcut.flags, keyDown: true))
+            XCTAssertEqual(event.getIntegerValueField(.keyboardEventKeycode), Int64(code))
+            XCTAssertEqual(event.flags, [.maskCommand, .maskShift])
+        }
+    }
+
+    func testAdvancedMenuRoutesOnlyFiveActionsAndPreservesExcludedKeys() {
+        var state = AdvancedMenuInputState()
+        let generation = RemoteGeneration.aluminumClickpad
+        XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: generation, time: 1).command, .showMenu)
+        XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: generation, time: 1.1).command)
+        state.show(owner: "a")
+        for button in ["siri", "power", "select", "navUp", "navDown", "navLeft", "navRight"] {
+            XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
+        }
+        for (button, action) in [("back", AdvancedMenuAction.deleteAll), ("tv", .skill), ("volumeUp", .previousSession), ("volumeDown", .nextSession)] {
+            XCTAssertTrue(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
+            XCTAssertNil(state.handle(button: button, pressed: true, device: "a", generation: generation).command)
+            XCTAssertFalse(state.handle(button: button, pressed: false, device: "b", generation: generation).consumed)
+            XCTAssertEqual(state.handle(button: button, pressed: false, device: "a", generation: generation).command, .perform(action))
+            XCTAssertNil(state.handle(button: button, pressed: false, device: "a", generation: generation).command)
+        }
+        XCTAssertEqual(AdvancedMenuInputState.trigger(for: .glassTouchSurface), "playPause")
+        XCTAssertNil(AdvancedMenuInputState.action(button: "siri", generation: .glassTouchSurface))
+    }
+
+    func testAdvancedMenuCancelledPressCannotExecuteInLaterPresentation() {
+        var state = AdvancedMenuInputState()
+        state.show(owner: "a")
+        XCTAssertTrue(state.handle(button: "back", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+        state.dismiss(); state.show(owner: "a")
+        let release = state.handle(button: "back", pressed: false, device: "a", generation: .aluminumClickpad)
+        XCTAssertTrue(release.consumed); XCTAssertNil(release.command)
+        state.dismiss()
+        XCTAssertFalse(state.handle(button: "tv", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+    }
+
+    func testAdvancedMenuHoldAndChordConsumeEitherReleaseOrder() {
+        for triggerReleasedFirst in [false, true] {
+            var state = AdvancedMenuInputState()
+            XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 10).command, .showMenu)
+            XCTAssertEqual(state.handle(button: "tv", pressed: true, device: "a", generation: .aluminumClickpad, time: 10.4).command, .perform(.skill))
+            state.dismiss() // the controller closes after executing the chord
+            for button in triggerReleasedFirst ? ["mute", "tv"] : ["tv", "mute"] {
+                let result = state.handle(button: button, pressed: false, device: "a", generation: .aluminumClickpad, time: 10.6)
+                XCTAssertTrue(result.consumed); XCTAssertNil(result.command)
+            }
+            XCTAssertFalse(state.isVisible)
+        }
+    }
+
+    func testAdvancedMenuHoldClosesButTapLatchesUsingCaptureTime() {
+        var state = AdvancedMenuInputState()
+        // The callbacks may run in the same main-loop turn; physical timestamps own duration.
+        _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 10)
+        XCTAssertEqual(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 12).command, .dismissMenu)
+        state.dismiss()
+        _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 13)
+        XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 13.1).command)
+        XCTAssertTrue(state.isVisible)
+        _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 14)
+        XCTAssertEqual(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 14.1).command, .dismissMenu)
+        state.dismiss()
+        _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 15)
+        state.dismiss(); state.show(owner: "b")
+        XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 16).command)
+        XCTAssertTrue(state.isVisible)
+    }
+
+    @MainActor
+    func testMenuShadowMeetsGlassEdgeWithoutAnExteriorGlowGap() throws {
+        let view = AdvancedMenuController.ShadowView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        view.buttonFrames = [NSRect(x: 32, y: 32, width: 36, height: 36)]
+        let image = NSImage(size: view.bounds.size, flipped: true) { rect in
+            MainActor.assumeIsolated { view.draw(rect) }; return true
+        }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(image.tiffRepresentation)))
+        let alpha = (0..<100).map { bitmap.colorAt(x: 50, y: $0)?.alphaComponent ?? 0 }
+        XCTAssertGreaterThan(alpha.max() ?? 0, 0.02, "Shadow must produce visible pixels")
+        XCTAssertLessThan(alpha.max() ?? 0, 0.23, "Keep the shadow subtle")
+        XCTAssertGreaterThan(alpha[68], 0.04, "Shadow must meet the lower edge, without a bright moat")
+        // Skip the antialiased edge pixel; the exterior must immediately taper.
+        for y in 70..<88 {
+            XCTAssertLessThanOrEqual(alpha[y], alpha[y - 1] + 0.005,
+                                     "Shadow must fade outward, not darken after an exterior gap")
+        }
+        for y in 32..<68 {
+            XCTAssertLessThan(alpha[y], 0.01, "Shadow must not tint the glass interior")
+        }
+        let above = alpha[0..<32].reduce(0, +)
+        let below = alpha[68..<100].reduce(0, +)
+        XCTAssertGreaterThan(below, above, "The shadow should fall below the menu")
+        if let path = ProcessInfo.processInfo.environment["VIBEREMOTE_SHADOW_RENDER"] {
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    @MainActor
+    func testMenuShadowKeepsAllFiveGlassSurfacesTransparent() throws {
+        let view = AdvancedMenuController.ShadowView(frame: NSRect(origin: .zero, size: AdvancedMenuController.menuSize))
+        view.buttonFrames = [NSRect(x: 40, y: 40, width: 36, height: 36),
+                             NSRect(x: 84, y: 40, width: 36, height: 36),
+                             NSRect(x: 40, y: 84, width: 36, height: 36),
+                             NSRect(x: 40, y: 128, width: 36, height: 36),
+                             NSRect(x: 84, y: 84, width: 36, height: 80)]
+        let image = NSImage(size: view.bounds.size, flipped: true) { rect in
+            MainActor.assumeIsolated { view.draw(rect) }; return true
+        }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(image.tiffRepresentation)))
+        for frame in view.buttonFrames {
+            for y in Int(frame.minY + 2)..<Int(frame.maxY - 2) {
+                let alpha = try XCTUnwrap(bitmap.colorAt(x: Int(frame.midX), y: y)).alphaComponent
+                XCTAssertLessThan(alpha, 0.01, "Adjacent buttons must not cast through clear glass")
+            }
+        }
+    }
+
+    @MainActor
+    func testMenuAppearanceScalesEveryButtonFromScreenCaretAcrossFlippedLayers() throws {
+        final class FlippedView: NSView { override var isFlipped: Bool { true } }
+        let bounds = CGRect(origin: .zero, size: AdvancedMenuController.menuSize)
+        for view in [NSView(frame: bounds), FlippedView(frame: bounds)] {
+            let window = NSWindow(contentRect: bounds.offsetBy(dx: 500, dy: 400), styleMask: .borderless,
+                                  backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            window.contentView = AdvancedMenuController.animationHost(containing: view)
+            window.displayIfNeeded()
+            let layer = try XCTUnwrap(view.layer)
+            let parent = try XCTUnwrap(layer.superlayer)
+            // Include a source outside the panel, as happens after screen-edge clamping.
+            for caret in [CGPoint(x: 512, y: 412), CGPoint(x: 650, y: 700)] {
+                let geometry = try XCTUnwrap(AdvancedMenuController.appearanceGeometry(in: view, caretOnScreen: caret))
+                let inView = view.convert(window.convertPoint(fromScreen: caret), from: nil)
+                let localCaret = view.convertToLayer(inView)
+                let points = [localCaret, view.convertToLayer(CGPoint(x: 58, y: 58)),
+                              view.convertToLayer(CGPoint(x: 102, y: 124)),
+                              view.convertToLayer(CGPoint(x: 58, y: 146))]
+                let final = points.map { layer.convert($0, to: parent) }
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                layer.transform = CATransform3DMakeScale(AdvancedMenuController.appearanceStartScale,
+                                                       AdvancedMenuController.appearanceStartScale, 1)
+                layer.position = geometry.start
+                for (index, point) in points.enumerated() {
+                    let actual = layer.convert(point, to: parent)
+                    let expected = CGPoint(x: geometry.caret.x + 0.20 * (final[index].x - geometry.caret.x),
+                                           y: geometry.caret.y + 0.20 * (final[index].y - geometry.caret.y))
+                    XCTAssertEqual(actual.x, expected.x, accuracy: 0.001)
+                    XCTAssertEqual(actual.y, expected.y, accuracy: 0.001)
+                }
+                layer.transform = CATransform3DIdentity; layer.position = geometry.end
+                CATransaction.commit()
+            }
+        }
+    }
+
+    @MainActor
+    func testMenuDismissalReversesFromPartialEntranceTowardOriginalCaret() throws {
+        let layer = CALayer()
+        layer.opacity = 0.6
+        layer.transform = CATransform3DMakeScale(0.55, 0.55, 1)
+        layer.position = CGPoint(x: 14, y: 85)
+        let destination = CGPoint(x: 22.4, y: 148)
+        _ = AdvancedMenuController.animateDismissal(layer: layer, destination: destination, reduceMotion: false)
+        let group = try XCTUnwrap(layer.animation(forKey: "dismissal.toCaret") as? CAAnimationGroup)
+        let animations = try XCTUnwrap(group.animations).compactMap { $0 as? CABasicAnimation }
+        let scale = try XCTUnwrap(animations.first { $0.keyPath == "transform" })
+        XCTAssertEqual(try XCTUnwrap(scale.fromValue as? NSValue).caTransform3DValue.m11, 0.55, accuracy: 0.001)
+        XCTAssertEqual(layer.transform.m11, AdvancedMenuController.appearanceStartScale, accuracy: 0.001)
+        let move = try XCTUnwrap(animations.first { $0.keyPath == "position" })
+        XCTAssertEqual(try XCTUnwrap(move.fromValue as? NSValue).pointValue, CGPoint(x: 14, y: 85))
+        XCTAssertEqual(layer.position, destination)
+        XCTAssertEqual(layer.opacity, 0, "The final model state cannot flash back before window cleanup")
+        XCTAssertTrue(animations.allSatisfy { $0.duration == group.duration })
+    }
+
+    @MainActor
+    func testMenuDismissalWithReduceMotionOnlyFades() throws {
+        let layer = CALayer()
+        layer.position = CGPoint(x: 30, y: 40)
+        _ = AdvancedMenuController.animateDismissal(layer: layer, destination: .zero, reduceMotion: true)
+        let group = try XCTUnwrap(layer.animation(forKey: "dismissal.toCaret") as? CAAnimationGroup)
+        XCTAssertEqual(group.animations?.compactMap { ($0 as? CABasicAnimation)?.keyPath }, ["opacity"])
+        XCTAssertEqual(layer.position, CGPoint(x: 30, y: 40))
+        XCTAssertTrue(CATransform3DIsIdentity(layer.transform))
+        XCTAssertEqual(layer.opacity, 0)
+    }
+
+    @MainActor
+    func testAdvancedMenuPositionUsesContainingScreen() {
+        let screen = NSRect(x: -1920, y: 200, width: 1920, height: 1080)
+        for cursor in [NSPoint(x: -1920, y: 200), NSPoint(x: -1, y: 1279)] {
+            let frame = AdvancedMenuController.frame(anchor: NSRect(origin: cursor, size: NSSize(width: 0, height: 18)), size: AdvancedMenuController.menuSize, screen: screen)
+            XCTAssertTrue(screen.contains(frame))
+        }
+    }
+
+    func testMenuAnchorPrefersTextAndFallsBackToMouseWithoutCoordinateFlip() {
+        let mouse = NSPoint(x: -600, y: 1560)
+        let fallback = AdvancedMenuTextAnchor.presentationRect(textAnchor: nil, mouseLocation: mouse, primaryScreenTop: 1080)
+        XCTAssertEqual(fallback.origin, mouse)
+        XCTAssertEqual(fallback.size, .zero)
+        let text = AdvancedMenuTextAnchor(rect: CGRect(x: 400, y: 300, width: 0, height: 20), source: "caret")
+        XCTAssertEqual(AdvancedMenuTextAnchor.presentationRect(textAnchor: text, mouseLocation: mouse, primaryScreenTop: 1080),
+                       CGRect(x: 400, y: 760, width: 0, height: 20))
+    }
+
+    func testTextAnchorConvertsGlobalAXCoordinatesAcrossDisplays() {
+        XCTAssertEqual(AdvancedMenuTextAnchor.appKitRect(CGRect(x: 400, y: 300, width: 0, height: 20), primaryScreenTop: 1080),
+                       CGRect(x: 400, y: 760, width: 0, height: 20))
+        // A display above and left of the primary retains its negative X and uses the
+        // primary's top edge, not its own height, for the accessibility conversion.
+        XCTAssertEqual(AdvancedMenuTextAnchor.appKitRect(CGRect(x: -600, y: -500, width: 1, height: 20), primaryScreenTop: 1080),
+                       CGRect(x: -600, y: 1560, width: 1, height: 20))
+    }
+
+    @MainActor
+    func testAdvancedMenuBottomLeftIsAdjacentToCaretAndFallsBelowAtTop() {
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = AdvancedMenuController.menuSize
+        let padding = AdvancedMenuController.contentPadding
+        let caret = NSRect(x: 500, y: 500, width: 0, height: 20)
+        let above = AdvancedMenuController.frame(anchor: caret, size: size, screen: screen)
+        XCTAssertEqual(above.minX + padding, caret.minX + 12)
+        XCTAssertEqual(above.minY + padding, caret.maxY + 12)
+        XCTAssertTrue(screen.contains(above))
+        let highCaret = NSRect(x: 500, y: 820, width: 0, height: 20)
+        let below = AdvancedMenuController.frame(anchor: highCaret, size: size, screen: screen)
+        XCTAssertEqual(below.maxY - padding, highCaret.minY - 12)
+        XCTAssertTrue(screen.contains(below))
+    }
+
+    func testMediaClockNormalizesObservedAppleSiliconMuteTimestamps() throws {
+        // Real failure: dividing this tick timestamp by 1e9 gave 7486 seconds,
+        // while PacketLogger markers were around 311937 seconds of uptime.
+        let original = try XCTUnwrap(RemoteMediaEventClock.uptime(timestamp: 7_486_496_355_098,
+            now: 311937.575413, numer: 125, denom: 3))
+        XCTAssertEqual(original, 311937.348129, accuracy: 0.000001)
+        var correlation = RemoteMediaEventCorrelation()
+        correlation.record(button: "mute", pressed: true, sender: 78, now: original - 0.004)
+        XCTAssertEqual(correlation.resolve(button: "mute", pressed: true, repeating: false, now: original), 78)
+        XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: original + 0.5))
+    }
+
+    func testMediaClockPreservesBothUnitsAndOriginalTimeAcrossMainLoopStalls() throws {
+        let eventTime = 312000.25
+        for delay in [0.02, 2.0] {
+            for numerator: UInt32 in [1, 125] {
+                let denominator: UInt32 = numerator == 1 ? 1 : 3
+                for raw in [UInt64(eventTime * 1e9), UInt64(eventTime * 1e9 * Double(denominator) / Double(numerator))] {
+                    let normalized = try XCTUnwrap(RemoteMediaEventClock.uptime(timestamp: raw,
+                        now: eventTime + delay, numer: numerator, denom: denominator))
+                    XCTAssertEqual(normalized, eventTime, accuracy: 0.000001)
+                }
+            }
+        }
+        XCTAssertNil(RemoteMediaEventClock.uptime(timestamp: UInt64(eventTime * 1e9), now: eventTime + 4, numer: 125, denom: 3))
+        XCTAssertNil(RemoteMediaEventClock.uptime(timestamp: UInt64(eventTime * 1e9), now: eventTime - 1, numer: 125, denom: 3))
+    }
+
+
+
     func testPassiveModeKeyOwnershipDoesNotDependOnHIDQuarantine() {
-        XCTAssertTrue(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: true))
-        XCTAssertTrue(RemoteModeSwitchMapping.usesPassiveCapture(generation: .unknown, packetLogger: true, mediaTap: true))
-        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .glassTouchSurface, packetLogger: true, mediaTap: true))
-        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: false, mediaTap: true))
-        XCTAssertFalse(RemoteModeSwitchMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: false))
+        XCTAssertTrue(RemoteButtonMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: true))
+        XCTAssertTrue(RemoteButtonMapping.usesPassiveCapture(generation: .unknown, packetLogger: true, mediaTap: true))
+        XCTAssertFalse(RemoteButtonMapping.usesPassiveCapture(generation: .glassTouchSurface, packetLogger: true, mediaTap: true))
+        XCTAssertFalse(RemoteButtonMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: false, mediaTap: true))
+        XCTAssertFalse(RemoteButtonMapping.usesPassiveCapture(generation: .aluminumClickpad, packetLogger: true, mediaTap: false))
+    }
+
+    @MainActor
+    func testPacketLoggerReaderRetriesSameInodeAfterPermissionHandoff() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("VibeRemoteCapture-\(UUID().uuidString)")
+        try Data().write(to: file)
+        let monitor = PacketLoggerButtonMonitor()
+        defer {
+            monitor.stop()
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            try? FileManager.default.removeItem(at: file)
+        }
+        let inode = try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? UInt64
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file.path)
+        monitor.start(path: file.path)
+        monitor.pollNow()
+        XCTAssertFalse(monitor.isReadingCapture)
+        // Same file, now handed to the app by the supervisor. No replacement/truncation
+        // event is available to trigger recovery from the initial denied open.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? UInt64, inode)
+        monitor.pollNow()
+        XCTAssertTrue(monitor.isReadingCapture)
+        monitor.stop()
+        XCTAssertFalse(monitor.isReadingCapture)
     }
 
     func testPacketLoggerButtonMasksSourceAndReplayFiltering() throws {
@@ -62,6 +398,14 @@ final class ModelTests: XCTestCase {
         var delayed = PacketLoggerButtonParser()
         XCTAssertEqual(delayed.events(line: line("00 01"), allowedLabels: ["Marcus Siri Remot"], now: now.addingTimeInterval(1)).count, 1)
         XCTAssertTrue(delayed.events(line: line("00 00"), allowedLabels: ["Marcus Siri Remot"], now: now.addingTimeInterval(4)).isEmpty)
+        var auxiliary = PacketLoggerButtonParser()
+        let six = auxiliary.events(line: line("C7 01"), allowedLabels: ["Marcus Siri Remot"], now: now)
+        XCTAssertEqual(Set(six.map(\.button)), Set(["back", "tv", "playPause", "mute", "volumeUp", "volumeDown"]))
+        XCTAssertTrue(six.allSatisfy(\.pressed))
+        XCTAssertEqual(six.first?.button, "mute", "A same-report chord must establish the menu first")
+        let released = auxiliary.events(line: line("00 00"), allowedLabels: ["Marcus Siri Remot"], now: now)
+        XCTAssertEqual(released.count, 6); XCTAssertTrue(released.allSatisfy { !$0.pressed })
+        XCTAssertEqual(released.last?.button, "mute")
         let play = feed(line("00 01"))
         XCTAssertEqual(play.map(\.button), ["playPause"])
         XCTAssertEqual(play.map(\.pressed), [true])
@@ -100,38 +444,18 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: 3.3))
     }
 
-    func testModeSwitchMappingsPreserveDefaultsAndOnlyAllowPlayAndMute() throws {
-        let suite = "VibeRemoteTests.ModeSwitch.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        XCTAssertEqual(RemoteModeSwitchMapping.load(from: defaults), [])
-        defaults.set(["siri", "playPause", "mute", "back"], forKey: RemoteModeSwitchMapping.defaultsKey)
-        XCTAssertEqual(RemoteModeSwitchMapping.load(from: defaults), ["playPause", "mute"])
-        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
-            let baseline = generation.action(for: "playPause", defaultAction: .launchAgentClient, siriAction: .rightOpt)
-            XCTAssertEqual(RemoteModeSwitchMapping.action(button: "playPause", defaultAction: baseline, enabled: []), baseline)
-            XCTAssertEqual(RemoteModeSwitchMapping.action(button: "playPause", defaultAction: baseline, enabled: ["playPause"]), .toggleInteractionMode)
+    func testOnlySiriIsCustomizableAndReservedPlayCannotBecomeAMediaKey() {
+        for siri in ButtonAction.allCases.filter(\.isAssignableToSiriButton) {
+            XCTAssertEqual(RemoteButtonMapping.action(button: "siri", generation: .aluminumClickpad, siriAction: siri), siri)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .aluminumClickpad, siriAction: siri), .none)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .aluminumClickpad, siriAction: siri), .advancedMenu)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "power", generation: .aluminumClickpad, siriAction: siri), .enterKey)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .glassTouchSurface, siriAction: siri), .advancedMenu)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .glassTouchSurface, siriAction: siri), .none)
         }
-        XCTAssertEqual(RemoteModeSwitchMapping.action(button: "siri", defaultAction: .rightOpt, enabled: ["siri"]), .rightOpt)
-        XCTAssertFalse(ButtonAction.toggleInteractionMode.isAssignableToSiriButton)
-        XCTAssertEqual(RemoteInteractionMode.audio.toggled, .touch)
-        XCTAssertEqual(RemoteInteractionMode.touch.toggled, .audio)
     }
 
-    func testModeSwitchFiresOnceOnCompletePressAndClearsAcrossModes() {
-        var tracker = RemoteModeSwitchPressTracker()
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 2, button: "mute", pressed: false, enabled: true))
-        XCTAssertTrue(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 1, button: "playPause", pressed: true, enabled: true))
-        tracker.reset()
-        XCTAssertFalse(tracker.handle(device: 1, button: "playPause", pressed: false, enabled: true))
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: true, enabled: false))
-        XCTAssertFalse(tracker.handle(device: 1, button: "mute", pressed: false, enabled: true))
-    }
+
     func testIdleDisconnectReconnectRecoversUnchangedHIDServices() {
         let first = "60:BE:C4:02:EB:CC"
         let second = "48:A9:1C:91:77:5C"
@@ -183,20 +507,13 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(RemoteInterfaceRecovery.bluetoothAddress("junk60:BE:C4:02:EB:CC"))
     }
 
-    func testTouchGestureDoesNotClickAfterMovingOrChangingContactCount() {
-        var gesture = RemoteTouchGesture()
-        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 1))
-        XCTAssertEqual(gesture.frame(count: 0, x: 0, y: 0, time: 1.1), .click)
-        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 2))
-        XCTAssertNotNil(gesture.frame(count: 1, x: 0.6, y: 0.5, time: 2.1))
-        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 2.2))
-        XCTAssertNil(gesture.frame(count: 2, x: 0.5, y: 0.5, time: 3))
-        XCTAssertNil(gesture.frame(count: 1, x: 0.5, y: 0.5, time: 3.1))
-        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 3.2))
-        XCTAssertNil(gesture.frame(count: 1, x: 0.1, y: 0.1, time: 4))
-        XCTAssertNil(gesture.frame(count: 1, x: 0.9, y: 0.9, time: 4.1))
-        XCTAssertNil(gesture.frame(count: 0, x: 0, y: 0, time: 4.2))
-    }
+
+
+
+
+
+
+
 
     func testRemoteIdleTimeoutOptionsAndDefault() {
         XCTAssertEqual(RemoteIdleTimeout.defaultValue, .fiveMinutes)
@@ -390,13 +707,11 @@ final class ModelTests: XCTestCase {
     func testSettingsNativeControlsAndWindowLifetime() throws {
         _ = NSApplication.shared
         var chosenAction: ButtonAction?
-        var chosenModeSwitch: String?
         var resets = 0
         let controller = SettingsWindowController(
             snapshot: RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt),
             setSiriAction: { chosenAction = $0 },
-            resetSiriAction: { resets += 1 },
-            setModeSwitch: { button, enabled in chosenModeSwitch = enabled ? button : nil }
+            resetSiriAction: { resets += 1 }
         )
         let window = try XCTUnwrap(controller.window)
         let frame = try XCTUnwrap(window.contentView?.superview)
@@ -411,7 +726,7 @@ final class ModelTests: XCTestCase {
         let mappingKeys = Set(remoteButtonDescriptors.map(\.key))
         let controls = descendants(frame).compactMap { $0 as? NSPopUpButton }
             .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
-        XCTAssertEqual(controls.count, 8)
+        XCTAssertEqual(controls.count, 1)
         let siri = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "siri" })
         XCTAssertEqual(siri.numberOfItems, ButtonAction.allCases.filter(\.isAssignableToSiriButton).count)
         XCTAssertNil(siri.item(withTitle: ButtonAction.shiftEnterOrModifier.settingsTitle))
@@ -419,30 +734,13 @@ final class ModelTests: XCTestCase {
         siri.selectItem(withTitle: ButtonAction.rightCmd.settingsTitle)
         NSApp.sendAction(try XCTUnwrap(siri.action), to: siri.target, from: siri)
         XCTAssertEqual(chosenAction, .rightCmd)
-        let power = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "power" })
-        XCTAssertEqual(power.itemTitles, [ButtonAction.enterKey.actionDescription])
-        XCTAssertEqual((power.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.enterKey.settingsTitle)
-        NSApp.sendAction(try XCTUnwrap(power.action), to: power.target, from: power)
-        XCTAssertEqual(chosenAction, .rightCmd, "Fixed mappings must not change the Siri mapping")
-        for key in ["playPause", "mute"] {
-            let control = try XCTUnwrap(controls.first { $0.identifier?.rawValue == key })
-            XCTAssertEqual(control.numberOfItems, 2)
-            control.selectItem(withTitle: ButtonAction.toggleInteractionMode.settingsTitle)
-            NSApp.sendAction(try XCTUnwrap(control.action), to: control.target, from: control)
-            XCTAssertEqual(chosenModeSwitch, key)
-        }
-
+        XCTAssertEqual(Set(controls.compactMap { $0.identifier?.rawValue }), ["siri"])
         controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: .glassTouchSurface))
         frame.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         let oldControls = descendants(frame).compactMap { $0 as? NSPopUpButton }
-        XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), Set(["back", "select", "tv", "siri", "playPause", "volumeUp", "volumeDown"]))
-        let tv = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "tv" })
-        let playPause = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "playPause" })
-        XCTAssertEqual(tv.titleOfSelectedItem, ButtonAction.shiftEnterOrModifier.actionDescription)
-        XCTAssertEqual(playPause.titleOfSelectedItem, ButtonAction.agentClientOrSlash.settingsTitle)
-        XCTAssertEqual((tv.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.shiftEnterOrModifier.settingsTitle)
-        XCTAssertEqual((playPause.cell as? NSPopUpButtonCell)?.menuItem?.title, ButtonAction.agentClientOrSlash.settingsTitle)
+            .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
+        XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), ["siri"])
 
         let more = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "VibeRemote.MoreSettings" } as? NSMenuToolbarItem)
         let reset = try XCTUnwrap(more.menu.items.first { $0.identifier?.rawValue == "VibeRemote.ResetSettings" })
@@ -489,6 +787,8 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(newer.left.contains { $0.key == "mute" })
         XCTAssertTrue(newer.right.contains { $0.key == "power" })
     }
+
+
 
     func testSettingsNeverShowAStaleBatteryAsAConnection() {
         var snapshot = RemoteSettingsSnapshot(connected: false, batteryPercent: 59, siriAction: .spaceKey)

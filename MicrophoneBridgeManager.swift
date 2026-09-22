@@ -169,7 +169,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private var helperLogPath: String { runtimePath("voice-helper.log") }
     private var packetLoggerLogPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerLog) }
     var buttonCapturePath: String { packetCapturePath }
-    private var interactionModePath: String { runtimePath("interaction-mode") }
+    private var voiceSuppressed = false
+    private var voiceSuppressionPath: String { runtimePath("voice-suppression") }
     private var packetCapturePath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetCapture) }
     private var directHIDCapturePath: String { runtimePath("direct-hid-audio.log") }
     private var packetLoggerSessionPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerSession) }
@@ -541,7 +542,6 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func startLocked(allowAdministratorPrompt: Bool = true) {
-        guard RemoteInteractionMode.load() == .audio || UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" else { wantsBridgeRunning = false; return }
         // macOS's IOHID proxy never delivers Siri Remote 0xFA audio reports to user space,
         // so the PacketLogger capture bridge remains the only working audio path. The
         // Direct HID engine stays the default while that conclusion is revalidated;
@@ -552,7 +552,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             return
         }
         appendAppLog("Direct HID microphone bridge start requested")
-        guard prepareRuntimeDirectory() else { return }
+        guard prepareRuntimeDirectory(), writePrivateFile(voiceSuppressed ? "blocked" : "enabled", at: voiceSuppressionPath) else { return }
 
         if isRunningLocked() {
             if let outputDeviceName = preferredOutputDeviceName() {
@@ -600,7 +600,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         _ = fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
         let helperCommand = """
-        exec \(shellEscape(helper)) >> \(shellEscape(helperLogPath)) 2>&1
+        exec \(shellEscape(helper)) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) >> \(shellEscape(helperLogPath)) 2>&1
         """
         let helperRunner = Process()
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -646,15 +646,15 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     /// Direct HID framing is validated. The normal menu flow never calls this method.
     private func startPacketLoggerBridgeLocked(allowAdministratorPrompt: Bool = true) {
         appendAppLog("Microphone bridge start requested")
-        guard prepareRuntimeDirectory(), writePrivateFile(RemoteInteractionMode.load().rawValue, at: interactionModePath) else { return }
+        guard prepareRuntimeDirectory(), writePrivateFile(voiceSuppressed ? "blocked" : "enabled", at: voiceSuppressionPath) else { return }
 
         if isRunningLocked() {
             if let outputDeviceName = preferredOutputDeviceName() {
-                if RemoteInteractionMode.load() == .audio {
+                do {
                     guard captureDefaultInputDevice(), setDefaultInputDevice(named: outputDeviceName) else {
-                        setLastError("Could not select the microphone after changing mode."); return
+                        setLastError("Could not select the VibeRemote microphone."); return
                     }
-                } else { restoreDefaultInputDevice() }
+                }
                 bridgeReady = livePacketLoggerIdentity() != nil
                 clearLastError()
                 appendAppLog("Microphone bridge already running")
@@ -727,7 +727,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // needs elevated privileges; running the whole pipeline as root prevents audio
         // from reaching the user's BlackHole device reliably.
         let helperCommand = """
-        exec \(escapedHelper) \(sharedAudioArguments()) --interaction-mode-file \(shellEscape(interactionModePath)) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
+        exec \(escapedHelper) \(sharedAudioArguments()) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
         """
         let helperRunner = Process()
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -792,7 +792,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             removeBridgeFIFOs()
             return
         }
-        if RemoteInteractionMode.load() == .audio {
+        do {
             guard captureDefaultInputDevice() else {
                 setLastError("Could not save the current default input device for later restoration.")
                 stopLocked()
@@ -965,23 +965,14 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    /// Keep passive HCI capture alive across mode changes, without reclaiming HID/GATT.
-    func interactionModeChanged() {
-        workQueue.async { [weak self] in
-            guard let self else { return }
-            guard self.prepareRuntimeDirectory(), self.writePrivateFile(RemoteInteractionMode.load().rawValue, at: self.interactionModePath) else {
-                self.stopLocked(); return
-            }
-            if RemoteInteractionMode.load() == .touch { self.restoreDefaultInputDevice() }
-            if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") != "packetlogger", RemoteInteractionMode.load() == .touch {
-                self.wantsBridgeRunning = false; self.stopLocked(); return
-            }
-            self.wantsBridgeRunning = true
-            if self.isRunningLocked() {
-                self.startLocked(allowAdministratorPrompt: false)
-            } else {
-                self.retrySchedule.reset()
-                self.attemptAutomaticStartLocked(reason: "interaction mode changed")
+    /// Suppress voice output during caret positioning without reopening remote interfaces.
+
+
+    func setVoiceSuppressed(_ suppressed: Bool) {
+        syncOnWorkQueue {
+            voiceSuppressed = suppressed
+            if prepareRuntimeDirectory() {
+                _ = writePrivateFile(suppressed ? "blocked" : "enabled", at: voiceSuppressionPath)
             }
         }
     }
@@ -1018,7 +1009,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let since = self.healthySince, Date().timeIntervalSince(since) >= 60 {
                 self.retrySchedule.reset()
             }
-            if RemoteInteractionMode.load() == .audio, let outputDeviceName = self.preferredOutputDeviceName(),
+            if let outputDeviceName = self.preferredOutputDeviceName(),
                self.defaultInputDeviceName() != outputDeviceName {
                 _ = self.setDefaultInputDevice(named: outputDeviceName)
             }

@@ -84,7 +84,8 @@ final class RemoteInputHandler {
 
     /// Which remote family is currently attached. Drives the button profile and the
     /// microphone path; `.unknown` until at least one interface is open.
-    var usesPassiveModeSwitch: ((RemoteGeneration) -> Bool)?
+    var onAdvancedButton: ((String, Bool, String, RemoteGeneration) -> Bool)?
+    var usesPassiveButtonCapture: ((RemoteGeneration) -> Bool)?
     private(set) var generation: RemoteGeneration = .unknown
 
     var onGenerationChanged: ((RemoteGeneration) -> Void)?
@@ -103,6 +104,14 @@ final class RemoteInputHandler {
     private var siriHoldStartedAt = Date.distantPast
     private var drainedHoldStartedAt = Date.distantPast
     private let listEditingController = ListEditingController()
+    private struct BackEditor: Equatable {
+        let pid: pid_t
+        let element: AXUIElement
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.pid == rhs.pid && CFEqual(lhs.element, rhs.element)
+        }
+    }
+    private var backDoubleClick = RemoteBackDoubleClick<BackEditor>()
     private var connectionInputGate = RemoteConnectionInputGate()
     private var remoteKeepAliveTimer: Timer?
     private var remoteIdleTimer: Timer?
@@ -117,7 +126,6 @@ final class RemoteInputHandler {
     /// Last observed pressed/released state per logical button. A Siri Remote may mirror a
     /// button over multiple HID interfaces, so this collapses duplicates into one transition.
     private var buttonState: [String: Bool] = [:]
-    private var modeSwitchPresses = RemoteModeSwitchPressTracker()
 
     var isConnected: Bool {
         !devices.isEmpty
@@ -802,8 +810,50 @@ final class RemoteInputHandler {
         ))
         guard let buttonName = identified else { return }
 
-        let isPressed = intValue != 0
         let sourceGeneration = interfaceID.map(generation(ofInterface:)) ?? generation
+        if sourceGeneration == .aluminumClickpad,
+           AdvancedMenuInputState.auxiliaryButtons.contains(buttonName),
+           usesPassiveButtonCapture?(sourceGeneration) == true { return }
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let now = ProcessInfo.processInfo.systemUptime
+        let eventTime = RemoteMediaEventClock.uptime(timestamp: IOHIDValueGetTimeStamp(value), now: now,
+                                                    numer: timebase.numer, denom: timebase.denom)
+        processButton(buttonName, isPressed: intValue != 0, interfaceID: interfaceID,
+                      sourceGeneration: sourceGeneration, eventTime: eventTime ?? -.infinity)
+    }
+
+    func recordCapturedActivity(_ edge: PacketLoggerButtonParser.Edge) {
+        guard edge.pressed, let descriptor = interfaceDescriptors.values.first(where: {
+            String(($0.productName ?? "").prefix(17)) == edge.deviceLabel
+        }) else { return }
+        remoteIdleTracker.recordActivity(deviceKey: descriptor.deviceKey, now: ProcessInfo.processInfo.systemUptime)
+        startRemoteKeepAliveIfNeeded(); scheduleRemoteIdleTimer()
+    }
+
+    func resetCapturedButtons() {
+        cancelBackDoubleClick()
+        for button in AdvancedMenuInputState.auxiliaryButtons {
+            stopRepeat(for: button)
+            longPressTimers.removeValue(forKey: button)?.invalidate()
+            pendingTapActions.removeValue(forKey: button)
+            buttonState.removeValue(forKey: button)
+        }
+    }
+
+    /// The same default dispatch and connection gate serve HID and captured button reports.
+    func handleCapturedButton(_ edge: PacketLoggerButtonParser.Edge) {
+        guard let interface = interfaceDescriptors.first(where: {
+            String(($0.value.productName ?? "").prefix(17)) == edge.deviceLabel && generation(ofInterface: $0.key) == .aluminumClickpad
+        }) else { return }
+        processButton(edge.button, isPressed: edge.pressed, interfaceID: interface.key,
+                      sourceGeneration: .aluminumClickpad,
+                      eventTime: ProcessInfo.processInfo.systemUptime + edge.capturedAt.timeIntervalSinceNow)
+    }
+
+    private func processButton(_ buttonName: String, isPressed: Bool, interfaceID: ObjectIdentifier?, sourceGeneration: RemoteGeneration, eventTime: TimeInterval) {
+        let isBack = buttonName == "back" || buttonName == "menu"
+        if isPressed && !isBack { cancelBackDoubleClick() }
         if isPressed,
            sourceGeneration.supportsIdleConnectionManagement,
            let interfaceID,
@@ -826,6 +876,7 @@ final class RemoteInputHandler {
             // Remember the observed state so a held stale press cannot become a fresh action
             // when its release lands just after the quarantine expires.
             buttonState[buttonName] = isPressed
+            cancelBackDoubleClick()
             rmDebug("🛡 Connection quarantine suppressed \(buttonName) \(isPressed ? "down" : "up")")
             return
         }
@@ -837,6 +888,13 @@ final class RemoteInputHandler {
             rmDebug("Latency Siri \(isPressed ? "down" : "up") epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
         }
 
+        if onAdvancedButton?(buttonName, isPressed, interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid", sourceGeneration) == true {
+            cancelBackDoubleClick()
+            if isPressed { Self.lastProcessedButton = buttonName; Self.lastProcessedTime = mach_absolute_time() }
+            if ["mute", "volumeUp", "volumeDown"].contains(buttonName) { VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed) }
+            return
+        }
+
         // Volume keys on the Siri Remote also travel over BT AVRCP absolute-volume, which
         // coreaudiod honors below cghidEventTap. Track both press and release so the
         // CoreAudio listener snaps the level back to the pre-press value.
@@ -846,9 +904,6 @@ final class RemoteInputHandler {
 
         let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
             ?? ButtonAction.none
-        // A configured aluminum mode key has one owner in BOTH modes. In particular,
-        // do not create HID suppression markers or a second toggle after quarantine.
-        if action == .toggleInteractionMode, usesPassiveModeSwitch?(sourceGeneration) == true { return }
 
         if isPressed {
             Self.lastProcessedButton = buttonName
@@ -861,6 +916,17 @@ final class RemoteInputHandler {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
         rmDebug("🎛 Button \(buttonName) \(isPressed ? "down" : "up") source=\(sourceGeneration.shortName) action=\(action.rawValue)")
+        if isBack {
+            let age = ProcessInfo.processInfo.systemUptime - eventTime
+            let editor = action == .backspace && heldModifierButtons.isEmpty && age >= -0.03 && age <= 0.3
+                ? focusedBackEditor() : nil
+            let source = (interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid") + ":" + buttonName
+            if backDoubleClick.handle(pressed: isPressed, source: source, context: editor, time: eventTime) {
+                stopRepeat(for: buttonName)
+                rmDebug("Back double-click: clear focused editor")
+                performChord(.clearInput)
+            }
+        }
         executeAction(
             action,
             button: buttonName,
@@ -870,6 +936,28 @@ final class RemoteInputHandler {
     }
 
     // MARK: - Button Identification
+
+    func cancelBackDoubleClick() { backDoubleClick.reset() }
+
+    /// Clear only an editable text control, never an app's list or file selection.
+    /// Retain its identity across the pair, not its text or its selection contents.
+    private func focusedBackEditor() -> BackEditor? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let target = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(target, 0.02)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(target, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let element = unsafeBitCast(focused, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, 0.02)
+        var role: CFTypeRef?
+        var writable = DarwinBoolean(false)
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+              let role = role as? String, ["AXTextArea", "AXTextField", "AXComboBox"].contains(role),
+              AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
+              writable.boolValue else { return nil }
+        return BackEditor(pid: app.processIdentifier, element: element)
+    }
 
     /// Pure internal mapping so tests can verify that unknown vendor-defined usages are ignored.
     nonisolated static func identifyButton(page: UInt32, usage: UInt32) -> String? {
@@ -951,10 +1039,7 @@ final class RemoteInputHandler {
             } else {
                 releaseHeldKey(for: button)
             }
-            if modeSwitchPresses.handle(device: 0, button: button, pressed: false, enabled: action == .toggleInteractionMode) {
-                // Finish the HID callback before tearing down its devices and callback buffers.
-                DispatchQueue.main.async { [weak self] in self?.menuBarManager?.toggleInteractionMode(from: .audio) }
-            }
+
             return
         }
 
@@ -972,9 +1057,7 @@ final class RemoteInputHandler {
         }
 
         switch action {
-        case .toggleInteractionMode:
-            _ = modeSwitchPresses.handle(device: 0, button: button, pressed: true, enabled: true)
-        case .none:
+        case .none, .advancedMenu, .positionCaret:
             break
         case .enterKey:
             sendKey(kVK_Return)
@@ -1187,6 +1270,38 @@ final class RemoteInputHandler {
         tap?()
     }
 
+    func performAdvancedAction(_ action: AdvancedMenuAction, targetPID: pid_t) {
+        guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier == targetPID else { return }
+        switch action {
+        case .skill:
+            sendSkillPickerTrigger()
+        case .deleteAll:
+            let target = AXUIElementCreateApplication(targetPID)
+            var focused: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(target, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+                  let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return }
+            let editor = unsafeBitCast(focused, to: AXUIElement.self)
+            var role: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(editor, kAXRoleAttribute as CFString, &role) == .success,
+                  let name = role as? String, ["AXTextArea", "AXTextField", "AXComboBox"].contains(name) else {
+                rmDebug("Advanced Menu: focused control is not an editor; skipped \(action.rawValue)"); return
+            }
+            performChord(.clearInput)
+        case .previousSession, .nextSession:
+            guard app.bundleIdentifier == Self.codexBundleID || app.bundleIdentifier == Self.claudeBundleID else {
+                rmDebug("Advanced Menu: session navigation unsupported for \(app.bundleIdentifier ?? "unknown")"); return
+            }
+            let shortcut = Self.sessionShortcut(action)
+            rmDebug("Advanced Menu: posting \(action.rawValue) shortcut to \(app.bundleIdentifier ?? "unknown")")
+            sendKey(shortcut.keyCode, flags: shortcut.flags)
+        }
+    }
+
+    nonisolated static func sessionShortcut(_ action: AdvancedMenuAction) -> (keyCode: Int, flags: CGEventFlags) {
+        let previous = action == .previousSession
+        return (previous ? kVK_ANSI_LeftBracket : kVK_ANSI_RightBracket, [.maskCommand, .maskShift])
+    }
+
     private func sendSkillPickerTrigger() {
         // Resolve the recipient at release, when the character is actually emitted.
         // Never reuse the last client we summoned: the user may have changed focus.
@@ -1224,6 +1339,7 @@ final class RemoteInputHandler {
     }
 
     private func stopAllHoldTimers() {
+        cancelBackDoubleClick()
         VolumeRevertGuard.shared.releaseRemoteButtons()
         repeatTimers.values.forEach { $0.invalidate() }
         repeatTimers.removeAll()
@@ -1350,7 +1466,6 @@ final class RemoteInputHandler {
         }
         heldKeys.removeAll()
         buttonState.removeAll()
-        modeSwitchPresses.reset()
     }
 
     private func releaseAllPendingTapKeys() {
