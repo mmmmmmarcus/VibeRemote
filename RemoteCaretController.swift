@@ -138,6 +138,75 @@ struct RemoteCaretShakeGate {
     }
 }
 
+enum RemoteTouchSwipeDirection: Equatable, Sendable {
+    case up, down, left, right
+}
+
+/// The black-glass remote has no directional ring. A quick, mostly straight stroke followed
+/// by lift supplies one arrow-key tap. The recognizer waits for lift so an out-and-back shake
+/// can take ownership first, and it never applies to the aluminum clickpad.
+struct RemoteTouchSwipeGate {
+    private struct Contact {
+        let sender: UInt64
+        let started: RemoteTextTouchFrame
+        var latest: RemoteTextTouchFrame
+        var travel: Double
+    }
+    private var contact: Contact?
+    let minimumDistance: Double
+    let maximumDuration: TimeInterval
+    let maximumFrameGap: TimeInterval
+    let maximumCrossAxisRatio: Double
+    let maximumTravelRatio: Double
+
+    init(minimumDistance: Double = 140, maximumDuration: TimeInterval = 0.65,
+         maximumFrameGap: TimeInterval = 0.25, maximumCrossAxisRatio: Double = 0.7,
+         maximumTravelRatio: Double = 1.6) {
+        self.minimumDistance = minimumDistance
+        self.maximumDuration = maximumDuration
+        self.maximumFrameGap = maximumFrameGap
+        self.maximumCrossAxisRatio = maximumCrossAxisRatio
+        self.maximumTravelRatio = maximumTravelRatio
+    }
+
+    var isTracking: Bool { contact != nil }
+    mutating func reset() { contact = nil }
+
+    mutating func observe(_ frame: RemoteTextTouchFrame) -> RemoteTouchSwipeDirection? {
+        guard frame.generation == .glassTouchSurface else { reset(); return nil }
+        if frame.count == 1 {
+            guard var current = contact, current.sender == frame.sender,
+                  frame.time > current.latest.time,
+                  frame.time.timeIntervalSince(current.latest.time) <= maximumFrameGap else {
+                contact = Contact(sender: frame.sender, started: frame, latest: frame, travel: 0)
+                return nil
+            }
+            current.travel += hypot(Double(frame.x - current.latest.x), Double(frame.y - current.latest.y))
+            current.latest = frame
+            contact = current
+            return nil
+        }
+
+        guard frame.count == 0, let current = contact, current.sender == frame.sender else {
+            reset(); return nil
+        }
+        defer { reset() }
+        let duration = frame.time.timeIntervalSince(current.started.time)
+        guard duration >= 0, duration <= maximumDuration,
+              frame.time.timeIntervalSince(current.latest.time) <= maximumFrameGap else { return nil }
+        let dx = Double(current.latest.x - current.started.x)
+        let dy = Double(current.latest.y - current.started.y)
+        let horizontal = abs(dx), vertical = abs(dy)
+        let primary = max(horizontal, vertical), secondary = min(horizontal, vertical)
+        guard primary >= minimumDistance,
+              secondary <= primary * maximumCrossAxisRatio,
+              current.travel <= hypot(dx, dy) * maximumTravelRatio + 20 else { return nil }
+        if horizontal > vertical { return dx > 0 ? .right : .left }
+        // The decoded glass coordinate increases when the finger moves physically upward.
+        return dy > 0 ? .up : .down
+    }
+}
+
 
 /// UTF-16 offsets are always whole grapheme boundaries, including emoji and combining marks.
 enum CaretNavigation {
@@ -293,7 +362,14 @@ final class RemoteCaretController {
         let selection: CFRange
         let bounds: CGRect
     }
+    private struct TouchPreview {
+        let owner: UInt64
+        let generation: RemoteGeneration
+        let editor: Editor
+        let caret: CGRect
+    }
     var onVoiceSuppression: ((Bool) -> Void)?
+    var onDirectionalSwipe: ((RemoteTouchSwipeDirection) -> Void)?
     private var editor: Editor?
     private var positions: [Int: CGRect] = [:]
     private var remaining: [Int] = []
@@ -308,6 +384,10 @@ final class RemoteCaretController {
     private var active = false
     private var activeGeneration: RemoteGeneration?
     private var shakeGesture = RemoteCaretShakeGate()
+    private var swipeGesture = RemoteTouchSwipeGate()
+    private var touchPreview: TouchPreview?
+    private var selectPressed = false
+    private var touchBlockedUntil = Date.distantPast
     private var buttons = CaretButtonGate()
     private var swallowedReturns: Set<Int> = []
     private var notifiedSuppression = false
@@ -320,7 +400,11 @@ final class RemoteCaretController {
     private var diagnosingEntry = false
     var isActive: Bool { active }
 
-    func reset() { buttons = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false; cancel() }
+    func reset() {
+        buttons = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false
+        selectPressed = false; touchBlockedUntil = .distantPast
+        cancel()
+    }
     func stop() { reset() }
 
     /// Surface clicks never enter caret mode. The black-glass click remains Enter;
@@ -328,7 +412,17 @@ final class RemoteCaretController {
     func button(_ button: String, pressed down: Bool, device: String,
                 generation: RemoteGeneration) -> Bool {
         if button == "select" {
-            if down { cancel() }
+            if down {
+                cancel()
+                // A mechanical surface press is Enter on this remote. Ignore all touch
+                // motion while it is held so press jitter cannot also become a swipe or
+                // reopen the cursor preview.
+                selectPressed = true
+            } else {
+                selectPressed = false
+                touchBlockedUntil = Date().addingTimeInterval(0.16)
+                shakeGesture.reset(); swipeGesture.reset(); endTouchPreview()
+            }
             return false
         }
         let intent = buttons.handle(button: button, down: down, device: device, active: active)
@@ -370,6 +464,10 @@ final class RemoteCaretController {
 
     func receive(_ frame: RemoteTextTouchFrame) {
         guard Date().timeIntervalSince(frame.time) <= 0.18 else { cancel(); return }
+        if selectPressed || frame.time < touchBlockedUntil {
+            shakeGesture.reset(); swipeGesture.reset(); endTouchPreview()
+            return
+        }
         if active {
             guard activeGeneration == frame.generation else { return }
             guard owner == nil || owner == frame.sender else { return }
@@ -405,9 +503,40 @@ final class RemoteCaretController {
                 overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
             }
         } else {
-            guard buttons.held.isEmpty else { shakeGesture.reset(); return }
-            if shakeGesture.observe(frame) { beginShakeGesture() }
+            guard buttons.held.isEmpty else {
+                shakeGesture.reset(); swipeGesture.reset(); endTouchPreview(); return
+            }
+            let wasTrackingSwipe = swipeGesture.isTracking
+            let direction = swipeGesture.observe(frame)
+            if shakeGesture.observe(frame) {
+                swipeGesture.reset()
+                beginShakeGesture()
+                return
+            }
+            if frame.generation == .glassTouchSurface, frame.count == 1, !wasTrackingSwipe {
+                beginTouchPreview(frame)
+            }
+            if frame.count == 0 {
+                endTouchPreview()
+                if let direction {
+                    rmDebug("Glass touch swipe: \(direction)")
+                    onDirectionalSwipe?(direction)
+                }
+            }
         }
+    }
+
+    private func beginTouchPreview(_ frame: RemoteTextTouchFrame) {
+        guard touchPreview == nil,
+              let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { return }
+        touchPreview = TouchPreview(owner: frame.sender, generation: frame.generation,
+                                    editor: candidate, caret: rect)
+        overlay.show(caret: rect, editor: candidate.bounds, progress: 0.45)
+    }
+
+    private func endTouchPreview() {
+        touchPreview = nil
+        if !active { overlay.hide() }
     }
 
     private func beginShakeGesture() {
@@ -419,7 +548,14 @@ final class RemoteCaretController {
     private func begin(owner: UInt64? = nil, generation: RemoteGeneration = .aluminumClickpad) {
         diagnosingEntry = true
         defer { diagnosingEntry = false }
-        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { cancel(); return }
+        let prepared = touchPreview.flatMap { preview -> (Editor, CGRect)? in
+            guard preview.owner == owner, preview.generation == generation else { return nil }
+            return (preview.editor, preview.caret)
+        }
+        guard let (candidate, rect) = prepared ?? observe().flatMap({ candidate in
+            caret(candidate.selection.location, in: candidate).map { (candidate, $0) }
+        }) else { cancel(); return }
+        touchPreview = nil; swipeGesture.reset()
         editor = candidate; active = true; activeGeneration = generation
         self.owner = owner; lastTouch = nil
         isDragging = false
@@ -460,7 +596,8 @@ final class RemoteCaretController {
     }
 
     func cancel() {
-        active = false; activeGeneration = nil; shakeGesture.reset()
+        active = false; activeGeneration = nil; shakeGesture.reset(); swipeGesture.reset()
+        touchPreview = nil
         editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll()
         isDragging = false
         geometryCorrection = nil

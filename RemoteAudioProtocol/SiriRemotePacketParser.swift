@@ -40,6 +40,18 @@ public struct SiriRemotePacketParser {
             return directHIDEvents(from: line)
         }
 
+        // Live PacketLogger output contains every controller record, while Siri Remote
+        // voice starts only on the ATT 23/35/39 L2CAP payloads below. Avoid splitting and
+        // hex-decoding unrelated records while no fragmented payload is in flight. Once a
+        // first fragment has been accepted, all following ACL records still reach the
+        // handle-aware reassembler so interleaved remotes and continuation packets remain safe.
+        if pendingByHandle.isEmpty,
+           !line.contains(" 04 00 1B 23 "),
+           !line.contains(" 04 00 1B 35 "),
+           !line.contains(" 04 00 1B 39 ") {
+            return []
+        }
+
         guard let marker = line.range(of: " RECV ") else { return [] }
         let bytes = line[marker.upperBound...]
             .split(whereSeparator: { $0.isWhitespace })

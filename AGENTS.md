@@ -123,8 +123,9 @@ it is not proof of generation. Classification uses the whole physical interface 
   the modifier hold, Play/Pause gains the "/" hold. That table lives in
   `RemoteGeneration.buttonActionOverrides`.
 - Both generations use the physical Siri button for **Siri Button Mapping** and
-  firmware-gated microphone capture. The old touch surface and new clickpad center
-  use the fixed caret-positioning action; do not remap the old surface to Siri again.
+  firmware-gated microphone capture. The old touch surface owns Enter on mechanical
+  click, directional swipes on lift, and the shared shake-to-caret gesture; the new
+  clickpad center remains reserved. Do not remap the old surface to Siri again.
 - **Composite actions are profile-assigned, never user-chosen.** The Siri submenu iterates
   `ButtonAction.allCases`, so profile composites return `false` from
   `isAssignableToSiriButton`. `loadSiriButtonAction` re-checks it on read.
@@ -167,7 +168,7 @@ Do not implement this only as a delay in button dispatch: that leaves system vol
 The settings artwork and callout placement must support **two distinct physical
 layouts**. First generation uses the user's supplied `Resources/SiriRemoteFirstGeneration.png`:
 Menu / TV on the upper button row, microphone / volume-up on the middle row,
-Play/Pause / volume-down below, and touch-surface press = caret positioning. Second/third
+Play/Pause / volume-down below, and touch-surface press = Enter. Second/third
 generation retains `Resources/SiriRemote.png` with its own Power, side-Siri and Mute
 positions. `RemoteSettingsLayout` selects both artwork and callout coordinates from
 the snapshot generation. Never reuse the aluminum photo with hidden controls as the
@@ -206,7 +207,8 @@ Auto Disconnect. Window state comes from
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
 
-Current intent: clickpad arrows → arrow keys, old touch-surface click → Enter, aluminum center → no fixed action, Back/Menu →
+Current intent: clickpad arrows → arrow keys, old one-way touch-surface swipe + lift → one
+arrow-key tap, old touch-surface click → Enter, aluminum center → no fixed action, Back/Menu →
 word-wise Backspace (Option+Delete — macOS `deleteWordBackward:`, whose tokenizer also
 segments Chinese words; repeat runs at a slower word cadence than character repeat),
 TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
@@ -724,15 +726,21 @@ Both generations enter with one quick, forceful out-and-back touch gesture while
 finger remains down. The first stroke establishes direction; one return stroke whose
 direction cosine is at most -0.65 and whose length is at least 240 normalized raw units
 must finish within 0.9 seconds, with no inter-frame gap over 250 ms. Ordinary one-way
-dragging, slow movement and lift before recognition reset the gesture.
+dragging, slow movement and lift before recognition reset the gesture. On the black-glass
+remote only, a one-way stroke of at least 140 raw units, at most 650 ms and with a clear
+dominant axis sends exactly one arrow key when the finger lifts. Out-and-back travel fails
+the straightness check, so the same contact can become caret mode without also sending an
+arrow. Aluminum clickpad direction handling remains on its physical ring.
 No focused writable AX text element/caret geometry means no overlay or Enter fallback.
 Preview only changes a nonactivating, mouse-transparent clipped overlay; AX selection is
 written once on confirm. Snapshot text, selection, focus and geometry must remain unchanged.
 Siri/Power/keyboard Return cancel and consume their complete press; Return repeats must
 not submit. Voice suppression is a separate private gate, not an interaction mode. The
 helper suppresses a whole cancelled voice session; the next ordinary Siri hold re-enables.
-No preparation bubble appears before recognition. The recognized gesture shows the full
-caret bubble immediately. The caret stays 2 pt wide at the editor's
+On the black-glass remote, first contact over a supported text editor shows a 45% preparation
+bubble at the current native caret; lift hides it, while a recognized shake expands it into
+the full cursor mode. Aluminum behavior remains unchanged and shows no bubble before
+recognition. The caret stays 2 pt wide at the editor's
 line height; a 24 pt bubble with the four-way SF Symbol grows from its top. The exact
 Figma silhouette (1345:6560) is in Resources/CaretBubble.svg; CaretBubble.png is its
 top 32 pt exported at 4x, joining the variable-height native stem. The decorative

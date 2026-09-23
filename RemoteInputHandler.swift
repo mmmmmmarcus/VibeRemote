@@ -1297,6 +1297,19 @@ final class RemoteInputHandler {
         }
     }
 
+    /// One lifted swipe on the 1st-generation glass surface is one arrow tap. It deliberately
+    /// bypasses key repeat: direction remains discrete even if the finger rests at the end.
+    func performTouchSwipe(_ direction: RemoteTouchSwipeDirection) {
+        let keyCode: Int
+        switch direction {
+        case .up: keyCode = kVK_UpArrow
+        case .down: keyCode = kVK_DownArrow
+        case .left: keyCode = kVK_LeftArrow
+        case .right: keyCode = kVK_RightArrow
+        }
+        sendKey(keyCode)
+    }
+
     nonisolated static func sessionShortcut(_ action: AdvancedMenuAction) -> (keyCode: Int, flags: CGEventFlags) {
         let previous = action == .previousSession
         return (previous ? kVK_ANSI_LeftBracket : kVK_ANSI_RightBracket, [.maskCommand, .maskShift])

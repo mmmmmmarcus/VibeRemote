@@ -69,7 +69,7 @@ enum RemoteSettingsGuide {
         if key == "touch.edit" { return "Shake once: position caret" }
         if key == "select" {
             return snapshot.generation == .glassTouchSurface
-                ? "Enter\nShake once: position caret"
+                ? "Enter\nSwipe: Arrow key\nShake: position caret"
                 : "Not assigned"
         }
         if key == "back" || key == "menu" { return "Delete word\nDouble-click: clear all" }
@@ -334,7 +334,7 @@ private struct RemoteSettingsView: View {
                         sectionTitle("Text cursor")
                         Text("Quickly move one finger out and back without lifting to position the cursor. Keep sliding to move, then lift to confirm.")
                         if model.snapshot.generation == .glassTouchSurface {
-                            Text("Pressing the touch surface remains Enter. Siri or Return exits without dictating or submitting.")
+                            Text("A quick one-way swipe and lift sends one arrow key. Pressing the touch surface remains Enter. Siri or Return exits without dictating or submitting.")
                         } else { Text("Siri or Return exits without dictating or submitting.") }
                         Text("An active text field is required.")
                             .foregroundStyle(.secondary)
@@ -345,7 +345,10 @@ private struct RemoteSettingsView: View {
                         HStack {
                             Text("Auto disconnect")
                             Spacer()
-                            Picker("Auto disconnect", selection: Binding(get: { model.snapshot.idleTimeout }, set: setIdleTimeout)) {
+                            Picker("Auto disconnect", selection: Binding(
+                                get: { model.snapshot.idleTimeout },
+                                set: { value in setIdleTimeout(value) }
+                            )) {
                                 ForEach(RemoteIdleTimeout.allCases, id: \.self) { value in Text(value.title).tag(value) }
                             }.labelsHidden().pickerStyle(.menu).fixedSize()
                                 .accessibilityIdentifier("settings.idleTimeout")

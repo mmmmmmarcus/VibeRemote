@@ -264,23 +264,23 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
         let (deviceID, deviceName) = try preferredOutputDevice()
         configureBuffer(deviceID: deviceID, deviceName: deviceName)
         let newEngine = AVAudioEngine()
-        guard let audioUnit = newEngine.outputNode.audioUnit else {
-            throw BridgeError.audioFormat
+        try newEngine.outputNode.withAudioUnit { audioUnit in
+            guard let audioUnit else { throw BridgeError.audioFormat }
+            var selectedDevice = deviceID
+            let status = AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &selectedDevice,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            guard status == noErr else { throw BridgeError.audioDeviceSelection(status) }
         }
-        var selectedDevice = deviceID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &selectedDevice,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else { throw BridgeError.audioDeviceSelection(status) }
 
         let newPlayer = AVAudioPlayerNode()
         newEngine.attach(newPlayer)
-        newEngine.connect(newPlayer, to: newEngine.mainMixerNode, format: format)
+        try newEngine.connectNode(newPlayer, to: newEngine.mainMixerNode, format: format)
         newPlayer.volume = 0.75
         try newEngine.start()
         // Keep the player node running for the lifetime of the bridge ("keep stream
@@ -288,7 +288,7 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
         // button holds, so leaving the node warm only removes per-press start-up
         // latency; it never stops between sessions and thus can never deadlock on a
         // stop issued from a scheduleBuffer completion callback.
-        newPlayer.play()
+        try newPlayer.playAudio()
 
         let previousEngine = engine
         engine = newEngine
@@ -359,7 +359,12 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
             return
         }
         if !player.isPlaying {
-            player.play()
+            do { try player.playAudio() }
+            catch {
+                delivery.interrupt()
+                rebuild(reason: "the audio player could not resume")
+                return
+            }
         }
         if stalledRenderClock(of: player) {
             delivery.interrupt()
@@ -406,7 +411,11 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
             return
         }
         if !player.isPlaying {
-            player.play()
+            do { try player.playAudio() }
+            catch {
+                delivery.interrupt()
+                rebuild(reason: "the audio player could not resume")
+            }
         }
     }
 }
@@ -472,17 +481,20 @@ do {
                 log("Skipped \(skippedReplayLines) buffered capture lines from before launch")
             }
         }
-        // Suppress the whole physical utterance, including its release tail. Removing
-        // the gate cannot resurrect a voice session that began during caret positioning.
-        let voiceBlocked = suppressionFile.map { (try? String(contentsOfFile: $0, encoding: .utf8)) != "enabled" } ?? false
-        voiceSessionGate.update(blocked: voiceBlocked)
         if line.hasPrefix("HID REPORT ") {
             directHIDReports += 1
             if directHIDReports == 1 || directHIDReports % 50 == 0 {
                 log("Direct HID reports received: \(directHIDReports)")
             }
         }
-        for event in parser.events(from: line) {
+        let events = parser.events(from: line)
+        guard !events.isEmpty else { continue }
+        // Suppression can affect output only when the parser produced a voice event.
+        // Reading this file for every unrelated HCI record kept the idle helper busy.
+        // Checking it here preserves the same per-event gate and buffered-tail behavior.
+        let voiceBlocked = suppressionFile.map { (try? String(contentsOfFile: $0, encoding: .utf8)) != "enabled" } ?? false
+        voiceSessionGate.update(blocked: voiceBlocked)
+        for event in events {
             switch event {
             case .started:
                 voiceSessionGate.started(blocked: voiceBlocked)

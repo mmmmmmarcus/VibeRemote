@@ -1,6 +1,47 @@
 import Foundation
 import IOBluetooth
 import CoreBluetooth
+import Darwin
+
+private struct PacketCaptureFileState {
+    let inode: UInt64
+    let size: UInt64
+
+    static func read(path: String) -> Self? {
+        var info = Darwin.stat()
+        let result = path.withCString { Darwin.lstat($0, &info) }
+        guard result == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size >= 0 else { return nil }
+        return Self(inode: UInt64(info.st_ino), size: UInt64(info.st_size))
+    }
+}
+
+enum PacketLoggerLineRoute: Equatable {
+    case buttons
+    case touch
+    case irrelevant
+
+    static func classify(_ line: String) -> Self {
+        classifyASCII(line.utf8)
+    }
+
+    static func classify(_ bytes: Data.SubSequence) -> Self {
+        classifyASCII(bytes)
+    }
+
+    private static func classifyASCII<S: Sequence>(_ bytes: S) -> Self where S.Element == UInt8 {
+        var window: UInt64 = 0
+        for byte in bytes {
+            window = ((window << 8) | UInt64(byte)) & 0x00FF_FFFF_FFFF_FFFF
+            switch window {
+            case 0x20_31_42_20_33_39_20: return .buttons // " 1B 39 "
+            case 0x20_31_42_20_32_33_20,               // " 1B 23 "
+                 0x20_31_42_20_33_44_20: return .touch // " 1B 3D "
+            default: break
+            }
+        }
+        return .irrelevant
+    }
+}
 
 /// Aluminum remote report FB: mute is bit 7, play/pause bit 8 in its HID
 /// descriptor. Captured ATT characteristic 0039 carries that same 16-bit mask.
@@ -82,6 +123,7 @@ struct PacketLoggerButtonParser {
 /// Inode/truncation changes reset button state; timestamps reject PacketLogger replay.
 @MainActor
 final class PacketLoggerButtonMonitor {
+    private static let maximumCaptureBytes: UInt64 = 32 * 1024 * 1024
     var onEdge: ((PacketLoggerButtonParser.Edge) -> Void)?
     var onTouch: ((RemoteTextTouchFrame) -> Void)?
     var onReset: (() -> Void)?
@@ -134,10 +176,15 @@ final class PacketLoggerButtonMonitor {
             }
             labelsUpdated = now
         }
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let id = attrs[.systemFileNumber] as? UInt64, let size = attrs[.size] as? UInt64 else {
+        // This runs at the touch-report cadence. Foundation's full attribute lookup also
+        // fetches extended attributes and user/group metadata, which made an idle app burn
+        // several percent CPU. lstat supplies the two fields needed for replacement and
+        // truncation detection without that extra filesystem work. Reject symlinks here;
+        // the privileged supervisor creates a regular, user-owned capture file.
+        guard let state = PacketCaptureFileState.read(path: path) else {
             if reader != nil { resetReader() }; return
         }
+        let id = state.inode, size = state.size
         if inode != id || size < offset {
             resetReader()
             inode = id
@@ -145,9 +192,31 @@ final class PacketLoggerButtonMonitor {
         if reader == nil {
             // The root supervisor creates the file before chown/chmod. Its inode can
             // already be visible while open is denied. Retry the same inode next poll.
-            guard let opened = FileHandle(forReadingAtPath: path) else { return }
+            let descriptor = path.withCString {
+                Darwin.open($0, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard descriptor >= 0 else { return }
+            var openedInfo = Darwin.stat()
+            guard Darwin.fstat(descriptor, &openedInfo) == 0,
+                  openedInfo.st_mode & S_IFMT == S_IFREG,
+                  UInt64(openedInfo.st_ino) == id else {
+                Darwin.close(descriptor)
+                return
+            }
+            let opened = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             reader = opened
             rmDebug("PacketLogger button reader opened: inode=\(id) size=\(size)")
+        }
+        if size > Self.maximumCaptureBytes, let reader {
+            // The voice helper reads the live FIFO, not this history file. Bound only the
+            // passive button/touch copy through its already-open descriptor so replacing
+            // the path cannot redirect a privileged truncate. tee uses O_APPEND and will
+            // continue at byte zero. Resetting releases any gesture spanning the boundary.
+            if Darwin.ftruncate(reader.fileDescriptor, 0) == 0 {
+                rmDebug("PacketLogger capture reached 32 MB; truncating passive history")
+                resetReader()
+                return
+            }
         }
         guard let reader, size > offset else { return }
         do {
@@ -163,11 +232,24 @@ final class PacketLoggerButtonMonitor {
                 offset += UInt64(data.count); pending.append(data)
             }
             while let end = pending.firstIndex(of: 10) {
-                let line = String(decoding: pending[..<end], as: UTF8.self)
+                let route = PacketLoggerLineRoute.classify(pending[..<end])
+                let line = route == .irrelevant ? nil : String(decoding: pending[..<end], as: UTF8.self)
                 pending.removeSubrange(...end)
-                let edges = parser.events(line: line, allowedLabels: labels, now: now)
-                for edge in edges where edge.capturedAt >= startedAt { onEdge?(edge) }
-                if let touch = parser.touch(line: line, allowedLabels: labels, now: now), touch.time >= startedAt { onTouch?(touch) }
+                // PacketLogger includes every Bluetooth controller record. Route only the
+                // remote ATT characteristics before splitting and hex-decoding the line;
+                // otherwise unrelated traffic is parsed twice at the touch polling rate.
+                switch route {
+                case .buttons:
+                    guard let line else { continue }
+                    let edges = parser.events(line: line, allowedLabels: labels, now: now)
+                    for edge in edges where edge.capturedAt >= startedAt { onEdge?(edge) }
+                case .touch:
+                    guard let line else { continue }
+                    if let touch = parser.touch(line: line, allowedLabels: labels, now: now),
+                       touch.time >= startedAt { onTouch?(touch) }
+                case .irrelevant:
+                    break
+                }
             }
             if pending.count > 16384 { pending.removeAll() }
         } catch { resetReader() }

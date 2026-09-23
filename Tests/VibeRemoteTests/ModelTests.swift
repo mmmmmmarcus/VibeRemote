@@ -387,6 +387,12 @@ final class ModelTests: XCTestCase {
         func feed(_ value: String) -> [PacketLoggerButtonParser.Edge] {
             parser.events(line: value, allowedLabels: ["Marcus Siri Remot"], now: now)
         }
+        XCTAssertEqual(PacketLoggerLineRoute.classify(line("00 01")), .buttons)
+        XCTAssertEqual(
+            PacketLoggerLineRoute.classify(line("00 01").replacingOccurrences(of: "1B 39", with: "1B 23")),
+            .touch
+        )
+        XCTAssertEqual(PacketLoggerLineRoute.classify("Sep 20 15:45:27.330 Keyboard RECV 01 02 03"), .irrelevant)
         XCTAssertTrue(feed(line("00 01", label: "Keyboard")).isEmpty)
         XCTAssertTrue(feed(line("00 01", stamp: "15:44:27.330")).isEmpty)
         XCTAssertTrue(feed(line("00 01", stamp: "15:46:27.330")).isEmpty)

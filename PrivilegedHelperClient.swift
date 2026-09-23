@@ -26,7 +26,7 @@ enum PrivilegedHelperState: Equatable, Sendable {
     }
 }
 
-final class PrivilegedHelperClient {
+final class PrivilegedHelperClient: @unchecked Sendable {
     static let shared = PrivilegedHelperClient()
 
     private let connectionLock = NSLock()

@@ -307,6 +307,46 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertFalse(lifted.isTracking)
     }
 
+    func testGlassSwipeSendsOneDirectionOnLiftAndLeavesAluminumUnchanged() {
+        let origin = Date(timeIntervalSince1970: 100)
+        func frame(_ time: TimeInterval, x: Int, y: Int, count: Int = 1,
+                   generation: RemoteGeneration = .glassTouchSurface) -> RemoteTextTouchFrame {
+            .init(sender: 8, time: origin.addingTimeInterval(time), generation: generation,
+                  count: count, x: x, y: y)
+        }
+        let strokes: [(Int, Int, RemoteTouchSwipeDirection)] = [
+            (180, 20, .right), (-180, -20, .left), (20, 180, .up), (-20, -180, .down)
+        ]
+        for (x, y, expected) in strokes {
+            var gate = RemoteTouchSwipeGate()
+            XCTAssertNil(gate.observe(frame(0, x: 0, y: 0)))
+            XCTAssertNil(gate.observe(frame(0.18, x: x, y: y)))
+            XCTAssertEqual(gate.observe(frame(0.22, x: 0, y: 0, count: 0)), expected)
+            XCTAssertFalse(gate.isTracking)
+        }
+        var aluminum = RemoteTouchSwipeGate()
+        XCTAssertNil(aluminum.observe(frame(0, x: 0, y: 0, generation: .aluminumClickpad)))
+        XCTAssertNil(aluminum.observe(frame(0.2, x: 300, y: 0, count: 0, generation: .aluminumClickpad)))
+    }
+
+    func testGlassSwipeRejectsTapDiagonalSlowAndOutAndBackMotion() {
+        let origin = Date(timeIntervalSince1970: 100)
+        func frame(_ time: TimeInterval, x: Int, y: Int, count: Int = 1) -> RemoteTextTouchFrame {
+            .init(sender: 8, time: origin.addingTimeInterval(time), generation: .glassTouchSurface,
+                  count: count, x: x, y: y)
+        }
+        func result(_ frames: [RemoteTextTouchFrame]) -> RemoteTouchSwipeDirection? {
+            var gate = RemoteTouchSwipeGate()
+            var result: RemoteTouchSwipeDirection?
+            for frame in frames { result = gate.observe(frame) ?? result }
+            return result
+        }
+        XCTAssertNil(result([frame(0, x: 0, y: 0), frame(0.1, x: 60, y: 5), frame(0.15, x: 0, y: 0, count: 0)]))
+        XCTAssertNil(result([frame(0, x: 0, y: 0), frame(0.2, x: 180, y: 160), frame(0.25, x: 0, y: 0, count: 0)]))
+        XCTAssertNil(result([frame(0, x: 0, y: 0), frame(0.7, x: 200, y: 0), frame(0.72, x: 0, y: 0, count: 0)]))
+        XCTAssertNil(result([frame(0, x: 0, y: 0), frame(0.15, x: 260, y: 0), frame(0.3, x: -10, y: 0), frame(0.34, x: 0, y: 0, count: 0)]))
+    }
+
     func testPacketLoggerDecodesGlassTouchButNotSameHandleVoice() throws {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

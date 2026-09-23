@@ -126,6 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.remoteInputHandler?.updateRemoteIdleTimeout(timeout)
         }
         caretController.onVoiceSuppression = { [weak self] blocked in self?.microphoneBridgeManager.setVoiceSuppressed(blocked) }
+        caretController.onDirectionalSwipe = { [weak self] direction in
+            self?.remoteInputHandler?.performTouchSwipe(direction)
+        }
         menuBarManager.advancedMenuHandler = { [weak self] in self?.caretController.cancel(); self?.advancedMenu.show() }
         advancedMenu.onAction = { [weak self] action, pid in
             guard let self, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
@@ -299,6 +302,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bluetoothDisconnectNotifications[address] = notification
     }
 
+    private func observeDisconnect(address: String) {
+        let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        guard let device = devices.first(where: { $0.addressString?.lowercased() == address }) else { return }
+        observeDisconnect(of: device)
+    }
+
     /// IOBluetooth does not guarantee the observer selector runs on the main thread. Hop to the
     /// main actor before touching timers; a Timer scheduled on its callback thread may never
     /// fire because that thread has no running RunLoop.
@@ -309,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let deviceDescription = device.name ?? device.addressString ?? "Unknown Bluetooth device"
         let address = device.addressString?.lowercased()
         Task { @MainActor [weak self] in
-            self?.observeDisconnect(of: device)
+            if let address { self?.observeDisconnect(address: address) }
             self?.handleBluetoothDeviceConnected(
                 deviceDescription: deviceDescription,
                 address: address
@@ -665,7 +674,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rmDebug("🔐 Accessibility access requested from menu")
         menuBarManager.updateRemoteControlState(.starting)
 
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        // The imported C global is declared mutable and therefore triggers strict Swift
+        // concurrency diagnostics even on the main actor. Its documented CFString value is
+        // stable, so use the key directly rather than touching shared C storage.
+        let promptKey = "AXTrustedCheckOptionPrompt"
         let trusted = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
         rmDebug("🔐 Accessibility request result: \(trusted ? "granted" : "not granted")")
         if trusted {
