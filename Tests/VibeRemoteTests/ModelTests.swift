@@ -968,6 +968,28 @@ final class ModelTests: XCTestCase {
         ))
     }
 
+    func testHeldRightModifiersAreSentAsSidedFlagsChanged() throws {
+        for (keyCode, mask, sideBit) in [
+            (kVK_RightCommand, CGEventFlags.maskCommand, UInt64(0x10)),
+            (kVK_RightOption, CGEventFlags.maskAlternate, UInt64(0x40)),
+        ] {
+            // Construct only; never inject test keystrokes into the user's desktop.
+            let down = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: keyCode, flags: mask, keyDown: true))
+            XCTAssertEqual(down.type, .flagsChanged)
+            XCTAssertTrue(down.flags.contains(mask))
+            XCTAssertEqual(down.flags.rawValue & sideBit, sideBit)
+            XCTAssertEqual(down.getIntegerValueField(.keyboardEventKeycode), Int64(keyCode))
+
+            let up = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: keyCode, flags: [], keyDown: false))
+            XCTAssertEqual(up.type, .flagsChanged)
+            XCTAssertFalse(up.flags.contains(mask))
+            XCTAssertEqual(up.flags.rawValue & sideBit, 0)
+        }
+        // Ordinary keys keep their keyDown/keyUp shape.
+        let space = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: kVK_Space, flags: [], keyDown: true))
+        XCTAssertEqual(space.type, .keyDown)
+    }
+
     func testSkillPickerUsesTheFocusedAppAndPreservesUnknownAppBehavior() {
         let codex = RemoteInputHandler.skillPickerTrigger(for: "com.openai.codex")
         XCTAssertEqual(codex.text, "$")
