@@ -264,11 +264,14 @@ final class RemoteDetector {
     }
 
     private func isSiriRemote(_ device: IOHIDDevice) -> Bool {
-        Self.matchesSiriRemote(
+        let productName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String
+        let matches = Self.matchesSiriRemote(
             vendorID: property(kIOHIDVendorIDKey, of: device, default: -1),
             productID: property(kIOHIDProductIDKey, of: device, default: -1),
-            productName: IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String
+            productName: productName
         )
+        if matches, let productName { RemoteNameMatch.learn(productName) }
+        return matches
     }
 
     nonisolated static func matchesSiriRemote(
@@ -282,7 +285,12 @@ final class RemoteDetector {
             let name = productName.lowercased()
             // A concrete product name is stronger evidence than a numeric ID. In particular,
             // never seize a mouse, keyboard, or trackpad because an ID overlaps an old list.
-            return name.contains("remote") || name.contains("siri") || name.contains("apple tv")
+            if RemoteNameMatch.isExcludedAccessoryName(productName) { return false }
+            if RemoteNameMatch.isHeuristicRemoteName(productName) { return true }
+            if ["mouse", "keyboard", "trackpad"].contains(where: name.contains) { return false }
+            // Remotes paired under a serial-number name carry no descriptive product name;
+            // fall back to the product ID list for those.
+            return knownProductIDs.contains(productID)
         }
 
         return knownProductIDs.contains(productID)

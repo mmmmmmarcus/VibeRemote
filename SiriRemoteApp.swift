@@ -363,9 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rmDebug("📡 Ignoring existing Bluetooth connection replay: \(deviceDescription)")
             return
         }
-        let normalizedName = deviceDescription.lowercased()
-        if normalizedName.contains("remote") || normalizedName.contains("siri") ||
-            normalizedName.contains("apple tv") {
+        if RemoteNameMatch.isRemoteName(deviceDescription) {
             // The Bluetooth notification precedes HID enumeration, so this closes the gap
             // where an AVRCP volume update could settle before the HID-side quarantine arms.
             VolumeRevertGuard.shared.beginRemoteConnectionQuarantine()
