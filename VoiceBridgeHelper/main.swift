@@ -192,6 +192,9 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
     private var lastRenderSampleTime: AVAudioFramePosition = -1
     private var stalledEnqueues = 0
     private var configurationObserver: NSObjectProtocol?
+    /// The virtual device the current engine was pinned to by `buildLocked`.
+    private var pinnedDeviceID = AudioDeviceID(0)
+    private var driftTimer: DispatchSourceTimer?
 
     init(format: AVAudioFormat) throws {
         self.format = format
@@ -212,6 +215,79 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
         ) { [weak self] _ in
             self?.handleConfigurationChange()
         }
+        startDriftWatch()
+    }
+
+    /// Changing the system default input device silently re-points a *running*
+    /// AVAudioEngine's output unit at the system default output device (usually the Mac
+    /// speakers). The engine keeps running, `isRunning` stays true, the render clock keeps
+    /// advancing and no `AVAudioEngineConfigurationChange` is posted, so none of the other
+    /// probes notice: the remote's voice plays aloud and the virtual device stays silent.
+    /// The app itself switches the default input around every bridge restart, which makes
+    /// this a race that depends on whether the engine was built before or after the switch.
+    /// Watch the relevant HAL properties, and poll as a backstop.
+    private func startDriftWatch() {
+        let selectors = [
+            kAudioHardwarePropertyDefaultInputDevice,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioHardwarePropertyDevices,
+        ]
+        for selector in selectors {
+            var address = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, controlQueue) {
+                [weak self] _, _ in
+                // Give CoreAudio a moment to finish re-routing before checking.
+                self?.controlQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.checkDrift(trigger: "HAL change")
+                }
+            }
+        }
+        let timer = DispatchSource.makeTimerSource(queue: controlQueue)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in self?.checkDrift(trigger: "periodic check") }
+        timer.resume()
+        driftTimer = timer
+    }
+
+    private func checkDrift(trigger: String) {
+        lock.lock()
+        let busy = rebuildInFlight
+        lock.unlock()
+        guard !busy, let drift = outputDrift() else { return }
+        log("Output routing drifted to \(drift) (\(trigger)); rebuilding")
+        delivery.interrupt()
+        rebuild(reason: "the output drifted to \(drift)")
+    }
+
+    /// Returns the name of the device the engine renders to when it is no longer the
+    /// virtual device pinned by `buildLocked`, or nil while the routing is still correct.
+    private func outputDrift() -> String? {
+        lock.lock()
+        let engine = self.engine
+        let pinned = pinnedDeviceID
+        lock.unlock()
+        var current = AudioDeviceID(0)
+        var status: OSStatus = -1
+        try? engine.outputNode.withAudioUnit { audioUnit in
+            guard let audioUnit else { throw BridgeError.audioFormat }
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            status = AudioUnitGetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &current,
+                &size
+            )
+        }
+        guard status == noErr, current != pinned else { return nil }
+        // The pinned ID can go stale after a CoreAudio reset; accept the re-resolved device.
+        if let expected = try? preferredOutputDevice(), expected.0 == current { return nil }
+        return audioDeviceName(current) ?? "device \(current)"
     }
 
     private func handleConfigurationChange() {
@@ -220,13 +296,19 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
         let running = engine.isRunning
         lock.unlock()
         guard !selfInflicted else { return }
-        // A configuration change that did not stop the engine needs no rebuild; the stall
-        // probe in `enqueue` still covers an engine that keeps running without rendering.
+        // A configuration change that did not stop the engine needs no rebuild unless it
+        // moved the output off the virtual device; the stall probe in `enqueue` still
+        // covers an engine that keeps running without rendering.
+        if running, let drift = outputDrift() {
+            rebuild(reason: "the output drifted to \(drift)")
+            return
+        }
         guard !running else { return }
         rebuild(reason: "the audio hardware was reconfigured")
     }
 
     deinit {
+        driftTimer?.cancel()
         if let configurationObserver {
             NotificationCenter.default.removeObserver(configurationObserver)
         }
@@ -263,6 +345,7 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
     private func buildLocked() throws {
         let (deviceID, deviceName) = try preferredOutputDevice()
         configureBuffer(deviceID: deviceID, deviceName: deviceName)
+        pinnedDeviceID = deviceID
         let newEngine = AVAudioEngine()
         try newEngine.outputNode.withAudioUnit { audioUnit in
             guard let audioUnit else { throw BridgeError.audioFormat }
@@ -341,6 +424,11 @@ private final class VirtualAudioOutput: VoiceAudioOutput {
 
     func voiceStarted() {
         delivery.begin()
+        if let drift = outputDrift() {
+            log("Output routing drifted to \(drift) before voice start; rebuilding")
+            delivery.interrupt()
+            rebuild(reason: "the output drifted to \(drift)")
+        }
         restartIfStopped()
     }
 
