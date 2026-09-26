@@ -1492,6 +1492,15 @@ final class RemoteInputHandler {
         IOHIDDeviceGetProperty(device, key as CFString) as? Int ?? 0
     }
 
+    /// Device-dependent modifier bits from IOLLEvent.h, keyed by virtual key code.
+    private nonisolated static let deviceModifierMasks: [Int: UInt64] = [
+        kVK_Command: 0x0000_0008,       // NX_DEVICELCMDKEYMASK
+        kVK_RightCommand: 0x0000_0010,  // NX_DEVICERCMDKEYMASK
+        kVK_Option: 0x0000_0020,        // NX_DEVICELALTKEYMASK
+        kVK_RightOption: 0x0000_0040,   // NX_DEVICERALTKEYMASK
+    ]
+    private nonisolated static let nxNonCoalescedMask: UInt64 = 0x0000_0100
+
     nonisolated static func makeKeyEvent(keyCode: Int, flags: CGEventFlags, keyDown: Bool, text: String? = nil) -> CGEvent? {
         let source = CGEventSource(stateID: .hidSystemState)
         let event = CGEvent(
@@ -1500,6 +1509,15 @@ final class RemoteInputHandler {
             keyDown: keyDown
         )
         event?.flags = flags
+        if let sideMask = deviceModifierMasks[keyCode], let event {
+            // A physical modifier key produces flagsChanged, not keyDown/keyUp, and its
+            // flags carry the device-dependent side bit. Apps that bind a specific
+            // right-hand modifier (push-to-talk dictation apps such as Vokie) only react
+            // to that shape; a keyDown with the generic mask alone is ignored.
+            event.type = .flagsChanged
+            let pressed: UInt64 = keyDown ? flags.rawValue | sideMask : 0
+            event.flags = CGEventFlags(rawValue: pressed | nxNonCoalescedMask)
+        }
         if let text {
             let characters = Array(text.utf16)
             event?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
