@@ -166,7 +166,7 @@ final class PacketLoggerButtonMonitor {
             // PacketLogger truncates names to 17 characters. Ambiguous labels fail closed.
             let allLabels = devices.compactMap { $0.name }.map { String($0.prefix(17)) }
             let updatedLabels = Set(devices.compactMap { device -> String? in
-                guard let name = device.name, name.lowercased().contains("remote") || name.lowercased().contains("siri") else { return nil }
+                guard let name = device.name, RemoteNameMatch.isRemoteName(name) else { return nil }
                 let label = String(name.prefix(17))
                 return allLabels.filter { $0 == label }.count == 1 ? label : nil
             })

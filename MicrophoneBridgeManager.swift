@@ -1700,8 +1700,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         guard CBManager.authorization == .allowedAlways else { return nil }
         guard let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else { return nil }
         for device in devices {
-            let name = (device.name ?? "").lowercased()
-            guard name.contains("remote") || name.contains("siri") || name.contains("apple tv") else { continue }
+            guard RemoteNameMatch.isRemoteName(device.name) else { continue }
             if let address = device.addressString {
                 return normalizeAddress(address)
             }

@@ -968,6 +968,49 @@ final class ModelTests: XCTestCase {
         ))
     }
 
+    func testRemoteIdentityFallsBackToProductIDForSerialNumberNames() {
+        // A first-generation remote paired under its serial number.
+        XCTAssertTrue(RemoteDetector.matchesSiriRemote(
+            vendorID: 0x004C,
+            productID: 0x026D,
+            productName: "XXXXXXXXXXXX"
+        ))
+        // An unrelated Apple accessory with an unknown product ID stays excluded.
+        XCTAssertFalse(RemoteDetector.matchesSiriRemote(
+            vendorID: 0x004C,
+            productID: 0x2013,
+            productName: "XXXXXXXXXXXX"
+        ))
+        // AirPods named after the owner's Siri voice must not be taken for the remote.
+        XCTAssertFalse(RemoteDetector.matchesSiriRemote(
+            vendorID: 0x004C,
+            productID: 0x2013,
+            productName: "Siri's AirPods"
+        ))
+        // A descriptive non-remote name still wins over an overlapping product ID.
+        XCTAssertFalse(RemoteDetector.matchesSiriRemote(
+            vendorID: 0x004C,
+            productID: 0x026D,
+            productName: "Magic Keyboard"
+        ))
+    }
+
+    func testRemoteNameMatchLearnsSerialNamesAndExcludesAirPods() throws {
+        let suite = "RemoteNameMatchTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertFalse(RemoteNameMatch.isRemoteName("XXXXXXXXXXXX", defaults: defaults))
+        XCTAssertFalse(RemoteNameMatch.isRemoteName("Siri's AirPods", defaults: defaults))
+        XCTAssertTrue(RemoteNameMatch.isRemoteName("Siri Remote", defaults: defaults))
+
+        RemoteNameMatch.learn("XXXXXXXXXXXX", defaults: defaults)
+        XCTAssertTrue(RemoteNameMatch.isRemoteName("xxxxxxxxxxxx", defaults: defaults))
+        // Heuristic names are not stored; they already match.
+        RemoteNameMatch.learn("Siri Remote", defaults: defaults)
+        XCTAssertEqual(defaults.stringArray(forKey: RemoteNameMatch.learnedNamesKey), ["XXXXXXXXXXXX"])
+    }
+
     func testSkillPickerUsesTheFocusedAppAndPreservesUnknownAppBehavior() {
         let codex = RemoteInputHandler.skillPickerTrigger(for: "com.openai.codex")
         XCTAssertEqual(codex.text, "$")
