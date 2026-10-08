@@ -70,24 +70,37 @@ struct AdvancedMenuTextAnchor: Sendable {
 }
 
 enum AdvancedMenuAction: String, CaseIterable, Sendable {
-    case deleteAll, skill, previousSession, nextSession
+    case deleteAll, skill, redo, undo, paste, commandEnter
     var title: String {
         switch self {
         case .deleteAll: return "Delete all"
         case .skill: return "Skill"
-        case .previousSession: return "Previous Session"
-        case .nextSession: return "Next Session"
+        case .redo: return "Redo"
+        case .undo: return "Undo"
+        case .paste: return "Paste"
+        case .commandEnter: return "Command + Enter"
+        }
+    }
+    func symbolName(for bundleID: String? = nil) -> String {
+        switch self {
+        case .deleteAll: return "delete.left.fill"
+        case .skill: return RemoteInputHandler.skillPickerTrigger(for: bundleID).text == "$" ? "dollarsign" : "line.diagonal"
+        case .redo: return "arrow.uturn.forward"
+        case .undo: return "arrow.uturn.backward"
+        case .paste: return "doc.on.clipboard"
+        case .commandEnter: return "return"
         }
     }
 }
 
 /// A click owns its release even when the menu is dismissed meanwhile. A stale release
 /// may be consumed but can never execute an action in a later menu presentation.
+/// Dismissing the presentation does not end a physically held menu chord.
 struct AdvancedMenuInputState {
     enum Command: Equatable { case showMenu, dismissMenu, perform(AdvancedMenuAction) }
     struct Result { let consumed: Bool; var command: Command? = nil }
     private struct Key: Hashable { let device: String; let button: String }
-    private struct Press { let command: Command; let session: UUID?; let beganAt: TimeInterval; var executed = false }
+    private struct Press { let command: Command?; let session: UUID?; let beganAt: TimeInterval; var executed = false }
     static let holdDuration: TimeInterval = 0.25
     private var presses: [Key: Press] = [:]
     private(set) var session: UUID?
@@ -98,9 +111,11 @@ struct AdvancedMenuInputState {
     static func action(button: String, generation: RemoteGeneration) -> AdvancedMenuAction? {
         switch button {
         case "back", "menu": return .deleteAll
-        case "tv": return .skill
-        case "volumeUp": return .previousSession
-        case "volumeDown": return .nextSession
+        case "tv": return generation == .glassTouchSurface ? .skill : nil
+        case "volumeUp": return .redo
+        case "volumeDown": return .undo
+        case "playPause": return generation == .glassTouchSurface ? nil : .paste
+        case "power": return generation == .glassTouchSurface ? nil : .commandEnter
         default: return nil
         }
     }
@@ -126,6 +141,24 @@ struct AdvancedMenuInputState {
                 presses[key] = Press(command: .perform(action), session: session, beganAt: time, executed: held)
                 return Result(consumed: true, command: held ? .perform(action) : nil)
             }
+            // A hold executes one menu action and hides the presentation immediately.
+            // Until the opener is released, further auxiliary clicks still belong to
+            // that chord, never to baseline mappings (e.g. Redo becoming Indent).
+            // Retain each suppressed press so its repeats/release stay consumed even
+            // when the opener is released first. Other remotes and excluded keys pass.
+            let trigger = Key(device: device, button: Self.trigger(for: generation))
+            // Skill moved to the ordinary aluminum Play/Pause button. The vacant
+            // menu slot must not fall through to TV's baseline Shift+Enter.
+            if button == "tv", generation != .glassTouchSurface,
+               (isVisible && (owner == nil || owner == device)) || presses[trigger] != nil {
+                presses[key] = Press(command: nil, session: session, beganAt: time)
+                return Result(consumed: true)
+            }
+            if presses[trigger] != nil,
+               let action = Self.action(button: button, generation: generation) {
+                presses[key] = Press(command: .perform(action), session: nil, beganAt: time, executed: true)
+                return Result(consumed: true)
+            }
             return Result(consumed: false)
         }
         guard let press = presses.removeValue(forKey: key) else { return Result(consumed: false) }
@@ -135,6 +168,7 @@ struct AdvancedMenuInputState {
             return Result(consumed: true, command: time - press.beganAt >= Self.holdDuration ? .dismissMenu : nil)
         case .dismissMenu: return Result(consumed: true, command: .dismissMenu)
         case .perform: return Result(consumed: true, command: press.command)
+        case nil: return Result(consumed: true)
         }
     }
 }
@@ -315,10 +349,10 @@ final class AdvancedMenuController {
             let content = Canvas(frame: view.bounds); view.contentView = content
             canvas.addSubview(view); return content
         }
-        func button(_ action: AdvancedMenuAction?, symbol: String, in view: NSView, frame: NSRect) {
+        func button(_ action: AdvancedMenuAction?, in view: NSView, frame: NSRect) {
             let button = NSButton(frame: frame)
             button.isBordered = false; button.imagePosition = .imageOnly
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: action?.title ?? "Close Advanced Menu")?.withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            button.image = NSImage(systemSymbolName: action?.symbolName(for: bundleID) ?? "xmark", accessibilityDescription: action?.title ?? "Close Advanced Menu")?.withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
             button.contentTintColor = .labelColor
             button.alphaValue = action == nil ? 0.55 : 1
             button.target = self
@@ -329,16 +363,21 @@ final class AdvancedMenuController {
             view.addSubview(button)
         }
         let clear = glass(NSRect(x: x, y: y, width: 36, height: 36))
-        button(.deleteAll, symbol: "delete.left.fill", in: clear, frame: clear.bounds)
-        let skill = glass(NSRect(x: x+44, y: y, width: 36, height: 36))
-        let skillSymbol = RemoteInputHandler.skillPickerTrigger(for: bundleID).text == "$" ? "dollarsign" : "line.diagonal"
-        button(.skill, symbol: skillSymbol, in: skill, frame: skill.bounds)
+        button(.deleteAll, in: clear, frame: clear.bounds)
+        if generation == .glassTouchSurface {
+            let skill = glass(NSRect(x: x+44, y: y, width: 36, height: 36))
+            button(.skill, in: skill, frame: skill.bounds)
+        }
+        if generation != .glassTouchSurface {
+            let paste = glass(NSRect(x: x, y: y+44, width: 36, height: 36))
+            button(.paste, in: paste, frame: paste.bounds)
+        }
 
         let close = glass(NSRect(x: x, y: y+88, width: 36, height: 36))
-        button(nil, symbol: "xmark", in: close, frame: close.bounds)
-        let sessions = glass(NSRect(x: x+44, y: y+44, width: 36, height: 80))
-        button(.previousSession, symbol: "arrowshape.up.fill", in: sessions, frame: NSRect(x: 4, y: 4, width: 28, height: 28))
-        button(.nextSession, symbol: "arrowshape.down.fill", in: sessions, frame: NSRect(x: 4, y: 48, width: 28, height: 28))
+        button(nil, in: close, frame: close.bounds)
+        let history = glass(NSRect(x: x+44, y: y+44, width: 36, height: 80))
+        button(.redo, in: history, frame: NSRect(x: 4, y: 4, width: 28, height: 28))
+        button(.undo, in: history, frame: NSRect(x: 4, y: 48, width: 28, height: 28))
         shadow.needsDisplay = true
         panel = window
         animatedContent = root

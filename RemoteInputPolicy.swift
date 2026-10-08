@@ -1,44 +1,5 @@
 import Foundation
 
-/// Recognizes two complete short clicks, never a hold or an orphan release.
-/// The caller supplies the physical source, focused editor, and original event time.
-struct RemoteBackDoubleClick<Context: Equatable> {
-    private struct Click {
-        let source: String
-        let context: Context
-        let time: TimeInterval
-        let completesPair: Bool
-    }
-    private var down: Click?
-    private var previous: Click?
-    private let interval: TimeInterval = 0.3
-
-    mutating func reset() { down = nil; previous = nil }
-
-    mutating func handle(pressed: Bool, source: String, context: Context?, time: TimeInterval) -> Bool {
-        guard let context, time.isFinite else { reset(); return false }
-        if pressed {
-            // Mirrored down reports cannot restart a hold or create a second click.
-            guard down == nil else { return false }
-            let pair = previous.map {
-                $0.source == source && $0.context == context &&
-                time >= $0.time && time - $0.time <= interval
-            } ?? false
-            previous = nil
-            down = Click(source: source, context: context, time: time, completesPair: pair)
-            return false
-        }
-        guard let click = down else { return false }
-        down = nil
-        guard click.source == source, click.context == context,
-              time >= click.time, time - click.time <= interval else { reset(); return false }
-        if click.completesPair { previous = nil; return true }
-        previous = Click(source: source, context: context, time: time, completesPair: false)
-        return false
-    }
-}
-
-
 /// Product-defined button behavior. Only Siri has a persisted user assignment.
 enum RemoteButtonMapping {
     static func usesPassiveCapture(generation: RemoteGeneration, packetLogger: Bool, mediaTap: Bool) -> Bool {
@@ -47,12 +8,10 @@ enum RemoteButtonMapping {
     static func action(button: String, generation: RemoteGeneration, siriAction: ButtonAction) -> ButtonAction {
         guard !generation.absentButtonKeys.contains(button) else { return .none }
         if button == AdvancedMenuInputState.trigger(for: generation) { return .advancedMenu }
-        // Reserve the aluminum Play/Pause key until its fixed purpose is decided.
-        if button == "playPause" { return .none }
+        if button == "playPause" { return .skillPicker }
         if button == "select" {
-            // Both generations enter caret mode by shaking the touch surface while
-            // keeping one finger down. The old remote has no separate Power/submit
-            // key, so only its mechanical surface click remains Enter.
+            // During caret positioning the controller consumes this click to confirm.
+            // Outside positioning only the old remote uses it as Enter (no Power key).
             return generation == .glassTouchSurface ? .enterKey : .none
         }
         let baseline = remoteButtonDescriptors.first { $0.key == button }?.defaultAction ?? .none

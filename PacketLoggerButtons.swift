@@ -69,15 +69,16 @@ struct PacketLoggerButtonParser {
         guard header.count >= 5 else { return [] }
         let label = header.dropFirst(3).dropLast().joined(separator: " ")
         guard allowedLabels.contains(label) else { return [] }
-        let year = Calendar.current.component(.year, from: now)
-        guard let stamp = formatter.date(from: "\(header[0]) \(header[1]) \(header[2]) \(year)"),
-              now.timeIntervalSince(stamp) >= -0.03, now.timeIntervalSince(stamp) <= 3 else { return [] }
         let hex = line[split.upperBound...].split(whereSeparator: { $0.isWhitespace })
+        guard hex.count == 13 else { return [] }
         let bytes = hex.compactMap { UInt8($0, radix: 16) }
         guard bytes.count == hex.count, bytes.count == 13,
               bytes[1] & 0xf0 == 0x20, Array(bytes[2...10]) == [9, 0, 5, 0, 4, 0, 0x1b, 0x39, 0] else { return [] }
         let handle = UInt16(bytes[0]) | UInt16(bytes[1] & 0x0f) << 8
         guard UInt16(header.last!.dropFirst(2), radix: 16) == handle else { return [] }
+        let year = Calendar.current.component(.year, from: now)
+        guard let stamp = formatter.date(from: "\(header[0]) \(header[1]) \(header[2]) \(year)"),
+              now.timeIntervalSince(stamp) >= -0.03, now.timeIntervalSince(stamp) <= 3 else { return [] }
         let mask = UInt16(bytes[11]) | UInt16(bytes[12]) << 8
         let previous = masks[handle] ?? 0
         if masks.count > 16 { masks.removeAll() }
@@ -98,6 +99,9 @@ struct PacketLoggerButtonParser {
         let header = line[..<split.lowerBound].split(whereSeparator: { $0.isWhitespace })
         guard header.count >= 5, allowedLabels.contains(header.dropFirst(3).dropLast().joined(separator: " ")) else { return nil }
         let hex = line[split.upperBound...].split(whereSeparator: { $0.isWhitespace })
+        // Only the two generations' documented touch frame sizes can reach the
+        // decoder. Voice/media records do not need hex conversion or date parsing.
+        guard [22, 29, 24, 31].contains(hex.count) else { return nil }
         let b = hex.compactMap { UInt8($0, radix: 16) }
         guard b.count == hex.count, b.count >= 11, b[1] & 0xf0 == 0x20,
               Int(b[2]) == b.count - 4, b[3] == 0, Int(b[4]) == b.count - 8,

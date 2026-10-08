@@ -104,14 +104,6 @@ final class RemoteInputHandler {
     private var siriHoldStartedAt = Date.distantPast
     private var drainedHoldStartedAt = Date.distantPast
     private let listEditingController = ListEditingController()
-    private struct BackEditor: Equatable {
-        let pid: pid_t
-        let element: AXUIElement
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.pid == rhs.pid && CFEqual(lhs.element, rhs.element)
-        }
-    }
-    private var backDoubleClick = RemoteBackDoubleClick<BackEditor>()
     private var connectionInputGate = RemoteConnectionInputGate()
     private var remoteKeepAliveTimer: Timer?
     private var remoteIdleTimer: Timer?
@@ -814,13 +806,8 @@ final class RemoteInputHandler {
         if sourceGeneration == .aluminumClickpad,
            AdvancedMenuInputState.auxiliaryButtons.contains(buttonName),
            usesPassiveButtonCapture?(sourceGeneration) == true { return }
-        var timebase = mach_timebase_info_data_t()
-        mach_timebase_info(&timebase)
-        let now = ProcessInfo.processInfo.systemUptime
-        let eventTime = RemoteMediaEventClock.uptime(timestamp: IOHIDValueGetTimeStamp(value), now: now,
-                                                    numer: timebase.numer, denom: timebase.denom)
         processButton(buttonName, isPressed: intValue != 0, interfaceID: interfaceID,
-                      sourceGeneration: sourceGeneration, eventTime: eventTime ?? -.infinity)
+                      sourceGeneration: sourceGeneration)
     }
 
     func recordCapturedActivity(_ edge: PacketLoggerButtonParser.Edge) {
@@ -832,7 +819,6 @@ final class RemoteInputHandler {
     }
 
     func resetCapturedButtons() {
-        cancelBackDoubleClick()
         for button in AdvancedMenuInputState.auxiliaryButtons {
             stopRepeat(for: button)
             longPressTimers.removeValue(forKey: button)?.invalidate()
@@ -847,13 +833,10 @@ final class RemoteInputHandler {
             String(($0.value.productName ?? "").prefix(17)) == edge.deviceLabel && generation(ofInterface: $0.key) == .aluminumClickpad
         }) else { return }
         processButton(edge.button, isPressed: edge.pressed, interfaceID: interface.key,
-                      sourceGeneration: .aluminumClickpad,
-                      eventTime: ProcessInfo.processInfo.systemUptime + edge.capturedAt.timeIntervalSinceNow)
+                      sourceGeneration: .aluminumClickpad)
     }
 
-    private func processButton(_ buttonName: String, isPressed: Bool, interfaceID: ObjectIdentifier?, sourceGeneration: RemoteGeneration, eventTime: TimeInterval) {
-        let isBack = buttonName == "back" || buttonName == "menu"
-        if isPressed && !isBack { cancelBackDoubleClick() }
+    private func processButton(_ buttonName: String, isPressed: Bool, interfaceID: ObjectIdentifier?, sourceGeneration: RemoteGeneration) {
         if isPressed,
            sourceGeneration.supportsIdleConnectionManagement,
            let interfaceID,
@@ -876,7 +859,6 @@ final class RemoteInputHandler {
             // Remember the observed state so a held stale press cannot become a fresh action
             // when its release lands just after the quarantine expires.
             buttonState[buttonName] = isPressed
-            cancelBackDoubleClick()
             rmDebug("🛡 Connection quarantine suppressed \(buttonName) \(isPressed ? "down" : "up")")
             return
         }
@@ -889,7 +871,6 @@ final class RemoteInputHandler {
         }
 
         if onAdvancedButton?(buttonName, isPressed, interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid", sourceGeneration) == true {
-            cancelBackDoubleClick()
             if isPressed { Self.lastProcessedButton = buttonName; Self.lastProcessedTime = mach_absolute_time() }
             if ["mute", "volumeUp", "volumeDown"].contains(buttonName) { VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed) }
             return
@@ -916,17 +897,6 @@ final class RemoteInputHandler {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
         rmDebug("🎛 Button \(buttonName) \(isPressed ? "down" : "up") source=\(sourceGeneration.shortName) action=\(action.rawValue)")
-        if isBack {
-            let age = ProcessInfo.processInfo.systemUptime - eventTime
-            let editor = action == .backspace && heldModifierButtons.isEmpty && age >= -0.03 && age <= 0.3
-                ? focusedBackEditor() : nil
-            let source = (interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid") + ":" + buttonName
-            if backDoubleClick.handle(pressed: isPressed, source: source, context: editor, time: eventTime) {
-                stopRepeat(for: buttonName)
-                rmDebug("Back double-click: clear focused editor")
-                performChord(.clearInput)
-            }
-        }
         executeAction(
             action,
             button: buttonName,
@@ -936,28 +906,6 @@ final class RemoteInputHandler {
     }
 
     // MARK: - Button Identification
-
-    func cancelBackDoubleClick() { backDoubleClick.reset() }
-
-    /// Clear only an editable text control, never an app's list or file selection.
-    /// Retain its identity across the pair, not its text or its selection contents.
-    private func focusedBackEditor() -> BackEditor? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let target = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(target, 0.02)
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(target, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
-        let element = unsafeBitCast(focused, to: AXUIElement.self)
-        AXUIElementSetMessagingTimeout(element, 0.02)
-        var role: CFTypeRef?
-        var writable = DarwinBoolean(false)
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              let role = role as? String, ["AXTextArea", "AXTextField", "AXComboBox"].contains(role),
-              AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &writable) == .success,
-              writable.boolValue else { return nil }
-        return BackEditor(pid: app.processIdentifier, element: element)
-    }
 
     /// Pure internal mapping so tests can verify that unknown vendor-defined usages are ignored.
     nonisolated static func identifyButton(page: UInt32, usage: UInt32) -> String? {
@@ -1085,6 +1033,8 @@ final class RemoteInputHandler {
             sendKey(kVK_ANSI_C, flags: .maskControl)
         case .launchAgentClient:
             toggleAgentClient()
+        case .skillPicker:
+            sendSkillPickerTrigger()
         case .bulletIndent:
             // Dispatch just after the physical down event. Codex drops Cmd+Shift+8 when
             // it is posted synchronously from the volume-button release callback; this
@@ -1126,7 +1076,7 @@ final class RemoteInputHandler {
     private let repeatInitialDelay: TimeInterval = 0.4
     private let repeatInterval: TimeInterval = 0.05
     /// Word-wise deletion erases far more per tick than a character, so it repeats slower.
-    private let wordRepeatInterval: TimeInterval = 0.18
+    private let wordRepeatInterval: TimeInterval = 0.09
     private let repeatMaxTicks = 400   // ~20s safety cap in case a release is ever dropped
     private let longPressThreshold: TimeInterval = 0.4
 
@@ -1287,12 +1237,10 @@ final class RemoteInputHandler {
                 rmDebug("Advanced Menu: focused control is not an editor; skipped \(action.rawValue)"); return
             }
             performChord(.clearInput)
-        case .previousSession, .nextSession:
-            guard app.bundleIdentifier == Self.codexBundleID || app.bundleIdentifier == Self.claudeBundleID else {
-                rmDebug("Advanced Menu: session navigation unsupported for \(app.bundleIdentifier ?? "unknown")"); return
-            }
-            let shortcut = Self.sessionShortcut(action)
-            rmDebug("Advanced Menu: posting \(action.rawValue) shortcut to \(app.bundleIdentifier ?? "unknown")")
+        case .redo, .undo, .paste, .commandEnter:
+            // Let the focused app own undo history and clipboard interpretation.
+            // The nonactivating menu preserves focus; do not read/rewrite its text.
+            guard let shortcut = Self.advancedEditingShortcut(action) else { return }
             sendKey(shortcut.keyCode, flags: shortcut.flags)
         }
     }
@@ -1310,13 +1258,18 @@ final class RemoteInputHandler {
         sendKey(keyCode)
     }
 
-    nonisolated static func sessionShortcut(_ action: AdvancedMenuAction) -> (keyCode: Int, flags: CGEventFlags) {
-        let previous = action == .previousSession
-        return (previous ? kVK_ANSI_LeftBracket : kVK_ANSI_RightBracket, [.maskCommand, .maskShift])
+    nonisolated static func advancedEditingShortcut(_ action: AdvancedMenuAction) -> (keyCode: Int, flags: CGEventFlags)? {
+        switch action {
+        case .redo: return (kVK_ANSI_Z, [.maskCommand, .maskShift])
+        case .undo: return (kVK_ANSI_Z, .maskCommand)
+        case .paste: return (kVK_ANSI_V, .maskCommand)
+        case .commandEnter: return (kVK_Return, .maskCommand)
+        case .deleteAll, .skill: return nil
+        }
     }
 
     private func sendSkillPickerTrigger() {
-        // Resolve the recipient at release, when the character is actually emitted.
+        // Resolve the recipient when the character is actually emitted.
         // Never reuse the last client we summoned: the user may have changed focus.
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let trigger = Self.skillPickerTrigger(for: bundleID)
@@ -1352,7 +1305,6 @@ final class RemoteInputHandler {
     }
 
     private func stopAllHoldTimers() {
-        cancelBackDoubleClick()
         VolumeRevertGuard.shared.releaseRemoteButtons()
         repeatTimers.values.forEach { $0.invalidate() }
         repeatTimers.removeAll()

@@ -5,64 +5,24 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
-    func testBackDoubleClickClearsOnlyAfterSecondReleaseAndDoesNotOverlapPairs() {
-        var state = RemoteBackDoubleClick<String>()
-        for (time, pressed, clears) in [(1.0, true, false), (1.08, false, false),
-                                       (1.2, true, false), (1.28, false, true),
-                                       (1.35, true, false), (1.42, false, false)] {
-            XCTAssertEqual(state.handle(pressed: pressed, source: "remote:back", context: "editor", time: time), clears)
-        }
-        XCTAssertFalse(state.handle(pressed: false, source: "remote:back", context: "editor", time: 1.43))
-    }
-
-    func testBackDoubleClickRejectsHoldsAndSlowPairs() {
-        // A hold as either click must never clear, even when its release arrives
-        // close to the other click. Physical timestamps survive batched delivery.
-        for times in [[1.0, 1.6, 1.7, 1.8], [1.0, 1.1, 1.2, 1.8], [1.0, 1.1, 1.5, 1.6]] {
-            var state = RemoteBackDoubleClick<String>()
-            for (index, time) in times.enumerated() {
-                XCTAssertFalse(state.handle(pressed: index % 2 == 0, source: "a:back", context: "editor", time: time))
+    func testRapidBackPressesStayNormalUntilAdvancedMenuIsOpened() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let button = generation == .glassTouchSurface ? "menu" : "back"
+            var state = AdvancedMenuInputState()
+            XCTAssertEqual(RemoteButtonMapping.action(button: button, generation: generation, siriAction: .rightOpt), .backspace)
+            for index in 0..<6 {
+                for pressed in [true, false] {
+                    let result = state.handle(button: button, pressed: pressed, device: "remote", generation: generation,
+                                              time: 10 + Double(index) * 0.08 + (pressed ? 0 : 0.03))
+                    XCTAssertFalse(result.consumed)
+                    XCTAssertNil(result.command)
+                }
             }
+            state.show(owner: "remote")
+            XCTAssertTrue(state.handle(button: button, pressed: true, device: "remote", generation: generation, time: 11).consumed)
+            XCTAssertEqual(state.handle(button: button, pressed: false, device: "remote", generation: generation, time: 11.1).command,
+                           .perform(.deleteAll))
         }
-    }
-
-    func testBackDoubleClickRequiresSameRemoteButtonAndFocusedEditor() {
-        for (source, editor) in [("b:back", "editor"), ("a:menu", "editor"), ("a:back", "other editor")] {
-            var state = RemoteBackDoubleClick<String>()
-            XCTAssertFalse(state.handle(pressed: true, source: "a:back", context: "editor", time: 1))
-            XCTAssertFalse(state.handle(pressed: false, source: "a:back", context: "editor", time: 1.1))
-            XCTAssertFalse(state.handle(pressed: true, source: source, context: editor, time: 1.2))
-            XCTAssertFalse(state.handle(pressed: false, source: source, context: editor, time: 1.3))
-        }
-        var state = RemoteBackDoubleClick<String>()
-        _ = state.handle(pressed: true, source: "a", context: "editor", time: 1)
-        _ = state.handle(pressed: false, source: "a", context: "editor", time: 1.1)
-        _ = state.handle(pressed: true, source: "a", context: "editor", time: 1.2)
-        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "other editor", time: 1.3))
-    }
-
-    func testBackDoubleClickResetsForInterruptionDisconnectAndMissingEditor() {
-        for missingEditor in [false, true] {
-            var state = RemoteBackDoubleClick<String>()
-            _ = state.handle(pressed: true, source: "a", context: "editor", time: 1)
-            _ = state.handle(pressed: false, source: "a", context: "editor", time: 1.1)
-            if missingEditor {
-                XCTAssertFalse(state.handle(pressed: true, source: "a", context: nil, time: 1.15))
-            } else { state.reset() }
-            _ = state.handle(pressed: true, source: "a", context: "editor", time: 1.2)
-            XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 1.3))
-        }
-    }
-
-    func testBackDoubleClickCannotShortenHoldWithDuplicateDownOrReversedClock() {
-        var state = RemoteBackDoubleClick<String>()
-        for (pressed, time) in [(true, 1.0), (true, 1.55), (false, 1.6), (true, 1.7), (false, 1.8)] {
-            XCTAssertFalse(state.handle(pressed: pressed, source: "a", context: "editor", time: time))
-        }
-        XCTAssertFalse(state.handle(pressed: true, source: "a", context: "editor", time: 1.5))
-        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 1.4))
-        XCTAssertFalse(state.handle(pressed: true, source: "a", context: "editor", time: .infinity))
-        XCTAssertFalse(state.handle(pressed: false, source: "a", context: "editor", time: 2))
     }
 
     func testMuteRevertWindowIsBoundedAndDoesNotSuppressVolumeKeys() {
@@ -77,25 +37,33 @@ final class ModelTests: XCTestCase {
         suppression.update(button: "mute", pressed: true, now: now)
         XCTAssertFalse(suppression.contains("mute", now: now.addingTimeInterval(31)))
     }
-    func testAdvancedSessionShortcutsUseCommandShiftBrackets() throws {
-        for (action, code) in [(AdvancedMenuAction.previousSession, kVK_ANSI_LeftBracket), (.nextSession, kVK_ANSI_RightBracket)] {
-            let shortcut = RemoteInputHandler.sessionShortcut(action)
+    @MainActor
+    func testAdvancedEditingShortcutsAndSystemSymbols() throws {
+        let actions: [(AdvancedMenuAction, Int, CGEventFlags)] = [
+            (.redo, kVK_ANSI_Z, [.maskCommand, .maskShift]),
+            (.undo, kVK_ANSI_Z, .maskCommand), (.paste, kVK_ANSI_V, .maskCommand),
+            (.commandEnter, kVK_Return, .maskCommand)]
+        for (action, code, flags) in actions {
+            let shortcut = try XCTUnwrap(RemoteInputHandler.advancedEditingShortcut(action))
             let event = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: shortcut.keyCode, flags: shortcut.flags, keyDown: true))
             XCTAssertEqual(event.getIntegerValueField(.keyboardEventKeycode), Int64(code))
-            XCTAssertEqual(event.flags, [.maskCommand, .maskShift])
+            XCTAssertEqual(event.flags, flags)
+            XCTAssertNotNil(NSImage(systemSymbolName: action.symbolName(), accessibilityDescription: nil))
         }
+        XCTAssertNil(RemoteInputHandler.advancedEditingShortcut(.skill))
+        XCTAssertNil(RemoteInputHandler.advancedEditingShortcut(.deleteAll))
     }
 
-    func testAdvancedMenuRoutesOnlyFiveActionsAndPreservesExcludedKeys() {
+    func testAdvancedMenuRoutesActionsAndPreservesExcludedKeys() {
         var state = AdvancedMenuInputState()
         let generation = RemoteGeneration.aluminumClickpad
         XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: generation, time: 1).command, .showMenu)
         XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: generation, time: 1.1).command)
         state.show(owner: "a")
-        for button in ["siri", "power", "select", "navUp", "navDown", "navLeft", "navRight"] {
+        for button in ["siri", "select", "navUp", "navDown", "navLeft", "navRight"] {
             XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
         }
-        for (button, action) in [("back", AdvancedMenuAction.deleteAll), ("tv", .skill), ("volumeUp", .previousSession), ("volumeDown", .nextSession)] {
+        for (button, action) in [("back", AdvancedMenuAction.deleteAll), ("volumeUp", .redo), ("volumeDown", .undo), ("playPause", .paste), ("power", .commandEnter)] {
             XCTAssertTrue(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
             XCTAssertNil(state.handle(button: button, pressed: true, device: "a", generation: generation).command)
             XCTAssertFalse(state.handle(button: button, pressed: false, device: "b", generation: generation).consumed)
@@ -103,7 +71,45 @@ final class ModelTests: XCTestCase {
             XCTAssertNil(state.handle(button: button, pressed: false, device: "a", generation: generation).command)
         }
         XCTAssertEqual(AdvancedMenuInputState.trigger(for: .glassTouchSurface), "playPause")
+        XCTAssertNil(AdvancedMenuInputState.action(button: "playPause", generation: .glassTouchSurface))
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "volumeUp", generation: .glassTouchSurface), .redo)
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "volumeDown", generation: .glassTouchSurface), .undo)
         XCTAssertNil(AdvancedMenuInputState.action(button: "siri", generation: .glassTouchSurface))
+    }
+
+    func testMovedSkillLeavesAluminumMenuTVInactiveAndPreservesOldRemote() {
+        XCTAssertNil(AdvancedMenuInputState.action(button: "tv", generation: .aluminumClickpad))
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "tv", generation: .glassTouchSurface), .skill)
+        var state = AdvancedMenuInputState()
+        state.show(owner: "a")
+        for down in [true, true, false] {
+            let result = state.handle(button: "tv", pressed: down, device: "a", generation: .aluminumClickpad)
+            XCTAssertTrue(result.consumed)
+            XCTAssertNil(result.command)
+        }
+        XCTAssertTrue(state.isVisible)
+        state.dismiss()
+        XCTAssertFalse(state.handle(button: "tv", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+    }
+
+    func testAdvancedPowerOwnsBothEdgesAndDoesNotLeakReturn() {
+        var state = AdvancedMenuInputState()
+        for down in [true, false] {
+            XCTAssertFalse(state.handle(button: "power", pressed: down, device: "a", generation: .aluminumClickpad).consumed)
+        }
+        XCTAssertNil(AdvancedMenuInputState.action(button: "power", generation: .glassTouchSurface))
+        XCTAssertFalse(AdvancedMenuInputState.auxiliaryButtons.contains("power"), "Power must retain its HID owner")
+        state.show(owner: "a")
+        XCTAssertTrue(state.handle(button: "power", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+        XCTAssertNil(state.handle(button: "power", pressed: true, device: "a", generation: .aluminumClickpad).command)
+        XCTAssertEqual(state.handle(button: "power", pressed: false, device: "a", generation: .aluminumClickpad).command, .perform(.commandEnter))
+        state.dismiss()
+        state.show(owner: "a")
+        _ = state.handle(button: "power", pressed: true, device: "a", generation: .aluminumClickpad)
+        state.dismiss(); state.show(owner: "a")
+        let stale = state.handle(button: "power", pressed: false, device: "a", generation: .aluminumClickpad)
+        XCTAssertTrue(stale.consumed)
+        XCTAssertNil(stale.command)
     }
 
     func testAdvancedMenuCancelledPressCannotExecuteInLaterPresentation() {
@@ -118,17 +124,63 @@ final class ModelTests: XCTestCase {
     }
 
     func testAdvancedMenuHoldAndChordConsumeEitherReleaseOrder() {
-        for triggerReleasedFirst in [false, true] {
-            var state = AdvancedMenuInputState()
-            XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 10).command, .showMenu)
-            XCTAssertEqual(state.handle(button: "tv", pressed: true, device: "a", generation: .aluminumClickpad, time: 10.4).command, .perform(.skill))
-            state.dismiss() // the controller closes after executing the chord
-            for button in triggerReleasedFirst ? ["mute", "tv"] : ["tv", "mute"] {
-                let result = state.handle(button: button, pressed: false, device: "a", generation: .aluminumClickpad, time: 10.6)
-                XCTAssertTrue(result.consumed); XCTAssertNil(result.command)
+        for (button, action) in [("playPause", AdvancedMenuAction.paste),
+                                 ("volumeUp", .redo), ("volumeDown", .undo), ("power", .commandEnter)] {
+            for triggerReleasedFirst in [false, true] {
+                var state = AdvancedMenuInputState()
+                XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 10).command, .showMenu)
+                XCTAssertEqual(state.handle(button: button, pressed: true, device: "a", generation: .aluminumClickpad, time: 10.4).command, .perform(action))
+                state.dismiss()
+                for released in triggerReleasedFirst ? ["mute", button] : [button, "mute"] {
+                    let result = state.handle(button: released, pressed: false, device: "a", generation: .aluminumClickpad, time: 10.6)
+                    XCTAssertTrue(result.consumed); XCTAssertNil(result.command)
+                }
+                XCTAssertFalse(state.isVisible)
             }
-            XCTAssertFalse(state.isVisible)
         }
+    }
+
+    func testAdvancedMenuClosedChordNeverLeaksRapidAuxiliaryClicksToBaseline() {
+        for generation in [RemoteGeneration.aluminumClickpad, .glassTouchSurface] {
+            for triggerReleasedFirst in [false, true] {
+                var state = AdvancedMenuInputState()
+                let opener = AdvancedMenuInputState.trigger(for: generation)
+                _ = state.handle(button: opener, pressed: true, device: "a", generation: generation, time: 10)
+                XCTAssertEqual(state.handle(button: "volumeDown", pressed: true, device: "a", generation: generation, time: 10.4).command, .perform(.undo))
+                state.dismiss() // The controller hides the menu after its first action.
+                _ = state.handle(button: "volumeDown", pressed: false, device: "a", generation: generation, time: 10.5)
+                let buttons = ["volumeUp", "volumeDown", "back", "tv"] + (generation == .aluminumClickpad ? ["playPause", "power"] : [])
+                for button in buttons {
+                    for pressed in [true, true, false, true, false] {
+                        let result = state.handle(button: button, pressed: pressed, device: "a", generation: generation, time: 10.6)
+                        XCTAssertTrue(result.consumed, "A closed menu hold must not invoke \(button)'s baseline action")
+                        XCTAssertNil(result.command, "Only one action per menu presentation")
+                    }
+                }
+                for button in ["siri", "select", "navUp", "navDown", "navLeft", "navRight"] {
+                    XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
+                }
+                XCTAssertFalse(state.handle(button: "volumeUp", pressed: true, device: "b", generation: generation).consumed)
+                XCTAssertTrue(state.handle(button: "volumeUp", pressed: true, device: "a", generation: generation).consumed)
+                for released in triggerReleasedFirst ? [opener, "volumeUp"] : ["volumeUp", opener] {
+                    let result = state.handle(button: released, pressed: false, device: "a", generation: generation, time: 11)
+                    XCTAssertTrue(result.consumed); XCTAssertNil(result.command)
+                }
+                XCTAssertFalse(state.handle(button: "volumeUp", pressed: true, device: "a", generation: generation).consumed)
+                XCTAssertEqual(state.handle(button: opener, pressed: true, device: "a", generation: generation, time: 12).command, .showMenu)
+                XCTAssertEqual(state.handle(button: "volumeUp", pressed: true, device: "a", generation: generation, time: 12.1).command, .perform(.redo))
+            }
+        }
+    }
+
+    func testAdvancedMenuCancelledHoldConsumesClicksUntilReleaseOrCaptureReset() {
+        var state = AdvancedMenuInputState()
+        _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad)
+        state.dismiss() // Focus change or explicit cancellation, without an action.
+        XCTAssertTrue(state.handle(button: "volumeUp", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+        state.reset() // A disconnected capture source must not leave the chord stuck.
+        XCTAssertFalse(state.handle(button: "volumeUp", pressed: true, device: "a", generation: .aluminumClickpad).consumed)
+        XCTAssertFalse(state.handle(button: "volumeUp", pressed: false, device: "a", generation: .aluminumClickpad).consumed)
     }
 
     func testAdvancedMenuHoldClosesButTapLatchesUsingCaptureTime() {
@@ -450,10 +502,10 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: 3.3))
     }
 
-    func testOnlySiriIsCustomizableAndReservedPlayCannotBecomeAMediaKey() {
+    func testOnlySiriIsCustomizableAndPlayOpensSkill() {
         for siri in ButtonAction.allCases.filter(\.isAssignableToSiriButton) {
             XCTAssertEqual(RemoteButtonMapping.action(button: "siri", generation: .aluminumClickpad, siriAction: siri), siri)
-            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .aluminumClickpad, siriAction: siri), .none)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .aluminumClickpad, siriAction: siri), .skillPicker)
             XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .aluminumClickpad, siriAction: siri), .advancedMenu)
             XCTAssertEqual(RemoteButtonMapping.action(button: "power", generation: .aluminumClickpad, siriAction: siri), .enterKey)
             XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .glassTouchSurface, siriAction: siri), .advancedMenu)

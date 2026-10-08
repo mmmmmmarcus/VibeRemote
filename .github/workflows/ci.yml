@@ -19,5 +19,5 @@ jobs:
         run: swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
       - name: Validate scripts and metadata
         run: |
-          bash -n build.sh create_app_bundle.sh
+          bash -n build.sh create_app_bundle.sh build_audio_driver.sh install.sh scripts/clean-build.sh
           plutil -lint VibeRemote.entitlements

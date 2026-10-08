@@ -40,7 +40,7 @@ struct RemoteTextTouchFrame: Equatable {
             // finger record are the reliable physical-contact edge instead.
             guard bytes[offset + 3] != 0 || bytes[offset + 4] != 0 || bytes[offset + 5] != 0 else { continue }
             // Keep coordinates on roughly the same raw scale as the aluminum
-            // report so the shared shake and movement thresholds feel alike.
+            // report so the shared travel and movement thresholds feel alike.
             let x = Int(bytes[offset]) + 255 * Int(bytes[offset + 1] & 0x07) - 230
             let wrappedY = (bytes[offset + 2] & 0x80 != 0
                             ? Int(bytes[offset + 2])
@@ -52,89 +52,107 @@ struct RemoteTextTouchFrame: Equatable {
     }
 }
 
-/// One quick, forceful out-and-back motion enters caret mode while the same finger
-/// remains down. Coordinates for both remotes are normalized to a similar raw scale by
-/// their decoders, so one physical gesture threshold serves both generations.
-struct RemoteCaretShakeGate {
+/// Accumulated path length enters caret mode, independent of direction or speed.
+/// Small movements accumulate against an anchor so sensor jitter is not travel.
+struct RemoteCaretTravelGate {
     private struct Contact {
+        let id = UUID()
         let sender: UInt64
         let generation: RemoteGeneration
-        var pivotX: Int
-        var pivotY: Int
-        var directionX: Double?
-        var directionY: Double?
-        var reversals: Int
-        var firstStrokeAt: Date?
+        let originX: Int
+        var anchorX: Int
+        var anchorY: Int
+        var distance: Double
         var latest: RemoteTextTouchFrame
+        var velocityX: Double = 0
     }
     private var contact: Contact?
-    let strokeDistance: Double
-    let maximumDuration: TimeInterval
+    let activationDistance: Double
     let maximumFrameGap: TimeInterval
-    let reversalCosine: Double
 
-    init(strokeDistance: Double = 240, maximumDuration: TimeInterval = 0.9,
-         maximumFrameGap: TimeInterval = 0.25, reversalCosine: Double = -0.65) {
-        self.strokeDistance = strokeDistance
-        self.maximumDuration = maximumDuration
+    init(activationDistance: Double = 1000, maximumFrameGap: TimeInterval = 0.25) {
+        self.activationDistance = activationDistance
         self.maximumFrameGap = maximumFrameGap
-        self.reversalCosine = reversalCosine
     }
 
     var isTracking: Bool { contact != nil }
+    var contactID: UUID? { contact?.id }
+    var progress: CGFloat { CGFloat(min(1, (contact?.distance ?? 0) / activationDistance)) }
+    /// Bend around the stem tip, following displacement with a little velocity lead.
+    /// Saturation keeps fast shaking bounded without a hard visual stop.
+    var preparationLean: CGFloat {
+        guard let contact else { return 0 }
+        return -0.32 * CGFloat(tanh(Double(contact.latest.x - contact.originX) / 160 + contact.velocityX / 1800))
+    }
     var latest: RemoteTextTouchFrame? { contact?.latest }
-
     mutating func reset() { contact = nil }
 
     mutating func observe(_ frame: RemoteTextTouchFrame) -> Bool {
-        guard frame.count == 1 else {
-            reset()
-            return false
+        guard frame.count == 1 else { reset(); return false }
+        func start() -> Contact {
+            Contact(sender: frame.sender, generation: frame.generation,
+                    originX: frame.x, anchorX: frame.x, anchorY: frame.y, distance: 0, latest: frame)
         }
         guard var current = contact, current.sender == frame.sender,
               current.generation == frame.generation,
               frame.time > current.latest.time,
               frame.time.timeIntervalSince(current.latest.time) <= maximumFrameGap else {
-            contact = Contact(sender: frame.sender, generation: frame.generation,
-                              pivotX: frame.x, pivotY: frame.y,
-                              directionX: nil, directionY: nil, reversals: 0,
-                              firstStrokeAt: nil, latest: frame)
-            return false
+            contact = start(); return false
         }
+        // A discontinuous report must not count as a deliberate long swipe.
+        guard abs(frame.x - current.latest.x) < 700, abs(frame.y - current.latest.y) < 700 else {
+            contact = start(); return false
+        }
+        let dt = frame.time.timeIntervalSince(current.latest.time)
+        let velocity = Double(frame.x - current.latest.x) / max(1.0 / 240, dt)
+        let blend = 1 - exp(-dt / 0.035)
+        current.velocityX += (velocity - current.velocityX) * blend
         current.latest = frame
-        if let start = current.firstStrokeAt,
-           frame.time.timeIntervalSince(start) > maximumDuration {
-            current.pivotX = frame.x
-            current.pivotY = frame.y
-            current.directionX = nil
-            current.directionY = nil
-            current.reversals = 0
-            current.firstStrokeAt = nil
-            contact = current
-            return false
+        let distance = hypot(Double(frame.x - current.anchorX), Double(frame.y - current.anchorY))
+        if distance >= 12 {
+            current.distance += distance
+            current.anchorX = frame.x; current.anchorY = frame.y
         }
-        let dx = Double(frame.x - current.pivotX)
-        let dy = Double(frame.y - current.pivotY)
-        let distance = hypot(dx, dy)
-        guard distance >= strokeDistance else { contact = current; return false }
-        let unitX = dx / distance, unitY = dy / distance
-        if let oldX = current.directionX, let oldY = current.directionY {
-            let dot = unitX * oldX + unitY * oldY
-            // Ordinary dragging can bend or turn. Only a strong return along the
-            // preceding path counts as an intentional shake reversal.
-            guard dot <= reversalCosine else { contact = current; return false }
-            current.reversals += 1
-        } else {
-            current.firstStrokeAt = frame.time
-        }
-        current.pivotX = frame.x
-        current.pivotY = frame.y
-        current.directionX = unitX
-        current.directionY = unitY
-        let activated = current.reversals >= 1 &&
-            frame.time.timeIntervalSince(current.firstStrokeAt ?? frame.time) <= maximumDuration
         contact = current
-        return activated
+        return current.distance >= activationDistance
+    }
+}
+
+/// A retargetable spring preserves position and velocity through finger reversals
+/// and the preparation-to-full handoff. Substeps bound stalls on the main run loop.
+struct CaretBubbleSpring {
+    var value: CGFloat = 0
+    var velocity: CGFloat = 0
+    mutating func advance(to target: CGFloat, elapsed: TimeInterval, response: Double, damping: Double) {
+        var remaining = min(0.05, max(0, elapsed))
+        let frequency = CGFloat(2 * Double.pi / response)
+        while remaining > 0 {
+            let dt = CGFloat(min(remaining, 1.0 / 240))
+            let acceleration = frequency * frequency * (target - value) - 2 * CGFloat(damping) * frequency * velocity
+            velocity += acceleration * dt
+            value += velocity * dt
+            remaining -= Double(dt)
+        }
+    }
+    func isSettled(at target: CGFloat) -> Bool { abs(value - target) < 0.001 && abs(velocity) < 0.005 }
+}
+
+
+/// Monotonic idle time applies only to full positioning, never to preparation.
+/// Only accepted movement extends the deadline; stationary reports and lifts do not.
+struct CaretIdleDeadline {
+    static let duration: TimeInterval = 3
+    private var deadline: TimeInterval?
+    mutating func start(at time: TimeInterval) { deadline = time + Self.duration }
+    mutating func moved(at time: TimeInterval) {
+        guard deadline != nil else { return }
+        deadline = time + Self.duration
+    }
+    mutating func reset() { deadline = nil }
+    mutating func takeExpired(at time: TimeInterval) -> Bool {
+        guard let deadline, time >= deadline else { return false }
+        self.deadline = nil
+        return true
     }
 }
 
@@ -143,8 +161,8 @@ enum RemoteTouchSwipeDirection: Equatable, Sendable {
 }
 
 /// The black-glass remote has no directional ring. A quick, mostly straight stroke followed
-/// by lift supplies one arrow-key tap. The recognizer waits for lift so an out-and-back shake
-/// can take ownership first, and it never applies to the aluminum clickpad.
+/// by lift supplies one arrow-key tap. The recognizer waits for lift so accumulated
+/// travel can enter caret mode first; it never applies to the aluminum clickpad.
 struct RemoteTouchSwipeGate {
     private struct Contact {
         let sender: UInt64
@@ -215,10 +233,16 @@ enum CaretNavigation {
         for character in text { offset += String(character).utf16.count; result.append(offset) }
         return result
     }
+    static func samplingOrder(_ text: String, near offset: Int) -> [Int] {
+        let stops = boundaries(text)
+        let edges = [0, text.utf16.count]
+        return Array(Set(edges)).sorted() + stops.filter { !edges.contains($0) }
+            .sorted { abs($0 - offset) == abs($1 - offset) ? $0 < $1 : abs($0 - offset) < abs($1 - offset) }
+    }
     static func nearest(to point: CGPoint, positions: [Int: CGRect], current: Int) -> Int? {
         func distance(_ r: CGRect) -> CGFloat { hypot(r.minX - point.x, (r.midY - point.y) * 1.8) }
-        // Used when lifting/confirming. During the drag, the preview follows the
-        // finger freely instead of sticking to any of these insertion stops.
+        // Horizontal character selection stays unhindered. The controller first
+        // chooses a text row, so a long adjacent row cannot steal this target.
         guard let best = positions.min(by: {
             let left = distance($0.value), right = distance($1.value)
             return left == right ? $0.key < $1.key : left < right
@@ -226,11 +250,35 @@ enum CaretNavigation {
         if let old = positions[current], abs(distance(old) - distance(best.value)) < 0.001 { return current }
         return best.key
     }
-    static func preview(at point: CGPoint, height: CGFloat, editor: CGRect) -> CGRect {
-        let h = min(height, editor.height)
+    static func sameLine(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.midY - rhs.midY) <= max(2, min(lhs.height, rhs.height) * 0.25)
+    }
+    static func lineSnappedTarget(to point: CGPoint, positions: [Int: CGRect], current: Int) -> Int? {
+        guard let currentLine = positions[current] else {
+            return nearest(to: point, positions: positions, current: current)
+        }
+        // Choose by vertical distance first, independent of text length or X.
+        // Equal distances retain the current row for a stable boundary.
+        let closest = positions.min {
+            let a = abs($0.value.midY - point.y), b = abs($1.value.midY - point.y)
+            return a == b ? $0.key < $1.key : a < b
+        }?.value ?? currentLine
+        var line = currentLine
+        if !sameLine(closest, currentLine) {
+            let distance = closest.midY - currentLine.midY
+            let travel = (point.y - currentLine.midY) * (distance > 0 ? 1 : -1)
+            // Cross 65% of the actual row spacing before changing row. The reverse
+            // threshold lies on the other side, preventing boundary flutter.
+            if travel >= abs(distance) * 0.65 { line = closest }
+        }
+        let row = positions.filter { sameLine($0.value, line) }
+        return nearest(to: CGPoint(x: point.x, y: line.midY), positions: row, current: current)
+    }
+    static func preview(at point: CGPoint, line: CGRect, editor: CGRect) -> CGRect {
         let x = min(max(point.x, editor.minX), editor.maxX)
-        let y = min(max(point.y - h / 2, editor.minY), editor.maxY - h)
-        return CGRect(x: x, y: y, width: 2, height: h)
+        // Use calibrated text geometry for Y; the overlay clips the stem at editor
+        // edges. Never clamp a row into the gap or shift its insertion anchor.
+        return CGRect(x: x, y: line.minY, width: 2, height: line.height)
     }
 }
 
@@ -256,6 +304,10 @@ struct CaretMotionFilter {
 /// actual insertion point. Calibrate against nonempty glyph ranges, never against
 /// another zero-length range (which would repeat the same error at commit time).
 enum CaretRangeGeometry {
+    static func isInsertionRect(_ rect: CGRect) -> Bool {
+        rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
+            && rect.width >= 0 && rect.width <= 3 && rect.height > 0
+    }
     enum Correction: String {
         case none, topOrigin
         func apply(to rect: CGRect) -> CGRect {
@@ -288,6 +340,39 @@ enum CaretRangeGeometry {
 struct CaretMarkerNavigator<Marker> {
     let text: String
     var markers: [Int: Marker]
+    /// A focused editor's container marker and its text leaf marker can describe
+    /// the same character offset but have different geometry. Use only descendant
+    /// leaves whose prefix + content + suffix exactly reconstruct this editor.
+    /// Never overwrite a good selection anchor with an unusable container marker.
+    @discardableResult
+    mutating func seedLeaf(prefix: String, content: String, suffix: String,
+                           start: Marker, end: Marker, usable: (Marker) -> Bool) -> Int {
+        guard !content.isEmpty, prefix + content + suffix == text else { return 0 }
+        let offset = prefix.utf16.count
+        var count = 0
+        if usable(start) { markers[offset] = start; count += 1 }
+        if usable(end) { markers[offset + content.utf16.count] = end; count += 1 }
+        return count
+    }
+    /// A web editor's range endpoints may be container-anchored markers whose
+    /// collapsed bounds are the whole editor. Step into neighboring text and back
+    /// to obtain a leaf-anchored marker at the SAME verified UTF-16 offset. Never
+    /// estimate the insertion X from a glyph (which would be wrong for RTL/wraps).
+    func reanchoredMarker(at target: Int, step: (Marker, Bool) -> (Marker, String)?) -> Marker? {
+        let value = text as NSString
+        guard target >= 0, target <= value.length, let original = markers[target] else { return nil }
+        for forward in [true, false] where forward ? target < value.length : target > 0 {
+            guard let (neighbor, segment) = step(original, forward), !segment.isEmpty else { continue }
+            let length = segment.utf16.count
+            let start = forward ? target : target - length
+            guard start >= 0, length <= value.length - start,
+                  value.substring(with: NSRange(location: start, length: length)) == segment,
+                  let (reanchored, reverseSegment) = step(neighbor, !forward),
+                  reverseSegment == segment else { continue }
+            return reanchored
+        }
+        return nil
+    }
     mutating func marker(at target: Int, step: (Marker, Bool) -> (Marker, String)?) -> Marker? {
         let value = text as NSString
         guard target >= 0, target <= value.length else { return nil }
@@ -332,16 +417,81 @@ enum CaretOverlayGeometry {
 }
 
 struct CaretButtonGate {
-    enum Intent: Equatable { case exit, exitVoice, consume, pass }
+    enum Intent: Equatable { case confirm, exit, exitVoice, consume, pass }
     private(set) var held: Set<String> = []
     mutating func handle(button: String, down: Bool, device: String, active: Bool) -> Intent {
         let key = device + ":" + button
         if !down { return held.remove(key) != nil ? .consume : .pass }
         if held.contains(key) { return .consume }
+        if active && button == "select" {
+            held.insert(key); return .confirm
+        }
         if active && ["siri", "power"].contains(button) {
             held.insert(key); return button == "siri" ? .exitVoice : .exit
         }
         return .pass
+    }
+}
+
+/// A direction click owns its associated touch until lift. Button events and
+/// passive touch reports arrive independently; canceling the visual caret alone
+/// would let the very next report prepare it again while the button is held.
+struct CaretNavigationTouchGate {
+    private var held: Set<String> = []
+    private var latest: RemoteTextTouchFrame?
+    private var lockedSender: UInt64?
+    private var waitingForLift = false
+    private var settlingUntil = Date.distantPast
+    private var completedLift: (sender: UInt64, time: Date)?
+
+    mutating func button(_ button: String, down: Bool, device: String,
+                         generation: RemoteGeneration, now: Date) -> Bool {
+        guard generation == .aluminumClickpad,
+              ["navUp", "navDown", "navLeft", "navRight"].contains(button) else { return false }
+        let key = device + ":" + button
+        if down {
+            held.insert(key)
+            if lockedSender == nil, let latest, latest.count > 0,
+               now.timeIntervalSince(latest.time) >= 0, now.timeIntervalSince(latest.time) <= 0.25 {
+                lockedSender = latest.sender
+                waitingForLift = true
+            }
+        } else if held.remove(key) != nil, held.isEmpty {
+            // Catch queued touch reports from a quick click even if its HID up
+            // callback precedes the passive contact report.
+            if lockedSender != nil, !waitingForLift {
+                lockedSender = nil
+                settlingUntil = .distantPast
+            } else { settlingUntil = now.addingTimeInterval(0.18) }
+        }
+        return true
+    }
+
+    mutating func suppress(_ frame: RemoteTextTouchFrame) -> Bool {
+        guard frame.generation == .aluminumClickpad else { return false }
+        if let lift = completedLift, lift.sender == frame.sender, frame.time <= lift.time { return true }
+        if frame.count == 0 {
+            if latest?.sender == frame.sender { latest = nil }
+            if lockedSender == nil, !held.isEmpty { lockedSender = frame.sender }
+            guard lockedSender == frame.sender else { return false }
+            completedLift = (frame.sender, frame.time)
+            waitingForLift = false
+            if held.isEmpty {
+                lockedSender = nil
+                // An explicit lift ends contact ownership even during settling.
+                settlingUntil = .distantPast
+            }
+            return true
+        }
+        latest = frame
+        guard !held.isEmpty || waitingForLift || frame.time <= settlingUntil else {
+            lockedSender = nil
+            return false
+        }
+        if lockedSender == nil { lockedSender = frame.sender }
+        guard lockedSender == frame.sender else { return false }
+        waitingForLift = true
+        return true
     }
 }
 
@@ -362,17 +512,12 @@ final class RemoteCaretController {
         let selection: CFRange
         let bounds: CGRect
     }
-    private struct TouchPreview {
-        let owner: UInt64
-        let generation: RemoteGeneration
-        let editor: Editor
-        let caret: CGRect
-    }
-    var onVoiceSuppression: ((Bool) -> Void)?
     var onDirectionalSwipe: ((RemoteTouchSwipeDirection) -> Void)?
+    var onVoiceSuppression: ((Bool) -> Void)?
     private var editor: Editor?
     private var positions: [Int: CGRect] = [:]
     private var remaining: [Int] = []
+    private var endpointRetries: [Int: Int] = [:]
     private var destination = 0
     private var displayedCaret: (offset: Int, rect: CGRect)?
     private var aim = CGPoint.zero
@@ -383,12 +528,15 @@ final class RemoteCaretController {
     private var owner: UInt64?
     private var active = false
     private var activeGeneration: RemoteGeneration?
-    private var shakeGesture = RemoteCaretShakeGate()
+    private var travelGesture = RemoteCaretTravelGate()
     private var swipeGesture = RemoteTouchSwipeGate()
-    private var touchPreview: TouchPreview?
-    private var selectPressed = false
-    private var touchBlockedUntil = Date.distantPast
+    private var heldSurfaceButtons: Set<String> = []
+    private var surfaceSettlingUntil = Date.distantPast
+    private var preparationContact: UUID?
+    private var idleDeadline = CaretIdleDeadline()
+    private var expiredContact: RemoteTextTouchFrame?
     private var buttons = CaretButtonGate()
+    private var navigationTouch = CaretNavigationTouchGate()
     private var swallowedReturns: Set<Int> = []
     private var notifiedSuppression = false
     private var timer: Timer?
@@ -400,33 +548,26 @@ final class RemoteCaretController {
     private var diagnosingEntry = false
     var isActive: Bool { active }
 
-    func reset() {
-        buttons = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false
-        selectPressed = false; touchBlockedUntil = .distantPast
-        cancel()
-    }
+    func reset() { heldSurfaceButtons.removeAll(); surfaceSettlingUntil = .distantPast; buttons = .init(); navigationTouch = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false; cancel() }
     func stop() { reset() }
 
-    /// Surface clicks never enter caret mode. The black-glass click remains Enter;
-    /// the aluminum click is reserved while Power remains its submit button.
+    /// A mechanical click confirms only while positioning; consume both edges so
+    /// the old remote cannot also submit Enter after placing the caret.
     func button(_ button: String, pressed down: Bool, device: String,
                 generation: RemoteGeneration) -> Bool {
         if button == "select" {
-            if down {
-                cancel()
-                // A mechanical surface press is Enter on this remote. Ignore all touch
-                // motion while it is held so press jitter cannot also become a swipe or
-                // reopen the cursor preview.
-                selectPressed = true
-            } else {
-                selectPressed = false
-                touchBlockedUntil = Date().addingTimeInterval(0.16)
-                shakeGesture.reset(); swipeGesture.reset(); endTouchPreview()
-            }
-            return false
+            if down { heldSurfaceButtons.insert(device) }
+            else { heldSurfaceButtons.remove(device); surfaceSettlingUntil = Date().addingTimeInterval(0.16) }
+            swipeGesture.reset()
+        }
+        if navigationTouch.button(button, down: down, device: device, generation: generation, now: Date()) {
+            if down { cancel() }
+            return false // Navigation still receives both edges and normal repeat.
         }
         let intent = buttons.handle(button: button, down: down, device: device, active: active)
         switch intent {
+        case .confirm:
+            commit(); return true
         case .exitVoice:
             voiceBlockedByPress = true; cancel(); return true
         case .exit:
@@ -464,8 +605,18 @@ final class RemoteCaretController {
 
     func receive(_ frame: RemoteTextTouchFrame) {
         guard Date().timeIntervalSince(frame.time) <= 0.18 else { cancel(); return }
-        if selectPressed || frame.time < touchBlockedUntil {
-            shakeGesture.reset(); swipeGesture.reset(); endTouchPreview()
+        guard !navigationTouch.suppress(frame) else { return }
+        // Preserve the remote update's mechanical-click jitter guard without
+        // replacing center-click confirmation with the old Enter-only behavior.
+        if !heldSurfaceButtons.isEmpty || frame.time < surfaceSettlingUntil {
+            swipeGesture.reset(); travelGesture.reset()
+            if !active { cancel() }
+            return
+        }
+        // A timeout while the finger rests on the pad must not immediately show
+        // preparation again. Require that same contact to lift before a fresh entry.
+        if let expired = expiredContact, expired.sender == frame.sender, expired.generation == frame.generation {
+            if frame.count == 0 { expiredContact = nil }
             return
         }
         if active {
@@ -473,7 +624,10 @@ final class RemoteCaretController {
             guard owner == nil || owner == frame.sender else { return }
             owner = frame.sender
             if frame.count != 1 {
-                commit()
+                // Lift settles only the preview. The session and real selection
+                // survive repositioning the finger for another stroke.
+                if isDragging { settle() }
+                lastTouch = nil; motion.reset()
                 return
             }
             guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else {
@@ -490,57 +644,56 @@ final class RemoteCaretController {
             guard abs(dx) < 700, abs(dy) < 700, let editor else { return }
             let movement = motion.movement(dx: dx, dy: dy)
             guard movement != .zero else { return }
+            idleDeadline.moved(at: ProcessInfo.processInfo.systemUptime)
             isDragging = true
             aim.x = min(max(aim.x + movement.x, editor.bounds.minX), editor.bounds.maxX - 1)
-            aim.y = min(max(aim.y + movement.y, editor.bounds.minY), editor.bounds.maxY - 1)
+            aim.y = min(max(aim.y + movement.y * 0.65, editor.bounds.minY), editor.bounds.maxY - 1)
             if Date().timeIntervalSince(lastRead) > 0.025 {
                 lastRead = Date()
                 guard valid() else { cancel(); return }
                 refreshDestination(in: editor)
             }
             if let target = displayedCaret {
-                let free = CaretNavigation.preview(at: aim, height: target.rect.height, editor: editor.bounds)
+                let free = CaretNavigation.preview(at: aim, line: target.rect, editor: editor.bounds)
                 overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
             }
         } else {
-            guard buttons.held.isEmpty else {
-                shakeGesture.reset(); swipeGesture.reset(); endTouchPreview(); return
-            }
-            let wasTrackingSwipe = swipeGesture.isTracking
+            guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else { swipeGesture.reset(); return }
             let direction = swipeGesture.observe(frame)
-            if shakeGesture.observe(frame) {
-                swipeGesture.reset()
-                beginShakeGesture()
+            let recognized = travelGesture.observe(frame)
+            if frame.count == 0 {
+                cancel()
+                if let direction { onDirectionalSwipe?(direction) }
                 return
             }
-            if frame.generation == .glassTouchSurface, frame.count == 1, !wasTrackingSwipe {
-                beginTouchPreview(frame)
-            }
-            if frame.count == 0 {
-                endTouchPreview()
-                if let direction {
-                    rmDebug("Glass touch swipe: \(direction)")
-                    onDirectionalSwipe?(direction)
-                }
+            guard let contact = travelGesture.contactID else { cancel(); return }
+            if preparationContact != contact { prepare(contact: contact) }
+            if recognized {
+                swipeGesture.reset()
+                beginTravelGesture()
+            } else if let editor, let shown = displayedCaret {
+                overlay.show(caret: shown.rect, editor: editor.bounds, progress: travelGesture.progress,
+                             preparationLean: travelGesture.preparationLean)
             }
         }
     }
 
-    private func beginTouchPreview(_ frame: RemoteTextTouchFrame) {
-        guard touchPreview == nil,
-              let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { return }
-        touchPreview = TouchPreview(owner: frame.sender, generation: frame.generation,
-                                    editor: candidate, caret: rect)
-        overlay.show(caret: rect, editor: candidate.bounds, progress: 0.45)
+    private func prepare(contact: UUID) {
+        // One AX attempt per continuous contact, including in unsupported editors.
+        // Touch feedback never enables voice suppression or changes the real selection.
+        preparationContact = contact
+        editor = nil; displayedCaret = nil
+        geometryCorrection = nil; markerGeometry = nil
+        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else {
+            overlay.hide(); return
+        }
+        editor = candidate; displayedCaret = (candidate.selection.location, rect)
+        overlay.show(caret: rect, editor: candidate.bounds, progress: 0)
+        startWatchdog()
     }
 
-    private func endTouchPreview() {
-        touchPreview = nil
-        if !active { overlay.hide() }
-    }
-
-    private func beginShakeGesture() {
-        guard let frame = shakeGesture.latest else { return }
+    private func beginTravelGesture() {
+        guard let frame = travelGesture.latest else { return }
         begin(owner: frame.sender, generation: frame.generation)
         if active { lastTouch = frame }
     }
@@ -548,22 +701,18 @@ final class RemoteCaretController {
     private func begin(owner: UInt64? = nil, generation: RemoteGeneration = .aluminumClickpad) {
         diagnosingEntry = true
         defer { diagnosingEntry = false }
-        let prepared = touchPreview.flatMap { preview -> (Editor, CGRect)? in
-            guard preview.owner == owner, preview.generation == generation else { return nil }
-            return (preview.editor, preview.caret)
-        }
-        guard let (candidate, rect) = prepared ?? observe().flatMap({ candidate in
-            caret(candidate.selection.location, in: candidate).map { (candidate, $0) }
-        }) else { cancel(); return }
-        touchPreview = nil; swipeGesture.reset()
+        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { cancel(); return }
+        preparationContact = nil
         editor = candidate; active = true; activeGeneration = generation
+        idleDeadline.start(at: ProcessInfo.processInfo.systemUptime)
         self.owner = owner; lastTouch = nil
         isDragging = false
         motion.reset()
         destination = candidate.selection.location
         displayedCaret = (destination, rect)
         positions = [destination: rect]; aim = CGPoint(x: rect.minX, y: rect.midY)
-        remaining = CaretNavigation.boundaries(candidate.text).sorted { abs($0 - destination) < abs($1 - destination) }
+        endpointRetries.removeAll()
+        remaining = CaretNavigation.samplingOrder(candidate.text, near: destination)
         publishSuppression(true)
         gatherPositions()
         overlay.show(caret: rect, editor: candidate.bounds, progress: 1)
@@ -572,8 +721,8 @@ final class RemoteCaretController {
     }
 
     private func commit() {
-        // Lift resolves the freely moving preview to the nearest insertion point
-        // before committing the real selection.
+        // A click or idle expiry resolves the same nearest boundary as a lift,
+        // then writes the real selection exactly once.
         if isDragging, !settle() { return }
         guard valid(), let editor, let displayedCaret,
               let freshRect = caret(displayedCaret.offset, in: editor),
@@ -596,9 +745,9 @@ final class RemoteCaretController {
     }
 
     func cancel() {
-        active = false; activeGeneration = nil; shakeGesture.reset(); swipeGesture.reset()
-        touchPreview = nil
-        editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll()
+        idleDeadline.reset(); expiredContact = nil
+        active = false; activeGeneration = nil; travelGesture.reset(); swipeGesture.reset(); preparationContact = nil
+        editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll(); endpointRetries.removeAll()
         isDragging = false
         geometryCorrection = nil
         markerGeometry = nil
@@ -611,12 +760,12 @@ final class RemoteCaretController {
     private func refreshDestination(in editor: Editor) {
         gatherPositions()
         if let offset = offset(at: aim, in: editor), let rect = caret(offset, in: editor) { positions[offset] = rect }
-        if let next = CaretNavigation.nearest(to: aim, positions: positions, current: destination), let rect = positions[next] {
+        if let next = CaretNavigation.lineSnappedTarget(to: aim, positions: positions, current: destination), let rect = positions[next] {
             destination = next; displayedCaret = (next, rect)
         }
     }
 
-    /// Resolve the free preview to a real insertion boundary before commit.
+    /// Snap only the preview on lift; the real selection waits for a click or idle expiry.
     @discardableResult
     private func settle() -> Bool {
         guard active, valid(), let editor else { cancel(); return false }
@@ -641,8 +790,23 @@ final class RemoteCaretController {
         let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                guard self.active, self.valid() else { self.cancel(); return }
-                self.gatherPositions()
+                guard self.valid() else { self.cancel(); return }
+                if self.active {
+                    if self.idleDeadline.takeExpired(at: ProcessInfo.processInfo.systemUptime) {
+                        let contact = self.lastTouch
+                        rmDebug("Caret positioning idle for 3 seconds; settling and committing")
+                        self.commit()
+                        self.expiredContact = contact
+                        return
+                    }
+                    self.gatherPositions()
+                } else {
+                    guard self.preparationContact != nil, let last = self.travelGesture.latest,
+                          Date().timeIntervalSince(last.time) < 0.3,
+                          let editor = self.editor, let shown = self.displayedCaret,
+                          let fresh = self.caret(shown.offset, in: editor),
+                          CaretOverlayGeometry.aligned(fresh, shown.rect) else { self.cancel(); return }
+                }
             }
         }
         timer = t; RunLoop.main.add(t, forMode: .common)
@@ -661,6 +825,15 @@ final class RemoteCaretController {
         while !remaining.isEmpty, count < 16, ProcessInfo.processInfo.systemUptime < deadline {
             let offset = remaining.removeFirst(); count += 1
             if let rect = caret(offset, in: editor) { positions[offset] = rect }
+            else if offset == 0 || offset == editor.text.utf16.count {
+                // A bounded marker query can time out while discovering the leaf.
+                // Retry endpoints after the other positions populate the cache.
+                let attempts = endpointRetries[offset, default: 0]
+                if attempts < 2 {
+                    endpointRetries[offset] = attempts + 1
+                    remaining.append(offset)
+                }
+            }
         }
     }
 
@@ -708,6 +881,7 @@ final class RemoteCaretController {
                   unpack(attribute(editor.element, kAXBoundsForRangeParameterizedAttribute, value), .cgRect, &rect),
                   rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite,
                   rect.height.isFinite, rect.height > 0 else { entryDiagnostic("range bounds unavailable (collapsed=\(requested.length == 0))"); return nil }
+            guard requested.length != 0 || CaretRangeGeometry.isInsertionRect(rect) else { return nil }
             entryDiagnostic("range geometry (collapsed=\(requested.length == 0)): \(rect)")
             return rect
         }
@@ -763,8 +937,11 @@ final class RemoteCaretController {
                         markers[editor.selection.location] = current
                     }
                 }
+                let context = MarkerGeometry(element: editor.element, provider: provider,
+                                             navigator: CaretMarkerNavigator(text: editor.text, markers: markers))
+                seedTextLeafMarkers(in: context, editorRange: range)
                 entryDiagnostic("verified editor-local text markers")
-                return MarkerGeometry(element: editor.element, provider: provider, navigator: CaretMarkerNavigator(text: editor.text, markers: markers))
+                return context
             }
             guard let parent = attribute(provider, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
             candidate = unsafeBitCast(parent, to: AXUIElement.self)
@@ -772,25 +949,105 @@ final class RemoteCaretController {
         entryDiagnostic("editor-local text markers unavailable")
         return nil
     }
+
+    private func seedTextLeafMarkers(in context: MarkerGeometry, editorRange: AXTextMarkerRange) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.12
+        let editorStart = AXTextMarkerRangeCopyStartMarker(editorRange)
+        let editorEnd = AXTextMarkerRangeCopyEndMarker(editorRange)
+        var pending: [(AXUIElement, Int)] = [(context.element, 0)]
+        var visited: [AXUIElement] = []
+        var seeded = 0
+        func read(_ node: AXUIElement, _ name: String, _ parameter: CFTypeRef? = nil) -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            return attribute(node, name, parameter)
+        }
+        func usable(_ marker: AXTextMarker) -> Bool {
+            let collapsed = AXTextMarkerRangeCreate(nil, marker, marker)
+            var rect = CGRect.zero
+            return unpack(read(context.provider, "AXBoundsForTextMarkerRange", collapsed), .cgRect, &rect)
+                && CaretRangeGeometry.isInsertionRect(rect)
+        }
+        while let (node, depth) = pending.popLast(), visited.count < 96,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            guard !visited.contains(where: { CFEqual($0, node) }) else { continue }
+            visited.append(node)
+            let role = read(node, kAXRoleAttribute) as? String
+            if role == kAXStaticTextRole,
+               let raw = read(context.provider, "AXTextMarkerRangeForUIElement", node),
+               CFGetTypeID(raw) == AXTextMarkerRangeGetTypeID() {
+                let leaf = unsafeBitCast(raw, to: AXTextMarkerRange.self)
+                let start = AXTextMarkerRangeCopyStartMarker(leaf)
+                let end = AXTextMarkerRangeCopyEndMarker(leaf)
+                let before = AXTextMarkerRangeCreate(nil, editorStart, start)
+                let after = AXTextMarkerRangeCreate(nil, end, editorEnd)
+                if let content = read(context.provider, "AXStringForTextMarkerRange", leaf) as? String,
+                   let prefix = read(context.provider, "AXStringForTextMarkerRange", before) as? String,
+                   let suffix = read(context.provider, "AXStringForTextMarkerRange", after) as? String {
+                    seeded += context.navigator.seedLeaf(prefix: prefix, content: content, suffix: suffix,
+                                                         start: start, end: end, usable: usable)
+                }
+            }
+            // Stay inside this editor. Other embedded controls/editors are not
+            // sources for its text geometry, and no document-wide index is used.
+            guard depth < 10,
+                  depth == 0 || ![kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole].contains(role ?? ""),
+                  let children = read(node, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+            for child in children.prefix(max(0, 96 - visited.count - pending.count)).reversed() {
+                pending.append((child, depth + 1))
+            }
+        }
+        entryDiagnostic("verified text-leaf insertion anchors=\(seeded)")
+    }
+
     private func markerBounds(_ range: NSRange, in context: MarkerGeometry) -> CGRect? {
         let deadline = ProcessInfo.processInfo.systemUptime + 0.03
+        func step(_ current: AXTextMarker, _ forward: Bool) -> (AXTextMarker, String)? {
+            guard ProcessInfo.processInfo.systemUptime < deadline,
+                  let raw = attribute(context.provider, forward ? "AXNextTextMarkerForTextMarker" : "AXPreviousTextMarkerForTextMarker", current),
+                  CFGetTypeID(raw) == AXTextMarkerGetTypeID() else { return nil }
+            let next = unsafeBitCast(raw, to: AXTextMarker.self)
+            let span = AXTextMarkerRangeCreate(nil, forward ? current : next, forward ? next : current)
+            guard let segment = attribute(context.provider, "AXStringForTextMarkerRange", span) as? String else { return nil }
+            return (next, segment)
+        }
         func marker(_ offset: Int) -> AXTextMarker? {
-            context.navigator.marker(at: offset) { current, forward in
-                guard ProcessInfo.processInfo.systemUptime < deadline,
-                      let raw = attribute(context.provider, forward ? "AXNextTextMarkerForTextMarker" : "AXPreviousTextMarkerForTextMarker", current),
-                      CFGetTypeID(raw) == AXTextMarkerGetTypeID() else { return nil }
-                let next = unsafeBitCast(raw, to: AXTextMarker.self)
-                let span = AXTextMarkerRangeCreate(nil, forward ? current : next, forward ? next : current)
-                guard let segment = attribute(context.provider, "AXStringForTextMarkerRange", span) as? String else { return nil }
-                return (next, segment)
+            context.navigator.marker(at: offset, step: step)
+        }
+        func bounds(_ start: AXTextMarker, _ end: AXTextMarker) -> CGRect? {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            let span = AXTextMarkerRangeCreate(nil, start, end)
+            var rect = CGRect.zero
+            guard unpack(attribute(context.provider, "AXBoundsForTextMarkerRange", span), .cgRect, &rect),
+                  rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite,
+                  rect.height.isFinite, rect.height > 0 else { return nil }
+            return rect
+        }
+        if range.length > 0 {
+            // The first/last glyph used for calibration can also inherit the bad
+            // container endpoint. Normalize it before reading that nonempty range,
+            // including when the editor contains just one character.
+            for offset in [range.location, range.location + range.length]
+                where offset == 0 || offset == context.navigator.text.utf16.count {
+                guard let original = marker(offset) else { return nil }
+                if bounds(original, original).map(CaretRangeGeometry.isInsertionRect) != true {
+                    guard let repaired = context.navigator.reanchoredMarker(at: offset, step: step),
+                          let rect = bounds(repaired, repaired), CaretRangeGeometry.isInsertionRect(rect) else { return nil }
+                    context.navigator.markers[offset] = repaired
+                }
             }
         }
         guard let start = marker(range.location), let end = marker(range.location + range.length) else { return nil }
-        let span = AXTextMarkerRangeCreate(nil, start, end)
-        var rect = CGRect.zero
-        guard unpack(attribute(context.provider, "AXBoundsForTextMarkerRange", span), .cgRect, &rect),
-              rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite,
-              rect.height.isFinite, rect.height > 0 else { entryDiagnostic("text-marker bounds unavailable"); return nil }
+        let initial = bounds(start, end)
+        if range.length == 0, initial.map(CaretRangeGeometry.isInsertionRect) != true {
+            guard let repaired = context.navigator.reanchoredMarker(at: range.location, step: step),
+                  let rect = bounds(repaired, repaired), CaretRangeGeometry.isInsertionRect(rect) else {
+                entryDiagnostic("collapsed marker has no insertion geometry"); return nil
+            }
+            context.navigator.markers[range.location] = repaired
+            entryDiagnostic("reanchored container marker to text insertion point")
+            return rect
+        }
+        guard let rect = initial else { entryDiagnostic("text-marker bounds unavailable"); return nil }
         entryDiagnostic("text-marker geometry (collapsed=\(range.length == 0)): \(rect)")
         return rect
     }
@@ -820,7 +1077,7 @@ enum CaretBubbleArtwork {
         context.cgContext.scaleBy(x: 4, y: 4)
         appearance.performAsCurrentDrawingAppearance {
             silhouette.draw(in: CGRect(x: 0, y: 0, width: 24, height: 32))
-            NSColor.labelColor.setFill()
+            NSColor.labelColor.withAlphaComponent(1).setFill()
             CGRect(x: 0, y: 0, width: 24, height: 32).fill(using: .sourceAtop)
             let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.textBackgroundColor]))
@@ -850,6 +1107,7 @@ final class CaretOverlay {
         var artwork: NSImage?
         var previewArtwork: NSImage?
         var symbolOpacity: CGFloat = 0
+        var lean: CGFloat = 0
         var insertionBottom = CGPoint(x: 14, y: 2)
         var stemRect: CGRect { CGRect(x: insertionBottom.x - 1, y: insertionBottom.y, width: 2, height: lineHeight) }
         override var isOpaque: Bool { false }
@@ -859,13 +1117,22 @@ final class CaretOverlay {
             context.saveGState()
             context.setAlpha(opacity)
             context.setShadow(offset: .zero, blur: 1, color: NSColor.textBackgroundColor.cgColor)
+            // Composite the silhouette first, then shadow it once. Separate shadows
+            // around the touching edges create a bright seam through the junction.
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
             context.saveGState()
             context.clip(to: CGRect(x: stemRect.minX - 1, y: stemRect.minY + clipBottom, width: 4, height: clipHeight))
-            NSColor.labelColor.setFill()
+            NSColor.labelColor.withAlphaComponent(1).setFill()
             NSBezierPath(roundedRect: stemRect, xRadius: 1, yRadius: 1).fill()
             context.restoreGState()
+            // Only the balloon bends. The insertion stem and its clipping rectangle
+            // stay in calibrated editor coordinates throughout the interaction.
+            context.translateBy(x: stemRect.midX, y: stemRect.maxY)
+            context.rotate(by: lean)
             let size = CGSize(width: 24 * expansion, height: 32 * expansion)
-            let bubbleRect = CGRect(x: stemRect.midX - size.width / 2, y: stemRect.maxY,
+            // Bury the neck in the stem, including at preview scale and maximum
+            // sway. Edge antialiasing must never be the only thing joining them.
+            let bubbleRect = CGRect(x: -size.width / 2, y: -1.5,
                                     width: size.width, height: size.height)
             previewArtwork?.draw(in: bubbleRect, from: .zero, operation: .sourceOver,
                                  fraction: 1, respectFlipped: false, hints: nil)
@@ -875,6 +1142,7 @@ final class CaretOverlay {
                 artwork?.draw(in: bubbleRect, from: .zero, operation: .sourceOver,
                               fraction: symbolOpacity, respectFlipped: false, hints: nil)
             }
+            context.endTransparencyLayer()
             context.restoreGState()
         }
     }
@@ -891,8 +1159,13 @@ final class CaretOverlay {
     private var targetOpacity: CGFloat = 0
     private var targetExpansion: CGFloat = 0
     private var targetSymbolOpacity: CGFloat = 0
+    private var targetLean: CGFloat = 0
+    private var expansionSpring = CaretBubbleSpring()
+    private var leanSpring = CaretBubbleSpring()
+    private var lastTick: TimeInterval = 0
 
-    func show(caret: CGRect, editor: CGRect, progress: CGFloat, tracking: Bool = false, present: Bool = true) {
+    func show(caret: CGRect, editor: CGRect, progress: CGFloat, tracking: Bool = false, present: Bool = true,
+              preparationLean: CGFloat = 0) {
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         if panel == nil {
             let window = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -907,8 +1180,9 @@ final class CaretOverlay {
         guard let panel, let canvas else { return }
         // Window bottom = native caret bottom - 2 pt. The stem is drawn at y=2,
         // so its bottom coincides with the native insertion rectangle exactly.
-        let frame = CGRect(x: caret.minX - 14, y: top - caret.maxY - 2,
-                           width: 28, height: caret.height + 36)
+        // Allow the balloon to lean and overshoot without clipping at the panel edge.
+        let frame = CGRect(x: caret.minX - 32, y: top - caret.maxY - 2,
+                           width: 64, height: caret.height + 44)
         panel.setFrame(frame, display: false)
         canvas.frame = CGRect(origin: .zero, size: panel.frame.size)
         // NSWindow can round its origin to a screen pixel. Preserve the fractional
@@ -932,15 +1206,14 @@ final class CaretOverlay {
             }
         }
         let preview = progress < 1
-        let expansion: CGFloat = preview ? 0.6 : 1
+        let expansion: CGFloat = preview ? 0.65 + 0.13 * max(0, progress) : 1
         let symbolOpacity: CGFloat = preview ? 0 : 1
         // The stem covers the native insertion caret at full final color from the
         // first frame; only the bubble grows during preparation.
         canvas.opacity = 1
         if preview { canvas.symbolOpacity = 0 }
-        if targetOpacity != 1 || expansion != targetExpansion || symbolOpacity != targetSymbolOpacity {
-            transition(opacity: 1, expansion: expansion, symbolOpacity: symbolOpacity, duration: 0.2)
-        }
+        transition(opacity: 1, expansion: expansion, symbolOpacity: symbolOpacity,
+                   lean: preview ? preparationLean : 0)
         canvas.needsDisplay = true
         if present { panel.orderFrontRegardless() }
     }
@@ -953,33 +1226,71 @@ final class CaretOverlay {
         return String(format: "dx=%.2f dy=%.2f", actual.x - caret.minX, top - actual.y - caret.midY)
     }
     func hide() {
-        guard panel?.isVisible == true else { return }
-        transition(opacity: 0, expansion: 0, symbolOpacity: 0, duration: 0.16)
+        guard canvas != nil else { return }
+        transition(opacity: 0, expansion: 0, symbolOpacity: 0, lean: 0)
     }
-    private func transition(opacity: CGFloat, expansion: CGFloat, symbolOpacity: CGFloat, duration: TimeInterval) {
+    /// Advance from the current rendered values so a new touch can reverse a close.
+    /// Keep the silhouette visible until the balloon has returned into its stem.
+    @discardableResult
+    func advanceAnimation(elapsed: TimeInterval, reduceMotion: Bool) -> Bool {
+        guard let canvas else { return false }
+        let elapsed = min(0.05, max(0, elapsed))
+        let blend = CGFloat(1 - exp(-elapsed / (targetOpacity == 0 ? 0.035 : 0.045)))
+        canvas.symbolOpacity += (targetSymbolOpacity - canvas.symbolOpacity) * blend
+        if reduceMotion {
+            expansionSpring = CaretBubbleSpring(value: targetExpansion)
+            leanSpring = CaretBubbleSpring()
+        } else {
+            expansionSpring.advance(to: targetExpansion, elapsed: elapsed, response: 0.26,
+                                    damping: targetExpansion == 1 ? 0.76 : 0.9)
+            leanSpring.advance(to: targetLean, elapsed: elapsed, response: 0.23, damping: 0.72)
+        }
+        canvas.expansion = max(0, expansionSpring.value)
+        canvas.lean = leanSpring.value
+        // Entry grows out of a fully visible stem. Reverse that order on exit:
+        // shrink first, then hand the stem back to the editor's real caret.
+        let closingOpacity = min(1, canvas.expansion / 0.2)
+        let opacity = targetOpacity == 0 && !reduceMotion ? closingOpacity : targetOpacity
+        canvas.opacity += (opacity - canvas.opacity) * blend
+        canvas.needsDisplay = true
+        let settled = expansionSpring.isSettled(at: targetExpansion) &&
+            leanSpring.isSettled(at: reduceMotion ? 0 : targetLean) &&
+            abs(canvas.opacity - targetOpacity) < 0.005 && abs(canvas.symbolOpacity - targetSymbolOpacity) < 0.005
+        if settled {
+            canvas.opacity = targetOpacity; canvas.symbolOpacity = targetSymbolOpacity
+            canvas.expansion = targetExpansion; canvas.lean = reduceMotion ? 0 : targetLean
+            expansionSpring = CaretBubbleSpring(value: targetExpansion)
+            leanSpring = CaretBubbleSpring(value: canvas.lean)
+            timer?.invalidate(); timer = nil
+            if targetOpacity == 0 { panel?.orderOut(nil) }
+        }
+        return !settled
+    }
+
+    private func transition(opacity: CGFloat, expansion: CGFloat, symbolOpacity: CGFloat, lean: CGFloat) {
         guard let canvas else { return }
-        timer?.invalidate(); timer = nil
         targetOpacity = opacity; targetExpansion = expansion; targetSymbolOpacity = symbolOpacity
+        targetLean = lean
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let fromOpacity = canvas.opacity, fromExpansion = canvas.expansion
-        let fromSymbolOpacity = canvas.symbolOpacity
-        let started = ProcessInfo.processInfo.systemUptime
-        let length = reduced ? 0.08 : duration
-        if reduced { canvas.expansion = expansion }
+        if reduced {
+            expansionSpring = CaretBubbleSpring(value: expansion)
+            leanSpring = CaretBubbleSpring()
+            canvas.expansion = expansion; canvas.lean = 0
+        }
+        // Retarget the existing spring instead of restarting an animation on every
+        // touch frame. Threshold crossing inherits the preparation's live velocity.
+        guard timer == nil else { return }
+        if canvas.opacity == opacity, canvas.symbolOpacity == symbolOpacity,
+           expansionSpring.isSettled(at: expansion), leanSpring.isSettled(at: reduced ? 0 : lean) { return }
+        lastTick = ProcessInfo.processInfo.systemUptime
         let animation = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] tick in
             let keepRunning = MainActor.assumeIsolated {
-                guard let self, let canvas = self.canvas else { return false }
-                let elapsed = min(1, (ProcessInfo.processInfo.systemUptime - started) / length)
-                let eased = 1 - pow(1 - elapsed, 3)
-                canvas.opacity = fromOpacity + (opacity - fromOpacity) * eased
-                canvas.symbolOpacity = fromSymbolOpacity + (symbolOpacity - fromSymbolOpacity) * eased
-                if !reduced { canvas.expansion = fromExpansion + (expansion - fromExpansion) * eased }
-                canvas.needsDisplay = true
-                if elapsed == 1 {
-                    self.timer = nil
-                    if opacity == 0 { self.panel?.orderOut(nil) }
-                }
-                return elapsed < 1
+                guard let self else { return false }
+                let now = ProcessInfo.processInfo.systemUptime
+                let elapsed = min(0.05, max(0, now - self.lastTick))
+                self.lastTick = now
+                return self.advanceAnimation(elapsed: elapsed,
+                    reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
             }
             if !keepRunning { tick.invalidate() }
         }

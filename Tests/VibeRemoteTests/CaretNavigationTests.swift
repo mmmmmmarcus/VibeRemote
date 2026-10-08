@@ -4,6 +4,185 @@ import RemoteAudioProtocol
 @testable import VibeRemote
 
 final class CaretNavigationTests: XCTestCase {
+    func testCodexTextEndIsReachableRegardlessOfInitialSelection() throws {
+        struct Marker { let offset: Int; let isTextLeaf: Bool }
+        let text = "放假卡死地方还是了解开会发神经地方回家"
+        let ns = text as NSString
+        let stops = CaretNavigation.boundaries(text)
+        // Reproduce the reported asymmetry: container endpoints give no caret
+        // geometry; only the real selection initially supplies a working leaf.
+        for selection in [0, 5, ns.length - 2, ns.length] {
+            var navigator = CaretMarkerNavigator(text: text, markers: [
+                0: Marker(offset: 0, isTextLeaf: false),
+                ns.length: Marker(offset: ns.length, isTextLeaf: false)])
+            navigator.markers[selection] = Marker(offset: selection, isTextLeaf: true)
+            XCTAssertEqual(navigator.seedLeaf(prefix: "", content: text, suffix: "",
+                start: Marker(offset: 0, isTextLeaf: true), end: Marker(offset: ns.length, isTextLeaf: true),
+                usable: { $0.isTextLeaf }), 2)
+            var positions: [Int: CGRect] = [:]
+            for offset in CaretNavigation.samplingOrder(text, near: selection) {
+                let marker = try XCTUnwrap(navigator.marker(at: offset) { current, forward in
+                    guard current.isTextLeaf, let index = stops.firstIndex(of: current.offset) else { return nil }
+                    let next = index + (forward ? 1 : -1)
+                    guard stops.indices.contains(next) else { return nil }
+                    let target = stops[next]
+                    return (Marker(offset: target, isTextLeaf: true), ns.substring(with: NSRange(
+                        location: min(current.offset, target), length: abs(current.offset - target))))
+                })
+                XCTAssertTrue(marker.isTextLeaf)
+                positions[offset] = CGRect(x: 10 + offset * 14, y: 10, width: 0, height: 18)
+            }
+            XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 1000, y: 19), positions: positions, current: selection), ns.length,
+                           "Reach after 回家 even when entry was before 回家")
+            XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 0, y: 19), positions: positions, current: selection), 0)
+            XCTAssertEqual(Set(positions.keys), Set(stops))
+        }
+    }
+
+    func testTextLeafAnchorsRequireExactEditorSpanAndValidGeometry() {
+        let text = "a👨‍👩‍👧‍👦中\n回家"
+        var navigator = CaretMarkerNavigator(text: text, markers: [0: "real-selection"])
+        XCTAssertEqual(navigator.seedLeaf(prefix: "a", content: "👨‍👩‍👧‍👦中", suffix: "\n回家",
+            start: "leaf-start", end: "leaf-end", usable: { _ in true }), 2)
+        XCTAssertEqual(navigator.markers[1], "leaf-start")
+        XCTAssertEqual(navigator.markers[13], "leaf-end")
+        let before = navigator.markers
+        for (prefix, content, suffix) in [("", "回家", ""), ("a", "wrong", "\n回家"), (text, "", "")] {
+            XCTAssertEqual(navigator.seedLeaf(prefix: prefix, content: content, suffix: suffix,
+                start: "wrong", end: "wrong", usable: { _ in true }), 0)
+        }
+        XCTAssertEqual(navigator.seedLeaf(prefix: "", content: text, suffix: "",
+            start: "container", end: "container", usable: { _ in false }), 0)
+        XCTAssertEqual(navigator.markers, before, "Bad leaves cannot replace a real selection anchor")
+    }
+
+    func testEditorSizedCollapsedBoundsAreNotCaretGeometry() {
+        // Actual Codex diagnostic: a collapsed marker returned the editor's box
+        // instead of the neighboring 0 x 18 insertion rectangles.
+        XCTAssertFalse(CaretRangeGeometry.isInsertionRect(CGRect(x: 916, y: 1111, width: 713, height: 44)))
+        XCTAssertTrue(CaretRangeGeometry.isInsertionRect(CGRect(x: 945, y: 1112, width: 0, height: 18)))
+        XCTAssertTrue(CaretRangeGeometry.isInsertionRect(CGRect(x: 945, y: 1112, width: 2, height: 18)))
+        XCTAssertFalse(CaretRangeGeometry.isInsertionRect(.zero))
+        XCTAssertFalse(CaretRangeGeometry.isInsertionRect(.null))
+    }
+
+    func testContainerMarkersAreReanchoredWithoutChangingTextOffset() {
+        struct Marker: Equatable { let offset: Int; let container: Bool }
+        for text in ["a", "中", "abc", "你好世界", "👨‍👩‍👧‍👦e\u{301}", "אבג", "a\n"] {
+            let stops = CaretNavigation.boundaries(text)
+            let value = text as NSString
+            let navigator = CaretMarkerNavigator(text: text, markers: [
+                0: Marker(offset: 0, container: true),
+                value.length: Marker(offset: value.length, container: true)])
+            for target in [0, value.length] {
+                var visits: [Bool] = []
+                let result = navigator.reanchoredMarker(at: target) { marker, forward in
+                    visits.append(forward)
+                    guard let i = stops.firstIndex(of: marker.offset) else { return nil }
+                    let next = i + (forward ? 1 : -1)
+                    guard stops.indices.contains(next) else { return nil }
+                    let offset = stops[next]
+                    return (Marker(offset: offset, container: false), value.substring(with: NSRange(
+                        location: min(marker.offset, offset), length: abs(marker.offset - offset))))
+                }
+                XCTAssertEqual(result, Marker(offset: target, container: false))
+                XCTAssertEqual(visits, target == 0 ? [true, false] : [false, true])
+                XCTAssertEqual(navigator.markers[target]?.container, true, "Only cache after validating the new insertion rectangle")
+            }
+        }
+    }
+
+    func testReanchoringRejectsWrongTextEmptyTransitionsAndUnbalancedRoundTrips() {
+        let navigator = CaretMarkerNavigator(text: "abc", markers: [0: 0, 3: 3])
+        XCTAssertNil(navigator.reanchoredMarker(at: 0) { _, _ in (1, "wrong") })
+        XCTAssertNil(navigator.reanchoredMarker(at: 0) { _, _ in (1, "") })
+        XCTAssertNil(navigator.reanchoredMarker(at: 0) { _, forward in (forward ? 1 : 0, forward ? "a" : "b") })
+        XCTAssertNil(navigator.reanchoredMarker(at: 3) { _, _ in (2, "abcd") })
+        XCTAssertNil(navigator.reanchoredMarker(at: -1) { _, _ in XCTFail("Invalid offset"); return nil })
+    }
+
+    func testSamplingAlwaysIncludesBothEndpointsFirstWithoutSplittingGraphemes() {
+        for text in ["", "abc", "你好👨‍👩‍👧‍👦e\u{301}", String(repeating: "x", count: 400)] {
+            let order = CaretNavigation.samplingOrder(text, near: text.utf16.count / 2)
+            XCTAssertEqual(order.first, 0)
+            if !text.isEmpty { XCTAssertEqual(order[1], text.utf16.count) }
+            XCTAssertEqual(Set(order), Set(CaretNavigation.boundaries(text)))
+            XCTAssertEqual(order.count, Set(order).count)
+        }
+    }
+
+    private func navigationFrame(_ time: Double, count: Int = 1, sender: UInt64 = 7,
+                                 generation: RemoteGeneration = .aluminumClickpad) -> RemoteTextTouchFrame {
+        .init(sender: sender, time: Date(timeIntervalSince1970: time), generation: generation, count: count, x: 100, y: 100)
+    }
+
+    func testDirectionClickOwnsContactThroughButtonReleaseUntilLift() {
+        var gate = CaretNavigationTouchGate()
+        XCTAssertFalse(gate.suppress(navigationFrame(10)))
+        XCTAssertTrue(gate.button("navDown", down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.01)))
+        XCTAssertTrue(gate.suppress(navigationFrame(10.02)))
+        _ = gate.button("navDown", down: false, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.1))
+        XCTAssertTrue(gate.suppress(navigationFrame(11)), "Resting after release must not prepare or accumulate travel")
+        XCTAssertTrue(gate.suppress(navigationFrame(11.1, count: 0)))
+        XCTAssertTrue(gate.suppress(navigationFrame(11.05)), "A delayed old contact cannot reopen preparation after lift")
+        XCTAssertFalse(gate.suppress(navigationFrame(11.12)), "A fresh touch immediately restores preparation")
+    }
+
+    func testQuickDirectionClickBeforePassiveTouchArrives() {
+        var gate = CaretNavigationTouchGate()
+        _ = gate.button("navUp", down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10))
+        _ = gate.button("navUp", down: false, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.02))
+        XCTAssertTrue(gate.suppress(navigationFrame(10.03)))
+        XCTAssertTrue(gate.suppress(navigationFrame(10.04, count: 0)))
+        XCTAssertFalse(gate.suppress(navigationFrame(10.05)))
+        var noTouch = CaretNavigationTouchGate()
+        _ = noTouch.button("navUp", down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10))
+        _ = noTouch.button("navUp", down: false, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.02))
+        XCTAssertFalse(noTouch.suppress(navigationFrame(11)), "Missing reports must not reserve some unrelated future contact")
+    }
+
+    func testLiftBeforeDirectionReleaseAndMultipleHeldDirections() {
+        var gate = CaretNavigationTouchGate()
+        _ = gate.suppress(navigationFrame(10))
+        for button in ["navLeft", "navUp"] {
+            _ = gate.button(button, down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.01))
+        }
+        XCTAssertTrue(gate.suppress(navigationFrame(10.02, count: 0)))
+        _ = gate.button("navLeft", down: false, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.03))
+        XCTAssertTrue(gate.suppress(navigationFrame(10.04)), "The second direction is still held")
+        XCTAssertTrue(gate.suppress(navigationFrame(10.05, count: 0)))
+        _ = gate.button("navUp", down: false, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.06))
+        XCTAssertFalse(gate.suppress(navigationFrame(10.07)))
+    }
+
+    func testNavigationContactDoesNotBlockAnotherSourceOrOldRemote() {
+        var gate = CaretNavigationTouchGate()
+        _ = gate.suppress(navigationFrame(10))
+        _ = gate.button("navRight", down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.01))
+        XCTAssertFalse(gate.suppress(navigationFrame(10.02, sender: 8)))
+        XCTAssertFalse(gate.suppress(navigationFrame(10.03, generation: .glassTouchSurface)))
+        _ = gate.button("navRight", down: false, device: "b", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 10.04))
+        XCTAssertTrue(gate.suppress(navigationFrame(10.05)))
+        for button in ["select", "siri", "power", "volumeUp"] {
+            XCTAssertFalse(gate.button(button, down: true, device: "a", generation: .aluminumClickpad, now: Date(timeIntervalSince1970: 11)))
+        }
+        XCTAssertFalse(gate.button("navUp", down: true, device: "old", generation: .glassTouchSurface, now: Date(timeIntervalSince1970: 11)))
+        gate = .init()
+        XCTAssertFalse(gate.suppress(navigationFrame(12)), "Source reset removes a lost button/lift lock")
+    }
+
+    @MainActor
+    func testCaretControllerNeverConsumesDirectionButtonEdges() {
+        let controller = RemoteCaretController()
+        for button in ["navUp", "navDown", "navLeft", "navRight"] {
+            for pressed in [true, false] {
+                XCTAssertFalse(controller.button(button, pressed: pressed, device: "a", generation: .aluminumClickpad))
+                XCTAssertFalse(controller.isActive)
+            }
+        }
+        controller.stop()
+    }
+
     func testTextMarkersUseVerifiedLocalUTF16SegmentsInBothDirections() {
         let text = "a中👨‍👩‍👧‍👦e\u{301}"
         let stops = CaretNavigation.boundaries(text)
@@ -55,13 +234,13 @@ final class CaretNavigationTests: XCTestCase {
         gate.update(blocked: false)
         XCTAssertFalse(gate.allowsPackets)
     }
-    func testShakeEntryLeavesOnlyGlassMechanicalClickAsEnter() {
+    func testTravelEntryKeepsInactiveGlassClickAsEnter() {
         XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: .glassTouchSurface,
                                                   siriAction: .rightOpt), .enterKey)
         XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: .aluminumClickpad,
                                                   siriAction: .rightOpt), .none)
         XCTAssertFalse(ButtonAction.positionCaret.isAssignableToSiriButton)
-        XCTAssertNil(AdvancedMenuInputState.action(button: "playPause", generation: .aluminumClickpad))
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "playPause", generation: .aluminumClickpad), .paste)
     }
     func testGraphemeStopsNeverSplitEmojiOrCombiningMarks() {
         let text = "a中👨‍👩‍👧‍👦e\u{301}"
@@ -78,6 +257,43 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertEqual(CaretNavigation.nearest(to: CGPoint(x: 8, y: 10), positions: map, current: 0), 1)
         XCTAssertEqual(CaretNavigation.nearest(to: CGPoint(x: 10000, y: 10), positions: map, current: 0), 1)
     }
+    func testCaretIdleExpiresOnceThreeSecondsAfterEntryOrMovement() {
+        var idle = CaretIdleDeadline()
+        XCTAssertFalse(idle.takeExpired(at: 100), "Preparation has no auto-commit deadline")
+        idle.moved(at: 100)
+        XCTAssertFalse(idle.takeExpired(at: 104))
+        idle.start(at: 200)
+        XCTAssertFalse(idle.takeExpired(at: 202.999))
+        idle.moved(at: 202.5)
+        XCTAssertFalse(idle.takeExpired(at: 203), "Movement restarts the three-second interval")
+        XCTAssertFalse(idle.takeExpired(at: 205.499))
+        XCTAssertTrue(idle.takeExpired(at: 205.5))
+        XCTAssertFalse(idle.takeExpired(at: 206), "Expiry is consumed exactly once")
+        idle.moved(at: 207)
+        XCTAssertFalse(idle.takeExpired(at: 211), "Expired sessions cannot restart from movement alone")
+    }
+
+    func testCaretIdleCancellationAndNewSessionDoNotShareDeadlines() {
+        var idle = CaretIdleDeadline()
+        idle.start(at: 10)
+        idle.reset()
+        XCTAssertFalse(idle.takeExpired(at: 20), "Focus loss, typing or manual commit cancels pending expiry")
+        idle.start(at: 30)
+        XCTAssertFalse(idle.takeExpired(at: 32.999))
+        XCTAssertTrue(idle.takeExpired(at: 33))
+    }
+
+    func testStationaryTouchAndFilteredJitterDoNotKeepCaretAlive() {
+        var idle = CaretIdleDeadline()
+        var motion = CaretMotionFilter()
+        idle.start(at: 0)
+        for i in 0..<180 {
+            let movement = motion.movement(dx: i % 3 == 0 ? 0 : (i % 3 == 1 ? 5 : -5), dy: 0)
+            if movement != .zero { idle.moved(at: Double(i) / 60) }
+        }
+        XCTAssertTrue(idle.takeExpired(at: 3), "Stationary report traffic and tiny reversible jitter must not postpone expiry")
+    }
+
     func testTouchFilterAbsorbsClickJitterButAccumulatesSlowMotion() {
         var filter = CaretMotionFilter()
         for _ in 0..<20 {
@@ -95,19 +311,60 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertEqual(filter.movement(dx: 0, dy: 10), .zero)
         XCTAssertLessThan(filter.movement(dx: 0, dy: 30).y, 0, "Remote up must remain screen up")
     }
-    func testDragPreviewMovesBetweenCharactersAndRowsBeforeRelease() {
+    func testDragPreviewMovesHorizontallyButRemainsOnItsTextRow() {
         let editor = CGRect(x: 100, y: 100, width: 200, height: 100)
         let aim = CGPoint(x: 115.6, y: 126.3)
-        let free = CaretNavigation.preview(at: aim, height: 16, editor: editor)
+        let line = CGRect(x: 120, y: 124, width: 2, height: 16)
+        let free = CaretNavigation.preview(at: aim, line: line, editor: editor)
         XCTAssertEqual(free.minX, aim.x)
-        XCTAssertEqual(free.midY, aim.y)
-        let stops = [0: CGRect(x: 110, y: 100, width: 2, height: 16),
-                     1: CGRect(x: 120, y: 124, width: 2, height: 16)]
-        XCTAssertFalse(stops.values.contains(free), "Contact preview must not jump between character stops")
-        XCTAssertEqual(CaretNavigation.nearest(to: aim, positions: stops, current: 0), 1)
-        let edge = CaretNavigation.preview(at: CGPoint(x: 90, y: 205), height: 16, editor: editor)
+        XCTAssertEqual(free.midY, line.midY)
+        XCTAssertNotEqual(free.midY, aim.y, "The visible caret never floats between rows")
+        let edge = CaretNavigation.preview(at: CGPoint(x: 90, y: 205), line: line, editor: editor)
         XCTAssertEqual(edge.minX, editor.minX)
-        XCTAssertEqual(edge.maxY, editor.maxY)
+        XCTAssertEqual(edge.minY, line.minY)
+        // Partly visible rows retain their actual insertion geometry; the view clips them.
+        let partial = line.offsetBy(dx: 0, dy: -30)
+        XCTAssertEqual(CaretNavigation.preview(at: aim, line: partial, editor: editor).minY, partial.minY)
+    }
+
+    func testVerticalLineSnapResistsBoundaryFlutterInBothDirections() {
+        let rows = [0: CGRect(x: 10, y: 0, width: 2, height: 20),
+                    1: CGRect(x: 10, y: 20, width: 2, height: 20)]
+        func target(_ y: CGFloat, from row: Int) -> Int? {
+            CaretNavigation.lineSnappedTarget(to: CGPoint(x: 10, y: y), positions: rows, current: row)
+        }
+        XCTAssertEqual(target(22, from: 0), 0, "Passing the midpoint alone must not switch")
+        XCTAssertEqual(target(23, from: 0), 1)
+        for y: CGFloat in [23, 22, 20, 18] { XCTAssertEqual(target(y, from: 1), 1) }
+        XCTAssertEqual(target(17, from: 1), 0)
+        XCTAssertEqual(target(18, from: 0), 0)
+    }
+
+    func testHorizontalMovementCannotJumpToALongerAdjacentLine() {
+        let rows = [0: CGRect(x: 0, y: 0, width: 2, height: 20),
+                    1: CGRect(x: 40, y: 0, width: 2, height: 20),
+                    2: CGRect(x: 200, y: 20, width: 2, height: 20)]
+        XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 200, y: 10), positions: rows, current: 0), 1)
+        XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 20.1, y: 10), positions: rows, current: 0), 1)
+        XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 19.9, y: 10), positions: rows, current: 1), 0)
+        XCTAssertEqual(CaretNavigation.lineSnappedTarget(to: CGPoint(x: 200, y: 23), positions: rows, current: 1), 2)
+    }
+
+    func testLineSnapUsesActualSpacingAndStopsAtFirstAndLastLine() {
+        let rows = [0: CGRect(x: 0, y: 0, width: 2, height: 20),
+                    1: CGRect(x: 0, y: 40, width: 2, height: 20),
+                    2: CGRect(x: 0, y: 100, width: 2, height: 20)]
+        func target(_ y: CGFloat, from row: Int) -> Int? {
+            CaretNavigation.lineSnappedTarget(to: CGPoint(x: 0, y: y), positions: rows, current: row)
+        }
+        XCTAssertEqual(target(35, from: 0), 0)
+        XCTAssertEqual(target(36, from: 0), 1)
+        XCTAssertEqual(target(88, from: 1), 1)
+        XCTAssertEqual(target(89, from: 1), 2)
+        XCTAssertEqual(target(-200, from: 0), 0)
+        XCTAssertEqual(target(400, from: 2), 2)
+        XCTAssertEqual(target(110, from: 0), 2, "Deliberate long travel can cross multiple rows")
+        XCTAssertNil(CaretNavigation.lineSnappedTarget(to: .zero, positions: [:], current: 0))
     }
     func testOverlayAnchorStaysAtInsertionPointIncludingEditorEdges() {
         let editor = CGRect(x: -800, y: 300, width: 400, height: 80)
@@ -263,48 +520,234 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertNil(RemoteTextTouchFrame.decodeGlass(wrongMarker, sender: 4, time: Date()))
     }
 
-    func testOneFastOutAndBackActivatesBothRemoteGenerations() {
-        let origin = Date(timeIntervalSince1970: 100)
-        func frame(_ time: TimeInterval, x: Int = 0, y: Int = 0, count: Int = 1,
-                   generation: RemoteGeneration) -> RemoteTextTouchFrame {
-            .init(sender: 8, time: origin.addingTimeInterval(time), generation: generation,
-                  count: count, x: x, y: y)
-        }
-        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
-            var gate = RemoteCaretShakeGate(strokeDistance: 240)
-            XCTAssertFalse(gate.observe(frame(0.00, x: 0, generation: generation)))
-            XCTAssertFalse(gate.observe(frame(0.12, x: 250, generation: generation)), "First stroke establishes direction")
-            XCTAssertTrue(gate.observe(frame(0.27, x: -10, generation: generation)), "One return stroke enters caret mode")
-            XCTAssertEqual(gate.latest?.generation, generation)
+    private func travelFrame(_ time: TimeInterval, x: Int = 0, y: Int = 0, count: Int = 1,
+                             sender: UInt64 = 8, generation: RemoteGeneration = .aluminumClickpad) -> RemoteTextTouchFrame {
+        .init(sender: sender, time: Date(timeIntervalSince1970: 100 + time), generation: generation,
+              count: count, x: x, y: y)
+    }
+
+    func testPreparationFollowsContactAndReversesBeforeActivation() throws {
+        for generation in [RemoteGeneration.aluminumClickpad, .glassTouchSurface] {
+            var gate = RemoteCaretTravelGate()
+            XCTAssertFalse(gate.observe(travelFrame(0, generation: generation)))
+            let first = try XCTUnwrap(gate.contactID)
+            XCTAssertEqual(gate.progress, 0)
+            XCTAssertEqual(gate.preparationLean, 0)
+            XCTAssertFalse(gate.observe(travelFrame(0.05, x: 90, generation: generation)))
+            XCTAssertEqual(gate.contactID, first)
+            XCTAssertLessThan(gate.preparationLean, 0, "Unflipped balloon leans right with a rightward finger")
+            XCTAssertFalse(gate.observe(travelFrame(0.10, x: -90, generation: generation)))
+            XCTAssertGreaterThan(gate.preparationLean, 0)
+            XCTAssertEqual(gate.progress, 270.0 / 1000, accuracy: 0.001)
+            XCTAssertLessThanOrEqual(abs(gate.preparationLean), 0.32)
+            XCTAssertFalse(gate.observe(travelFrame(0.15, x: 120, generation: generation)), "The previous 480-unit threshold now stays in preparation")
+            XCTAssertFalse(gate.observe(travelFrame(0.18, x: 360, generation: generation)), "720 units still previews")
+            XCTAssertTrue(gate.observe(travelFrame(0.19, x: 640, generation: generation)))
+            XCTAssertEqual(gate.progress, 1)
+            XCTAssertFalse(gate.observe(travelFrame(0.2, count: 0, generation: generation)))
+            XCTAssertNil(gate.contactID)
+            XCTAssertEqual(gate.progress, 0)
+            XCTAssertEqual(gate.preparationLean, 0)
+            XCTAssertFalse(gate.observe(travelFrame(0.25, x: 120, generation: generation)))
+            XCTAssertNotEqual(gate.contactID, first)
+            XCTAssertEqual(gate.preparationLean, 0, "A fresh contact must not inherit a stale finger origin")
         }
     }
 
-    func testShakeRejectsOrdinaryDragSlowMotionAndLift() {
-        let origin = Date(timeIntervalSince1970: 100)
-        func frame(_ time: TimeInterval, x: Int, count: Int = 1) -> RemoteTextTouchFrame {
-            .init(sender: 8, time: origin.addingTimeInterval(time), generation: .glassTouchSurface,
-                  count: count, x: x, y: 0)
+    func testPreparationRestartsOnDiscontinuityWithoutCountingItAsTravel() throws {
+        let interruptions = [travelFrame(0.2, sender: 9), travelFrame(0.2, generation: .glassTouchSurface),
+                             travelFrame(0.6), travelFrame(0.05), travelFrame(0.2, x: 1500)]
+        for frame in interruptions {
+            var gate = RemoteCaretTravelGate()
+            _ = gate.observe(travelFrame(0))
+            _ = gate.observe(travelFrame(0.1, x: 200))
+            let original = try XCTUnwrap(gate.contactID)
+            XCTAssertFalse(gate.observe(frame))
+            XCTAssertNotEqual(gate.contactID, original)
+            XCTAssertEqual(gate.progress, 0)
+            XCTAssertEqual(gate.preparationLean, 0)
         }
-        var drag = RemoteCaretShakeGate(strokeDistance: 240)
-        XCTAssertFalse(drag.observe(frame(0, x: 0)))
-        XCTAssertFalse(drag.observe(frame(0.1, x: 250)))
-        XCTAssertFalse(drag.observe(frame(0.2, x: 520)))
-        XCTAssertFalse(drag.observe(frame(0.3, x: 790)), "One-way dragging cannot enter")
+    }
 
-        var slow = RemoteCaretShakeGate(strokeDistance: 240, maximumDuration: 0.9)
-        XCTAssertFalse(slow.observe(frame(0, x: 0)))
-        XCTAssertFalse(slow.observe(frame(0.1, x: 250)))
-        XCTAssertFalse(slow.observe(frame(0.3, x: 300)))
-        XCTAssertFalse(slow.observe(frame(0.5, x: 350)))
-        XCTAssertFalse(slow.observe(frame(0.7, x: 400)))
-        XCTAssertFalse(slow.observe(frame(0.9, x: 450)))
-        XCTAssertFalse(slow.observe(frame(1.05, x: -10)), "Slow return exceeds the gesture window")
+    func testBalloonSpringReversesContinuouslyAndSettlesAfterExtraction() {
+        var lean = CaretBubbleSpring()
+        for _ in 0..<5 { lean.advance(to: 0.32, elapsed: 1.0 / 60, response: 0.23, damping: 0.72) }
+        let before = lean.value
+        lean.advance(to: -0.32, elapsed: 0, response: 0.23, damping: 0.72)
+        XCTAssertEqual(lean.value, before, "Retargeting must not teleport the rendered balloon")
+        for _ in 0..<120 {
+            lean.advance(to: -0.32, elapsed: 1.0 / 60, response: 0.23, damping: 0.72)
+            XCTAssertLessThan(abs(lean.value), 0.4)
+        }
+        XCTAssertTrue(lean.isSettled(at: -0.32))
+        var scale = CaretBubbleSpring(value: 0.78, velocity: 0.3)
+        var maximum: CGFloat = 0
+        for _ in 0..<120 {
+            scale.advance(to: 1, elapsed: 1.0 / 60, response: 0.26, damping: 0.76)
+            maximum = max(maximum, scale.value)
+        }
+        XCTAssertGreaterThan(maximum, 1, "Crossing the threshold gives a small extraction overshoot")
+        XCTAssertLessThan(maximum, 1.04)
+        XCTAssertTrue(scale.isSettled(at: 1))
+        scale.advance(to: 0, elapsed: 5, response: 0.26, damping: 0.9)
+        XCTAssertGreaterThan(scale.value, 0, "A stalled run loop must not explode the spring")
+        for _ in 0..<120 { scale.advance(to: 0, elapsed: 1.0 / 60, response: 0.26, damping: 0.9) }
+        XCTAssertTrue(scale.isSettled(at: 0))
+    }
 
-        var lifted = RemoteCaretShakeGate(strokeDistance: 240)
-        XCTAssertFalse(lifted.observe(frame(0, x: 0)))
-        XCTAssertFalse(lifted.observe(frame(0.1, x: 250)))
-        XCTAssertFalse(lifted.observe(frame(0.2, x: 250, count: 0)))
-        XCTAssertFalse(lifted.isTracking)
+    @MainActor
+    func testCaretDismissalShrinksBeforeFadingAndCanReverseInFlight() throws {
+        let caret = CGRect(x: 300, y: 300, width: 0, height: 18)
+        let editor = CGRect(x: 100, y: 280, width: 400, height: 100)
+        for progress: CGFloat in [0, 1] {
+            let overlay = CaretOverlay()
+            defer { overlay.hide(); overlay.panel?.close() }
+            overlay.show(caret: caret, editor: editor, progress: progress, present: false)
+            for _ in 0..<90 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: false) }
+            let canvas = try XCTUnwrap(overlay.canvas)
+            let initial = canvas.expansion, stem = canvas.stemRect
+            overlay.hide()
+            for _ in 0..<4 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: false) }
+            XCTAssertLessThan(canvas.expansion, initial)
+            XCTAssertGreaterThan(canvas.expansion, 0.2)
+            XCTAssertEqual(canvas.opacity, 1, accuracy: 0.001, "Retraction must stay visible, not disappear before it shrinks")
+            XCTAssertEqual(canvas.stemRect, stem)
+            let interrupted = canvas.expansion
+            overlay.show(caret: caret, editor: editor, progress: 1, present: false)
+            XCTAssertEqual(canvas.expansion, interrupted, "Reopening begins at the live animation value")
+            for _ in 0..<90 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: false) }
+            XCTAssertEqual(canvas.expansion, 1)
+            XCTAssertEqual(canvas.opacity, 1)
+            overlay.hide()
+            for _ in 0..<90 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: false) }
+            XCTAssertEqual(canvas.expansion, 0)
+            XCTAssertEqual(canvas.opacity, 0)
+            XCTAssertFalse(overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: false))
+        }
+    }
+
+    @MainActor
+    func testCaretDismissalRespectsReduceMotion() throws {
+        let overlay = CaretOverlay()
+        defer { overlay.panel?.close() }
+        overlay.show(caret: CGRect(x: 300, y: 300, width: 0, height: 18),
+                     editor: CGRect(x: 100, y: 280, width: 400, height: 100), progress: 1, present: false)
+        for _ in 0..<60 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: true) }
+        overlay.hide()
+        overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: true)
+        let canvas = try XCTUnwrap(overlay.canvas)
+        XCTAssertEqual(canvas.lean, 0)
+        XCTAssertLessThan(canvas.opacity, 1, "Reduce Motion fades without waiting for a spring")
+        for _ in 0..<60 { overlay.advanceAnimation(elapsed: 1.0 / 60, reduceMotion: true) }
+        XCTAssertEqual(canvas.opacity, 0)
+    }
+
+    @MainActor
+    func testSwayingBalloonKeepsStemFixedAndFitsInsidePanel() throws {
+        let overlay = CaretOverlay()
+        defer { overlay.hide(); overlay.panel?.close() }
+        let caret = CGRect(x: 300.25, y: 300.5, width: 0, height: 18)
+        overlay.show(caret: caret, editor: CGRect(x: 100, y: 280, width: 400, height: 100), progress: 0, present: false)
+        let canvas = try XCTUnwrap(overlay.canvas)
+        let stem = canvas.stemRect
+        let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+        canvas.appearance = appearance
+        canvas.previewArtwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false)), size: CGSize(width: 24, height: 32))
+        canvas.artwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance)), size: CGSize(width: 24, height: 32))
+        let stages: [(CGFloat, CGFloat, CGFloat)] = [(0.65, 0, 0), (0.72, 0.32, 0), (0.78, -0.32, 0), (1.03, 0.08, 1), (1, 0, 1),
+                                                  (0.65, -0.38, 0), (0.65, 0.38, 0), (1, -0.38, 1), (1, 0.38, 1)]
+        for (index, stage) in stages.enumerated() {
+            canvas.opacity = 1; canvas.expansion = stage.0; canvas.lean = stage.1; canvas.symbolOpacity = stage.2
+            XCTAssertEqual(canvas.stemRect, stem)
+            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+            canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+            for x in [0, bitmap.pixelsWide - 1] {
+                for y in 0..<bitmap.pixelsHigh { XCTAssertLessThan(bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0, 0.01) }
+            }
+            for x in 0..<bitmap.pixelsWide {
+                XCTAssertLessThan(bitmap.colorAt(x: x, y: 0)?.alphaComponent ?? 0, 0.01, "Balloon must not be cut off above the panel")
+            }
+            // Check actual ink over a white backdrop, not just a geometrical overlap
+            // or the alpha of the pale shadow. Every row through the join needs a
+            // solid dark connection, including fractional alignment and spring sway.
+            let scale = CGFloat(bitmap.pixelsWide) / canvas.bounds.width
+            let joinY = (canvas.bounds.height - stem.maxY) * scale
+            let centerX = stem.midX * scale
+            for y in Int(joinY - 3 * scale)...Int(joinY + 3 * scale) {
+                var darkest: CGFloat = 1
+                for x in Int(centerX - 4 * scale)...Int(centerX + 4 * scale) {
+                    let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                    let lightness = max(color.redComponent, color.greenComponent, color.blueComponent)
+                    darkest = min(darkest, lightness * color.alphaComponent + 1 - color.alphaComponent)
+                }
+                XCTAssertLessThan(darkest, 0.25, "Visible seam at balloon/stem junction, stage \(index), row \(y)")
+            }
+            if let path = ProcessInfo.processInfo.environment["VIBEREMOTE_CARET_MOTION_PREVIEW"] {
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: "\(path)-\(index).png"))
+            }
+        }
+    }
+
+    func testTravelDistanceActivatesInAnyDirectionOnBothGenerations() {
+        let paths = [[(0, 0), (500, 0), (1000, 0)], // straight, no reversal
+                     [(0, 0), (0, 500), (0, 1000)],
+                     [(0, 0), (300, 400), (600, 800)], // diagonal path length
+                     [(0, 0), (500, 0), (500, 500)], // right angle
+                     [(0, 0), (500, 0), (0, 0)]] // zero net displacement
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            for path in paths {
+                var gate = RemoteCaretTravelGate()
+                for (i, point) in path.enumerated() {
+                    XCTAssertEqual(gate.observe(travelFrame(Double(i) * 0.1, x: point.0, y: point.1,
+                                                           generation: generation)), i == 2)
+                }
+                XCTAssertEqual(gate.latest?.generation, generation)
+            }
+        }
+    }
+
+    func testTravelCountsSlowIntentionalMotionWithoutCountingSmallJitter() {
+        var gate = RemoteCaretTravelGate()
+        for i in 0..<100 {
+            XCTAssertFalse(gate.observe(travelFrame(Double(i) * 0.1, x: i % 2 == 0 ? 0 : 5)))
+        }
+        gate.reset()
+        // Each sample is below the noise cutoff, but sustained travel still counts.
+        // The 12-unit noise filter first counts past 1000 at 1008 raw units.
+        for i in 0...252 {
+            XCTAssertEqual(gate.observe(travelFrame(Double(i) * 0.1, x: i * 4)), i == 252)
+        }
+    }
+
+    func testTravelCannotCombineSeparateContactsSourcesOrDiscontinuousReports() {
+        let interruptions = [travelFrame(0.2, x: 240, count: 0),
+                             travelFrame(0.2, x: 240, count: 2),
+                             travelFrame(0.2, x: 240, sender: 9),
+                             travelFrame(0.2, x: 240, generation: .glassTouchSurface),
+                             travelFrame(0.6, x: 240), // missed frames
+                             travelFrame(0.05, x: 240), // reordered frame
+                             travelFrame(0.2, x: 1400)] // coordinate jump
+        for frame in interruptions {
+            var gate = RemoteCaretTravelGate()
+            XCTAssertFalse(gate.observe(travelFrame(0)))
+            XCTAssertFalse(gate.observe(travelFrame(0.1, x: 240)))
+            XCTAssertFalse(gate.observe(frame))
+            XCTAssertFalse(gate.observe(travelFrame(frame.time.timeIntervalSince1970 - 100 + 0.1,
+                                                    x: frame.x + 240, sender: frame.sender,
+                                                    generation: frame.generation)))
+        }
+    }
+
+    func testCenterConfirmationOwnsRepeatsAndReleaseWithoutSubmittingEnter() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            var gate = CaretButtonGate()
+            XCTAssertEqual(gate.handle(button: "select", down: true, device: generation.rawValue, active: true), .confirm)
+            // Commit ends the mode, but the remainder of this physical click stays consumed.
+            XCTAssertEqual(gate.handle(button: "select", down: true, device: generation.rawValue, active: false), .consume)
+            XCTAssertEqual(gate.handle(button: "select", down: false, device: "other", active: false), .pass)
+            XCTAssertEqual(gate.handle(button: "select", down: false, device: generation.rawValue, active: false), .consume)
+            XCTAssertEqual(gate.handle(button: "select", down: true, device: generation.rawValue, active: false), .pass)
+        }
     }
 
     func testGlassSwipeSendsOneDirectionOnLiftAndLeavesAluminumUnchanged() {
@@ -327,6 +770,23 @@ final class CaretNavigationTests: XCTestCase {
         var aluminum = RemoteTouchSwipeGate()
         XCTAssertNil(aluminum.observe(frame(0, x: 0, y: 0, generation: .aluminumClickpad)))
         XCTAssertNil(aluminum.observe(frame(0.2, x: 300, y: 0, count: 0, generation: .aluminumClickpad)))
+    }
+
+    func testGlassCaretTravelTakesOwnershipBeforeSwipeLift() {
+        let origin = Date(timeIntervalSince1970: 100)
+        var travel = RemoteCaretTravelGate()
+        var swipe = RemoteTouchSwipeGate()
+        var entered = false
+        for (index, x) in [0, 250, 500, 750, 1000].enumerated() {
+            let frame = RemoteTextTouchFrame(sender: 8, time: origin.addingTimeInterval(Double(index) * 0.08),
+                                            generation: .glassTouchSurface, count: 1, x: x, y: 0)
+            XCTAssertNil(swipe.observe(frame))
+            if travel.observe(frame) { swipe.reset(); entered = true }
+        }
+        XCTAssertTrue(entered)
+        let lift = RemoteTextTouchFrame(sender: 8, time: origin.addingTimeInterval(0.4),
+                                       generation: .glassTouchSurface, count: 0, x: 0, y: 0)
+        XCTAssertNil(swipe.observe(lift), "A gesture entering caret mode cannot also navigate on lift")
     }
 
     func testGlassSwipeRejectsTapDiagonalSlowAndOutAndBackMotion() {

@@ -20,7 +20,17 @@ DEVICE_NAME="VibeRemote"
 BUNDLE_ID="com.viberemote.audio"
 CHANNELS="${CHANNELS:-2}"
 BLACKHOLE_REF="${BLACKHOLE_REF:-ffcb74433fbcf8c8ca5c736677c1a4864384dc09}"
-WORK_DIR="${WORK_DIR:-$ROOT_DIR/.build/audio-driver}"
+if [ "${ARCHS:-arm64}" != "arm64" ]; then
+    echo "Error: VibeRemote supports arm64 only; remove the ARCHS override." >&2
+    exit 1
+fi
+# An explicit WORK_DIR is retained for driver debugging / corresponding-source export.
+if [ -z "${WORK_DIR:-}" ]; then
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/viberemote-driver.XXXXXX")"
+    trap 'rm -rf -- "$WORK_DIR"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
 OUTPUT_DIR="$ROOT_DIR/AudioDriver"
 SIGNING_MODE="${SIGNING_MODE:-local}"
 
@@ -92,7 +102,7 @@ build_args=(
     -project "$src/BlackHole.xcodeproj"
     -scheme BlackHole
     -configuration Release
-    ARCHS="arm64 x86_64"
+    ARCHS=arm64
     ONLY_ACTIVE_ARCH=NO
     MACOSX_DEPLOYMENT_TARGET=27.0
     SDKROOT="${VIBEREMOTE_SDKROOT:-macosx}"

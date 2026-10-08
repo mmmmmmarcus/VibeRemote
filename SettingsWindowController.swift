@@ -66,13 +66,12 @@ struct RemoteSettingsLayout {
 enum RemoteSettingsGuide {
     static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
 
-        if key == "touch.edit" { return "Shake once: position caret" }
+        if key == "touch.edit" { return "Slide to position caret" }
         if key == "select" {
             return snapshot.generation == .glassTouchSurface
-                ? "Enter\nSwipe: Arrow key\nShake: position caret"
-                : "Not assigned"
+                ? "Enter / Confirm caret\nSwipe: Arrow key"
+                : "Confirm caret"
         }
-        if key == "back" || key == "menu" { return "Delete word\nDouble-click: clear all" }
         let action = RemoteButtonMapping.action(button: key, generation: snapshot.generation, siriAction: snapshot.siriAction)
         return action == .none ? "Not assigned" : action.settingsTitle
     }
@@ -101,6 +100,7 @@ extension ButtonAction {
         case .shiftEnterOrModifier: return "Newline / Modifier"
         case .agentClientOrSlash: return "Client / Skill"
         case .advancedMenu: return "Advanced Menu"
+        case .skillPicker: return "Skill"
         case .none: return "None"
         }
     }
@@ -332,9 +332,9 @@ private struct RemoteSettingsView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         sectionTitle("Text cursor")
-                        Text("Quickly move one finger out and back without lifting to position the cursor. Keep sliding to move, then lift to confirm.")
+                        Text("Touch to preview, then slide to activate the cursor. Lift and slide again to adjust; press the center or pause for 3 seconds to confirm.")
                         if model.snapshot.generation == .glassTouchSurface {
-                            Text("A quick one-way swipe and lift sends one arrow key. Pressing the touch surface remains Enter. Siri or Return exits without dictating or submitting.")
+                            Text("Press the touch surface to confirm. Outside cursor mode, a quick swipe and lift sends one arrow key; pressing remains Enter. Siri or Return exits without dictating or submitting.")
                         } else { Text("Siri or Return exits without dictating or submitting.") }
                         Text("An active text field is required.")
                             .foregroundStyle(.secondary)

@@ -984,6 +984,20 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
+    private var preservingInputForRestart = false // workQueue-confined
+
+    /// Restart only our capture processes without temporarily switching to the
+    /// previous microphone (which may activate a Bluetooth headset's voice mode).
+    /// Keep the original saved input for real stop/quit and failed recovery.
+    private func preservingInputDuringRestart(_ restart: () -> Void) {
+        preservingInputForRestart = true
+        defer {
+            preservingInputForRestart = false
+            if !bridgeReady { restoreDefaultInputDevice() }
+        }
+        restart()
+    }
+
     private func stopLocked() {
         bridgeReady = false
         stopUserHelper()
@@ -1001,8 +1015,10 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 self.healthySince = nil
                 self.bridgeReady = false
                 guard self.retrySchedule.isDue(now: Date()) else { return }
-                self.stopLocked()
-                self.attemptAutomaticStartLocked(reason: "capture pipeline stopped")
+                self.preservingInputDuringRestart {
+                    self.stopLocked()
+                    self.attemptAutomaticStartLocked(reason: "capture pipeline stopped")
+                }
                 return
             }
             if self.healthySince == nil { self.healthySince = Date() }
@@ -1057,9 +1073,11 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             self.appendAppLog(
                 "Microphone bridge restarting after Bluetooth change: \(reason)"
             )
-            self.stopLocked()
-            self.retrySchedule.reset()
-            self.attemptAutomaticStartLocked(reason: reason)
+            self.preservingInputDuringRestart {
+                self.stopLocked()
+                self.retrySchedule.reset()
+                self.attemptAutomaticStartLocked(reason: reason)
+            }
         }
     }
 
@@ -1086,9 +1104,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     func restartAsync(completion: (@Sendable () -> Void)? = nil) {
         workQueue.async { [weak self] in
-            self?.stopLocked()
-            self?.wantsBridgeRunning = true
-            self?.startLocked()
+            if let self {
+                self.preservingInputDuringRestart {
+                    self.stopLocked()
+                    self.wantsBridgeRunning = true
+                    self.startLocked()
+                }
+            }
             DispatchQueue.main.async {
                 completion?()
             }
@@ -2131,6 +2153,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     @discardableResult
     private func setDefaultInputDevice(_ id: AudioDeviceID) -> Bool {
+        // Re-setting the same device can still send CoreAudio configuration changes.
+        guard defaultInputDeviceID() != id else { return true }
         var deviceID = id
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -2175,6 +2199,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func restoreDefaultInputDevice() {
+        guard !preservingInputForRestart else { return }
         loadPreviousInputDeviceIfNeeded()
         guard let deviceID = previousDefaultInputDeviceID else {
             removePrivateItem(at: previousInputDeviceFilePath)

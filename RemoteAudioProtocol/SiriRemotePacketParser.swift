@@ -40,25 +40,56 @@ public struct SiriRemotePacketParser {
             return directHIDEvents(from: line)
         }
 
-        // Live PacketLogger output contains every controller record, while Siri Remote
-        // voice starts only on the ATT 23/35/39 L2CAP payloads below. Avoid splitting and
-        // hex-decoding unrelated records while no fragmented payload is in flight. Once a
-        // first fragment has been accepted, all following ACL records still reach the
-        // handle-aware reassembler so interleaved remotes and continuation packets remain safe.
-        if pendingByHandle.isEmpty,
-           !line.contains(" 04 00 1B 23 "),
-           !line.contains(" 04 00 1B 35 "),
-           !line.contains(" 04 00 1B 39 ") {
-            return []
-        }
-
         guard let marker = line.range(of: " RECV ") else { return [] }
-        let bytes = line[marker.upperBound...]
+        let payload = line[marker.upperBound...]
+        // Headphone/media traffic can dwarf remote voice. Inspect only the ACL/L2CAP
+        // header before allocating/decoding a whole hex payload. Continuations remain
+        // eligible only for a handle with an ATT fragment already in progress.
+        let header = Self.hexPrefix(payload, count: 8)
+        guard header.count >= 4 else { return [] }
+        let handle = UInt16(header[0]) | UInt16(header[1] & 0x0f) << 8
+        switch (header[1] >> 4) & 3 {
+        case 2:
+            pendingByHandle.removeValue(forKey: handle)
+            guard header.count == 8, header[6] == 4, header[7] == 0 else { return [] }
+        case 1:
+            guard pendingByHandle[handle] != nil else { return [] }
+        default: return []
+        }
+        let bytes = payload
             .split(whereSeparator: { $0.isWhitespace })
             .compactMap { UInt8($0, radix: 16) }
         guard bytes.count >= 4 else { return [] }
 
         return l2capEvents(from: bytes)
+    }
+
+    /// Walk a bounded ASCII prefix; do not scan a potentially large media payload.
+    private static func hexPrefix(_ text: Substring, count: Int) -> [UInt8] {
+        var bytes: [UInt8] = []
+        var value: UInt8 = 0, digits = 0
+        for char in text.utf8 {
+            if char == 32 || char == 9 || char == 13 {
+                if digits == 0 { continue }
+                guard digits == 2 else { return [] }
+                bytes.append(value)
+                if bytes.count == count { return bytes }
+                value = 0; digits = 0
+                continue
+            }
+            let nibble: UInt8
+            switch char {
+            case 48...57: nibble = char - 48
+            case 65...70: nibble = char - 55
+            case 97...102: nibble = char - 87
+            default: return []
+            }
+            guard digits < 2 else { return [] }
+            value = value * 16 + nibble; digits += 1
+        }
+        if digits == 2 { bytes.append(value) }
+        else if digits != 0 { return [] }
+        return bytes
     }
 
     private mutating func directHIDEvents(from line: String) -> [VoiceEvent] {

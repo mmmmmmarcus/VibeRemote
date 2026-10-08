@@ -13,8 +13,8 @@
 # Override the identity when building on another machine:
 #   CODESIGN_IDENTITY="Developer ID Application: Example Corp (TEAMID)" ./install.sh
 #
-# ARCHS="$(uname -m)" ./install.sh builds host-only, which is roughly twice as fast while
-# iterating. The default is a universal build.
+# Builds Apple Silicon (arm64) only. Temporary compiler caches are removed on exit.
+# Set KEEP_BUILD_CACHE=1 only for active incremental development.
 
 set -euo pipefail
 

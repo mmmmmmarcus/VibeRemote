@@ -540,7 +540,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleCapturedAuxiliaryButton(_ edge: PacketLoggerButtonParser.Edge) -> Bool {
         guard usesPassiveButtonCapture(generation: .aluminumClickpad) else { return false }
-        if edge.pressed && edge.button != "back" { remoteInputHandler?.cancelBackDoubleClick() }
         if edge.pressed { caretController.cancel() }
         remoteInputHandler?.recordCapturedActivity(edge)
         let device = "capture:\(edge.sender)"
@@ -548,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ["mute", "volumeUp", "volumeDown"].contains(edge.button) {
             VolumeRevertGuard.shared.handleRemoteButton(edge.button, pressed: edge.pressed)
         }
-        if claimed { remoteInputHandler?.cancelBackDoubleClick(); return true }
+        if claimed { return true }
         // Reserved buttons stay inert in Touch too; do not forward native media keys.
         if menuBarManager.getMapping(for: edge.button, generation: .aluminumClickpad) == .none { return true }
 

@@ -104,6 +104,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case none = "None"
     case advancedMenu = "Advanced Menu"
     case positionCaret = "Position text cursor"
+    case skillPicker = "Skill Picker"
 
     var requiresHold: Bool {
         switch self {
@@ -118,7 +119,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// short of keys. They are assigned by the generation profile, never chosen by hand.
     var isAssignableToSiriButton: Bool {
         switch self {
-        case .shiftEnterOrModifier, .agentClientOrSlash, .advancedMenu, .positionCaret:
+        case .shiftEnterOrModifier, .agentClientOrSlash, .advancedMenu, .positionCaret, .skillPicker:
             return false
         default:
             return true

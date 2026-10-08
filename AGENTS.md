@@ -47,7 +47,7 @@ deployment target, and generated app bundle minimum system version aligned at 27
 | `PrivilegedHelperClient.swift` | App-side registration/status/XPC calls for the daemon. |
 | `Vendor/SiriRemoteVoiceControl/` | Prebuilt legacy helper binaries (compatibility fallbacks). |
 | `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
-| `build.sh` | SwiftPM build → universal `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
+| `build.sh` | SwiftPM build → arm64-only `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
 | `install.sh` | Developer-ID-signed build deployed over `/Applications/VibeRemote.app`; the stable signature is what preserves the TCC grants. |
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
@@ -57,20 +57,33 @@ deployment target, and generated app bundle minimum system version aligned at 27
 
 Always build through SwiftPM / the scripts — never hand-invoke `swiftc`.
 
+Target Apple Silicon (arm64) only, including the audio driver. Do not build Intel or
+universal binaries; the scripts reject non-arm64 ARCHS overrides. Default builds use
+an owned temporary scratch directory and remove it on success, failure or handled
+interruption. Only set KEEP_BUILD_CACHE=1 for an active incremental session; it uses
+one .build/swiftpm directory. Run ./scripts/clean-build.sh after tests or that session.
+Do not leave per-task /tmp scratch builds or parallel native/Xcode architecture caches.
+Cleanup must run after all builds/tests stop and must preserve Git, source, uncommitted
+work, installed apps and completed app/driver outputs. The driver removes its temporary
+source and DerivedData unless WORK_DIR was explicitly supplied; retain corresponding
+source deliberately when preparing a driver distribution under GPL-3.0.
+
+
 ```bash
-# Fast host-only build while iterating
-ARCHS="$(uname -m)" ./build.sh
+# Apple Silicon build; temporary compiler caches are removed on exit
+./build.sh
 
 # Audio driver (only needed when it changes; output is gitignored)
 ./build_audio_driver.sh
 
-# Full universal signed bundle (what actually gets installed)
+# Apple Silicon signed bundle (what actually gets installed)
 ./create_app_bundle.sh                 # ad-hoc signed (local "-")
 open VibeRemote.app
 
 # Unit tests + strict concurrency (CI runs both)
 swift test
 swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
+./scripts/clean-build.sh
 ```
 
 `AudioDriver/` and the built binaries are gitignored, so a fresh clone bundles no driver and
@@ -84,7 +97,7 @@ grants and forces re-approval each time. A stable identity preserves them:
 
 ```bash
 ./install.sh                          # picks the first Developer ID identity
-ARCHS="$(uname -m)" ./install.sh      # host-only, ~2x faster while iterating
+KEEP_BUILD_CACHE=1 ./install.sh      # optional incremental development only
 ```
 
 Equivalent by hand:
@@ -123,9 +136,8 @@ it is not proof of generation. Classification uses the whole physical interface 
   the modifier hold, Play/Pause gains the "/" hold. That table lives in
   `RemoteGeneration.buttonActionOverrides`.
 - Both generations use the physical Siri button for **Siri Button Mapping** and
-  firmware-gated microphone capture. The old touch surface owns Enter on mechanical
-  click, directional swipes on lift, and the shared shake-to-caret gesture; the new
-  clickpad center remains reserved. Do not remap the old surface to Siri again.
+  firmware-gated microphone capture. The old touch surface and new clickpad center
+  confirm active caret positioning; outside it, old surface press is Enter and aluminum center is reserved. Do not remap the old surface to Siri again.
 - **Composite actions are profile-assigned, never user-chosen.** The Siri submenu iterates
   `ButtonAction.allCases`, so profile composites return `false` from
   `isAssignableToSiriButton`. `loadSiriButtonAction` re-checks it on read.
@@ -151,8 +163,13 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 
 `remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. The Siri
 button is the only customizable button (`siriButtonAction`). `RemoteButtonMapping` is the
-shared source of truth for runtime and Settings callouts. Aluminum Play/Pause is reserved
-(`.none`) outside Advanced Menu, and must consume its native media event even in Touch.
+shared source of truth for runtime and Settings callouts. Aluminum Play/Pause opens Skill outside Advanced Menu (`.skillPicker`), using the
+focused app trigger. Its native media event remains consumed. Within the menu it pastes.
+The aluminum menu TV slot is now inactive and consumes both edges without a newline;
+old-remote TV retains Skill because its Play/Pause is the menu opener. Power sends
+Cmd+Enter in the menu and ordinary Enter outside it. Power remains HID-owned: never
+add it to the passive-capture auxiliaryButtons set. Menu ownership consumes repeats
+and releases, including when the menu closes before the opener is released.
 Mute always opens Advanced Menu; old-remote Play/Pause is its opener. Legacy
 `modeSwitchButtons` defaults are ignored. Mode switching remains available in Settings,
 and the aluminum Advanced Menu. Never restore per-button mode assignment.
@@ -168,7 +185,7 @@ Do not implement this only as a delay in button dispatch: that leaves system vol
 The settings artwork and callout placement must support **two distinct physical
 layouts**. First generation uses the user's supplied `Resources/SiriRemoteFirstGeneration.png`:
 Menu / TV on the upper button row, microphone / volume-up on the middle row,
-Play/Pause / volume-down below, and touch-surface press = Enter. Second/third
+Play/Pause / volume-down below, and touch-surface press = confirm caret while positioning, otherwise Enter. Second/third
 generation retains `Resources/SiriRemote.png` with its own Power, side-Siri and Mute
 positions. `RemoteSettingsLayout` selects both artwork and callout coordinates from
 the snapshot generation. Never reuse the aluminum photo with hidden controls as the
@@ -207,8 +224,7 @@ Auto Disconnect. Window state comes from
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
 
-Current intent: clickpad arrows → arrow keys, old one-way touch-surface swipe + lift → one
-arrow-key tap, old touch-surface click → Enter, aluminum center → no fixed action, Back/Menu →
+Current intent: clickpad arrows → arrow keys, old touch-surface click → Enter, aluminum center → confirm active caret (otherwise reserved), Back/Menu →
 word-wise Backspace (Option+Delete — macOS `deleteWordBackward:`, whose tokenizer also
 segments Chinese words; repeat runs at a slower word cadence than character repeat),
 TV → Shift+Enter (newline, the convention agent apps use), Play/Pause → toggle
@@ -224,13 +240,9 @@ tap/long-press are therefore synthesized in `RemoteInputHandler`:
 
 - `beginRepeating` drives auto-repeat (Backspace, arrows) with a safety tick cap in case a
   release event is ever dropped.
-- Back/Menu keeps immediate word deletion and held repeat. Two complete short clicks
-  (each at most 300 ms, separated by at most 300 ms) clear the focused editor on the
-  second release. `RemoteBackDoubleClick` uses original event timestamps and the same
-  physical source plus writable AX editor identity; stale events, holds, other buttons,
-  Advanced Menu consumption, capture resets and disconnects must not complete a pair.
-  Only Back/Menu gets this gesture, not a Siri assignment to Backspace. Clearing uses
-  native Cmd+A/Delete, without reading or replacing AXValue or touching the clipboard.
+- Back/Menu always deletes one word immediately per press; holds repeat. Do not
+  recognize a double-click: rapid repeated presses must never clear the input.
+  Advanced Menu retains its explicit clear-input action.
 - Volume keys share one smart-list path across both remote generations. On button-down,
   they schedule one action after a short delay; do not dispatch Cmd+Shift+8 synchronously
   from the volume release callback because Codex drops it. `ListEditingController` reads
@@ -388,6 +400,18 @@ all automatic start paths pass `allowAdministratorPrompt: false` through to the
 supervisor boundary, even if helper approval changes during startup. Reconnect
 recovery must also cover an already-stopped bridge. Mac wake requests recovery.
 The independent HID registry watchdog remains at 15 seconds.
+
+Capture-only restarts preserve the current system input and its saved original device.
+Do not restore the previous microphone between stop/start: it may be a Bluetooth headset
+and cause a temporary voice-profile switch. Restore on explicit stop/quit or failed restart.
+Skip CoreAudio default-input writes when that device is already selected.
+
+Reject non-ATT ACL records from their bounded eight-byte header before decoding the full
+payload. Continuations are eligible only for a pending ATT handle; a new packet on that
+handle clears old reassembly, including non-ATT packets. Read the voice-suppression file
+fresh for actual voice events, not for unrelated Bluetooth records. Keep session cancellation
+sticky through the tail. Button/touch readers reject impossible sizes before date conversion.
+These reduce background work; they do not establish that Bluetooth headphone stutter is fixed.
 
 Idle disconnect can close every app-owned HID handle while IOHIDManager retains the same
 services. A Bluetooth reconnect then emits no HID remove/add callback. Reconcile connected
@@ -624,9 +648,12 @@ hold reuse. See `testNewRemoteTrailingPacketDoesNotStartAnotherVoiceSession`.
 The physical bottom-left button now opens a nonactivating glass panel beside the text caret:
 Mute for aluminum, Play/Pause for glass remotes. This explicit product change overrides
 that button's prior Skill/modifier or optional mode-switch assignment. Back = clear input,
-TV = Skill, aluminum Play/Pause = reserved, volume up/down = previous/next session.
+Old-remote TV = Skill; aluminum TV is inactive in this menu after Skill moved to
+ordinary Play/Pause. Aluminum menu Play/Pause = Paste, Power = Cmd+Enter,
+volume up = Redo, volume down = Undo.
+Use doc.on.clipboard, arrow.uturn.forward and arrow.uturn.backward respectively.
 The old remote has only four menu actions; never repurpose Siri to create a fifth.
-Directions/center, Siri, and Power are excluded. Preserve focused-app identity, consume
+Directions/center and Siri are excluded. Preserve focused-app identity, consume
 paired releases on cancellation, and perform only one action per presentation.
 
 PacketLogger now parses the six aluminum auxiliary bits (TV 0, volume 1/2, Back 6, Mute 7,
@@ -637,8 +664,9 @@ connection gate and repeat logic. Capture loss cancels auxiliary repeats. Do not
 all system media keys without a matching fresh capture. The old/direct-HID path uses the
 same advanced-menu model via its physical-button callback.
 
-Advanced Menu session actions synthesize Command+Shift+[/] in Codex and Claude,
-as confirmed by the user. Skill
+Advanced Menu editing actions synthesize Command+Shift+Z (Redo), Command+Z (Undo),
+Command+V (Paste), and Command+Return (Power) in the preserved foreground app. Never inspect clipboard content
+or rewrite AXValue for these actions. Skill
 directly types the focused client's trigger without an AX role gate. Only clear-input
 requires an editable AX role. Read the current focused editor's AX selected range and
 AXBoundsForRange, with text-marker bounds for web editors; prefer text caret geometry. AX reads run off the event-tap thread with bounded timeouts and stale
@@ -686,7 +714,10 @@ without an aliased cutout or any opaque shape in the visible window. Match shado
 offset/blur to the bitmap's backing scale; verify clear interiors and downward falloff.
 The opener shows the menu on down. A release before 250 ms latches it; a longer hold
 closes on release. During a hold, actions execute on down, then all remaining releases
-are consumed without reopening or falling through to normal mappings. Use captured
+and subsequent auxiliary clicks while that physical opener stays down are consumed.
+Keep each suppressed click owned through its release, even if the opener releases first;
+never let a hidden menu turn a second Redo press into baseline Indent. Other devices and
+excluded keys remain independent; capture reset clears the held chord. Use captured
 physical timestamps for hold duration. Same-report Mute downs precede action edges and
 Mute ups follow them. Settings Mute/Power (and the old remote's Advanced Menu opener)
 remain visible but disabled, with no popup arrow or interactive glass response.
@@ -722,48 +753,69 @@ Diagnostics submenu still refreshes through its delegate, including while discon
 RemoteCaretController replaces the removed swipe-delete experiment. Aluminum FC reports
 (ATT 003D, marker 32, 11/18-byte payloads) supply signed 12-bit coordinates while HID stays
 open. Hover bit 1 is a lift edge. Protocol reference is linked in the decoder.
-Both generations enter with one quick, forceful out-and-back touch gesture while the same
-finger remains down. The first stroke establishes direction; one return stroke whose
-direction cosine is at most -0.65 and whose length is at least 240 normalized raw units
-must finish within 0.9 seconds, with no inter-frame gap over 250 ms. Ordinary one-way
-dragging, slow movement and lift before recognition reset the gesture. On the black-glass
-remote only, a one-way stroke of at least 140 raw units, at most 650 ms and with a clear
-dominant axis sends exactly one arrow key when the finger lifts. Out-and-back travel fails
-the straightness check, so the same contact can become caret mode without also sending an
-arrow. Aluminum clickpad direction handling remains on its physical ring.
+Both generations enter when one contact accumulates 1000 normalized raw units of travel,
+independent of direction or speed. RemoteCaretTravelGate samples path segments after
+12 raw units of displacement from an anchor, so slow intentional motion accumulates
+but small back-and-forth jitter does not. Lift before entry, multiple contacts, a new
+source/generation, out-of-order frames, gaps over 250 ms and jumps of 700 units or more
+on either axis reset pending recognition. No direction-reversal or overall time limit.
 No focused writable AX text element/caret geometry means no overlay or Enter fallback.
 Preview only changes a nonactivating, mouse-transparent clipped overlay; AX selection is
-written once on confirm. Snapshot text, selection, focus and geometry must remain unchanged.
+written once on a center click or 3-second idle confirmation. Snapshot text, selection,
+focus and geometry must remain unchanged.
 Siri/Power/keyboard Return cancel and consume their complete press; Return repeats must
 not submit. Voice suppression is a separate private gate, not an interaction mode. The
 helper suppresses a whole cancelled voice session; the next ordinary Siri hold re-enables.
-On the black-glass remote, first contact over a supported text editor shows a 45% preparation
-bubble at the current native caret; lift hides it, while a recognized shake expands it into
-the full cursor mode. Aluminum behavior remains unchanged and shows no bubble before
-recognition. The caret stays 2 pt wide at the editor's
+Single-contact touch-down shows a symbol-free preparation bubble (65% scale, growing
+to 78% with accumulated travel) and an opaque stem at the calibrated insertion point.
+Only the bubble rotates around its stem junction, following bounded horizontal displacement
+and velocity. Retarget springs continuously; threshold entry inherits the live motion,
+grows to full size with a small overshoot and fades in the movement symbol. Never move
+the stem with decorative sway. Overlap the balloon neck into the stem by 1.5 pt and
+composite both before applying their shared shadow, so antialiasing and shadow never
+create a seam at the junction. Reduce Motion disables sway and spring scaling.
+Preparation makes one AX acquisition attempt per contact, validates focus/text/geometry
+on the watchdog, and retracts on lift or stale contact. It is not active positioning:
+no selection writes, voice suppression, or confirmation/Return interception. Keep
+direction-independent cumulative travel and post-entry lift persistence unchanged.
+The caret stays 2 pt wide at the editor's
 line height; a 24 pt bubble with the four-way SF Symbol grows from its top. The exact
 Figma silhouette (1345:6560) is in Resources/CaretBubble.svg; CaretBubble.png is its
 top 32 pt exported at 4x, joining the variable-height native stem. The decorative
-bubble may overhang the editor, but insertion targets remain inside it. Two-dimensional sliding displays a continuous preview; lift snaps it to the nearest
-grapheme boundary. There is no per-character hysteresis while dragging. Motion gain
-is 0.07 screen points per raw unit (40% faster than 0.05). A 1.25 pt spatial
+bubble may overhang the editor, but insertion targets remain inside it. Horizontal
+sliding displays a continuous preview; vertical movement snaps to calibrated text rows.
+Choose the row by Y before choosing its nearest character by X, so short lines cannot
+jump sideways into a longer adjacent line. Change row only after crossing 65% of actual
+row spacing; reverse travel must cross the opposite threshold. Keep the displayed Y on
+that row, including on lift/confirm. Never clamp its calibrated Y into a line gap.
+Horizontal gain remains 0.07 screen points per raw unit; vertical output is multiplied
+by 0.65. Lift snaps X to a grapheme boundary. A 1.25 pt spatial
 dead band accumulates intentional slow motion while rejecting finger jitter; the 100 ms
 post-click release interval establishes a fresh touch baseline. Decoration never
 offsets/clamps its anchor. Tracking position is immediate,
 while appearance/disappearance remain animated, so commit matches the displayed target.
+Dismissal reverses the growth around the same stem junction: keep opacity at one while
+the bubble shrinks, then fade the stem only below 20% bubble scale. Retarget live spring
+values if a new touch interrupts dismissal. Reduce Motion uses a simple fade.
 Recheck target geometry before committing to reject stale scroll/reflow positions. Geometry, raw center thresholds, movement
 direction and target-app AX writes still require physical verification. Do not claim
 hardware haptics. No mouse movement, scrolling, deletion, clipboard use or generic Undo.
 
-The recognized frame remains the motion baseline, so the same uninterrupted contact moves
-the preview immediately after entry. Lift resolves the nearest grapheme boundary, writes
-the selection once and hides the overlay for both generations. The black-glass remote has
-an unusual lift edge: its 13-byte report keeps byte 0 at one while finger-record ellipse
-and pressure bytes 9...11 become zero. `decodeGlass` must derive active contacts from those
-three bytes, not the advertised finger count. The black-glass remote also has
-no separate Power/submit key, so its mechanical touch-surface click cancels any pending or
-active gesture before passing through as Enter. Aluminum center no longer enters or confirms
-caret mode; Power remains Enter. Do not route either center click through CaretButtonGate.
+The recognized frame remains the motion baseline, so the same contact moves the preview
+immediately after entry. Lift settles only the preview and resets the contact baseline;
+it never writes the selection or ends the mode. Users may lift/reposition repeatedly.
+A center click (both generations) commits once, then dismisses. Full positioning also
+commits after 3 seconds without accepted movement, using a monotonic deadline and the
+same settle/editor/geometry validation as a click. Start on entry, renew only on accepted
+motion, clear on cancellation, and consume expiry once. Stationary reports, lifts and
+preparation never renew/start this deadline. If the finger is still touching at expiry,
+consume that source's touch frames until lift so preparation cannot immediately reappear.
+CaretButtonGate consumes
+its repeats and release after mode exit so an old-remote confirmation cannot submit Enter.
+Outside positioning the old surface click remains Enter; aluminum center remains reserved.
+After confirmation, ignore touch while the click is held and for 100 ms after release.
+The black-glass lift edge keeps byte 0 at one while ellipse/pressure bytes 9...11 zero;
+decodeGlass must use those three bytes, not advertised finger count.
 
 Caret geometry must be calibrated against nonempty glyph ranges. On macOS 27 the
 native NSTextView collapsed AX range reports a rectangle one line above
@@ -791,8 +843,38 @@ index: Chromium can interpret it against the document root. Walk opaque markers
 from verified start/end/current-selection anchors, validate each UTF-16 segment
 against the editor snapshot, and bound traversal. Cache only within that editor
 and positioning session. Keep glyph calibration for both geometry sources.
-Entry failure diagnostics are limited to recognized shake gestures and contain only
+Codex can return the entire editor rectangle for a collapsed container-anchored
+marker (observed 713 x 44 instead of a 0 x 18 caret). Reject insertion rectangles
+wider than 3 points. Container-marker round trips alone do not fix this: entry from
+the real end selection works while reaching that same end from another offset fails.
+Seed markers from AXStaticText descendants of the focused editor, using each leaf's
+own AXTextMarkerRangeForUIElement. Its prefix + content + suffix must exactly equal
+the editor snapshot, and each seeded anchor must have valid collapsed geometry.
+Bound that traversal to 96 nodes / depth 10 / 120 ms and never search another editor.
+Preserve a valid real-selection anchor when a leaf is unusable. As a fallback,
+re-anchor by stepping into neighboring text and back, verifying
+both traversed strings against the same UTF-16 segment; cache only after the replacement
+returns valid insertion geometry. Normalize container endpoints for calibration ranges
+too. Never guess end/start X from glyph width or assume LTR. Sample offsets 0 and text
+length first and retry failed endpoint probes at most twice after other samples.
+Entry failure diagnostics are limited to recognized travel gestures and contain only
 capabilities and geometry, never editor strings or marker payloads.
 
-Caret lift commits for both generations after a recognized shake gesture. Clear drag and
-shake-recognition state on cancellation.
+Caret lift only settles the preview. Center/surface click or 3-second idle expiry commits for both generations.
+Clear drag and travel-recognition state on cancellation.
+
+Direction buttons emit ordinary arrows again, including repeat: they navigate Codex Skill
+pickers and may move the real text caret. Do not restore AX popup/class-based gating.
+On aluminum direction-button down, cancel caret preparation/positioning without consuming
+the arrow. CaretNavigationTouchGate owns that physical contact until lift, including the
+button-held interval and delayed touch reports after release. Ordinary cancel/keyboard
+callbacks must not clear this contact ownership; source reset/disconnect does. Other
+remote generations and distinct known touch senders keep their gesture behavior. A new
+contact after lift restores the existing preparation and cumulative-travel entry.
+
+After main synchronization, preserve the 1000-unit cumulative-travel gesture, animated
+preparation, center-click / idle confirmation and verified text-leaf caret endpoints.
+The upstream glass-only quick one-way swipe sends one arrow on lift only outside
+full caret mode. Entering full mode resets the swipe recognizer; its lift must never
+also send an arrow. Mechanical surface clicks block touch while held and for 160 ms
+after release, without replacing active center-click confirmation with Enter.

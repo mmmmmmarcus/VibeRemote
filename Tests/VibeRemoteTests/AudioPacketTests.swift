@@ -64,4 +64,28 @@ final class AudioPacketTests: XCTestCase {
         let truncated = records([0x1B, 0x23, 0, 1, 2, 3, 4, 5, 6, 90, 0xB8], handle: 0x43)
         XCTAssertEqual(truncated.flatMap { parser.events(from: $0) }, [])
     }
+
+    func testMediaTrafficCannotSupplyOrResumeAnInterruptedATTFragment() {
+        var parser = SiriRemotePacketParser()
+        let packet: [UInt8] = [0xB8] + Array(1...66)
+        let voice = records([0x1B, 0x23, 0, 1, 2, 3, 4, 5, 6, UInt8(packet.count)] + packet, handle: 0x43)
+        _ = records([0x1B, 0x23, 0, 0, 0x10], handle: 0x43).flatMap { parser.events(from: $0) }
+        XCTAssertEqual(parser.events(from: voice[0]), [])
+        // A new non-ATT packet on the same handle invalidates pending reassembly.
+        XCTAssertEqual(parser.events(from: "media RECV 43 20 0C 00 08 00 40 00 1B 35 00 00 00 00 00 00"), [])
+        XCTAssertEqual(voice.dropFirst().flatMap { parser.events(from: $0) }, [])
+        XCTAssertEqual(voice.flatMap { parser.events(from: $0) }, [.packet(Data(packet))])
+        XCTAssertEqual(parser.events(from: "media RECV 44 10 04 00 1B 39 00 00"), [], "Unowned continuations are ignored")
+    }
+
+    func testBoundedACLHeaderAcceptsHexCaseAndWhitespaceAndRejectsMalformedHeaders() {
+        let payload: [UInt8] = [0x1B, 0x35, 0, 0, 0, 1, 0, 4, 0xB8, 9, 8, 7]
+        let line = records(payload, handle: 0x4E)[0]
+        let hex = String(line.dropFirst("test RECV ".count)).lowercased().replacingOccurrences(of: " ", with: "\t ")
+        var parser = SiriRemotePacketParser()
+        XCTAssertEqual(parser.events(from: "test RECV \t" + hex), [.started, .packet(Data([0xB8, 9, 8, 7]))])
+        for header in ["4E 2X 00 00", "4E 200 00 00", "4E 20 00", "4E 20 04 00 01 00 40 00"] {
+            XCTAssertEqual(parser.events(from: "invalid RECV " + header), [])
+        }
+    }
 }

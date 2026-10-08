@@ -26,19 +26,18 @@ paired at the same time and each keeps its own mapping.
   Touch no longer moves the mouse, clicks, scrolls, or deletes text.
   The menu bar retains status, Advanced Menu, Settings and Quit. Settings' ellipsis
   includes Audio Output and Diagnostics. Only Siri's action is customizable.
-  Aluminum Play/Pause is reserved; Mute opens Advanced Menu.
+  Aluminum Play/Pause opens Skill ($ in Codex, / in other apps); Mute opens Advanced Menu.
 - Automatic per-generation button profiles. The 1st-gen remote has no Mute and
   no Power key, so the mute button's two roles move to buttons that do exist:
   holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
   sends Esc) while a TV tap still sends Shift+Enter, and holding Play/Pause
   previously provided Skill/client actions; Play/Pause now opens Advanced Menu. On both generations,
   **Siri Button Mapping** applies only to the physical Siri button; the touch
-  surface / clickpad center enters and confirms text-cursor positioning. The remote microphone transmits only
+  surface / clickpad center confirms text-cursor positioning after a slide enters it. The remote microphone transmits only
   while the physical Siri button is held.
 - Press-and-hold mappings for Space, Right Command, and Right Option.
-- Back/Menu deletes a word immediately; holding repeats word deletion. Double-click
-  within 300 ms to clear the current editable input on the second release. Both
-  clicks must stay in the same editor; a hold or another remote button cancels the pair.
+- Back/Menu deletes a word immediately on every press, including rapid repeated
+  presses; holding repeats word deletion. Use Advanced Menu to clear the full input.
 - Tap the Skill / Modifier button to type `$` in the focused ChatGPT / Codex desktop
   client or `/` in Claude and other apps. Focus is checked on release; holding the
   button still enables modifier chords. This also applies when Siri is assigned this action.
@@ -70,23 +69,34 @@ Build, sign, and install over `/Applications/VibeRemote.app`:
 for day-to-day use: macOS keys the Accessibility / Input Monitoring / Bluetooth grants to
 the code signature, so an ad-hoc signature — which changes on every build — revokes them
 on every rebuild, while a stable identity keeps them for the life of the app. Pass
-`CODESIGN_IDENTITY=...` to choose a different one, and `ARCHS="$(uname -m)"` for a faster
-host-only build.
+`CODESIGN_IDENTITY=...` to choose a different one. Builds target Apple Silicon (arm64) only;
+Intel Macs and universal binaries are no longer supported.
 
-Or create an optimized universal local build without installing it:
+Or create an optimized arm64 local build without installing it:
 
 ```bash
 ./create_app_bundle.sh
 open VibeRemote.app
 ```
 
-`build.sh` uses SwiftPM as the source of truth and builds both arm64 and
-x86_64 by default. Override the architectures when a faster host-only build is
-useful:
+`build.sh` uses SwiftPM in a fresh temporary directory and removes its compiler cache
+on success, failure, or a handled interruption. It retains the three output binaries
+and a small resource bundle needed for packaging. `build_audio_driver.sh` also builds
+arm64 only and cleans its temporary source/DerivedData by default; an explicit
+`WORK_DIR` keeps those files for driver debugging or corresponding-source export.
+
+For a short incremental development session only:
 
 ```bash
-ARCHS="$(uname -m)" ./build.sh
+KEEP_BUILD_CACHE=1 ./build.sh   # reuse the single .build/swiftpm cache
+./scripts/clean-build.sh       # remove all repository build/test caches afterwards
 ```
+
+Do not run cleanup concurrently with builds/tests. Cleanup preserves source, uncommitted
+changes, `.git`, the packaged app, the built driver, and the installed application.
+Do not create separate architecture or per-task scratch directories for routine builds.
+Direct `swift build` / `swift test` commands still create caches: clean them when finished.
+The tradeoff is that default builds recompile instead of accumulating gigabytes of cache.
 
 Local bundles are ad-hoc signed. For a Developer ID build, explicitly provide
 the identity:
@@ -158,6 +168,7 @@ capture audio hands-free regardless of app settings.
 ```bash
 swift test
 swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
+./scripts/clean-build.sh
 ```
 
 CI runs both commands on macOS for every push and pull request.
@@ -175,17 +186,35 @@ components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTI
 
 ## Text-cursor positioning
 
-On either remote, quickly move one finger out and back once without lifting to reveal
-a thin surrogate caret with a four-way-arrow bubble growing from its top. Keep the same
-finger down and slide freely in two dimensions; lifting snaps to the nearest visible
-character boundary, commits the real caret and hides the overlay. The black-glass remote's
-mechanical surface click remains Enter because it has no separate Power/submit button. The
-aluminum center no longer enters caret mode. The real selection stays unchanged until lift.
+Direction buttons send normal arrow keys for both menu navigation (including Codex's
+Skill picker) and text-caret movement. Pressing an aluminum direction button cancels
+caret preparation/positioning and suppresses that touch contact until the finger lifts,
+so clicking directions cannot immediately reopen the surrogate caret. Touch again to
+resume the normal preview and slide gesture.
+
+On either remote, slide one finger far enough in any direction to reveal a thin
+surrogate caret with a four-way-arrow bubble. Entry counts cumulative travel (1000
+normalized raw units), not direction reversals or speed; small sensor jitter is ignored.
+After entry, horizontal motion stays free while vertical motion is slower and snaps
+between text rows, with a small threshold to prevent accidental row changes. Lift and
+slide again as often as needed. Lifting snaps only the preview
+to the nearest visible character boundary and keeps positioning active. Press the
+center (or the old remote's touch surface) to commit and dismiss, consuming the entire
+click so it cannot also submit Enter. Outside positioning, the old surface click stays
+Enter and the aluminum center stays reserved. After 3 seconds without accepted movement,
+positioning automatically snaps to the nearest character boundary, commits and dismisses.
+Stationary touch reports and lifts do not restart the timer; moving does. A finger still
+resting on the pad at expiry must lift before starting another preview. Real selection
+stays unchanged until a center click or this idle confirmation; both validate the editor first.
 Siri, Power/Return, typing, clicking, a focus or
 content change cancels positioning. Siri and Return used to exit are consumed; the
 cancelled voice hold and its tail remain muted. The next ordinary Siri hold resumes voice.
-Before the return gesture is recognized, touch has no editing, overlay or pointer
-action. No active accessible editor means no overlay.
+Touch-down shows an opaque thin caret and a smaller, symbol-free preparation bubble.
+The bubble bends with horizontal finger displacement and speed while the stem stays
+anchored to the real insertion point. Cumulative travel gently expands it; crossing
+the threshold springs into the full bubble and fades in the movement symbol.
+Lifting before entry retracts the preview. Preparation never edits text, moves the
+real caret, blocks voice or remaps buttons. No active accessible editor means no overlay.
 Secure fields, active compositions and unsupported caret geometry fail closed.
 The current AX calibration requires existing text; an empty editor does not show a surrogate caret.
 The caret stays inside the editor; its decorative bubble can extend above it.
@@ -196,7 +225,7 @@ releasing audio HID/GATT handles. The low-level NativeTouch adapter is retained 
 capability; there is no mouse mapping or Touch/Audio mode switch. Old saved mode and
 pointer-speed settings are ignored. First-generation decoding accepts only 13/20-byte
 `0x32` touch reports on ATT `0x0023`, so voice packets on the same handle are excluded.
-Physical movement direction, shake thresholds and target-editor compatibility
+Physical movement direction, travel thresholds and target-editor compatibility
 must be tested on each hardware/app combination.
 
 **Audio Output → Direct HAL (Experimental)** sends decoded 48 kHz mono Float32 samples
@@ -251,17 +280,23 @@ Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
 Tap the bottom-left remote button (Mute on aluminum remotes; Play/Pause on the
 first generation) to show a glass menu beside the text insertion caret (falling back
 to the mouse pointer if no text caret bounds are available). The menu preserves
-the focused editor. Back clears the input, TV opens the focused app's Skill picker,
-Play/Pause switches Touch / Audio on aluminum remotes, and Volume Up / Down select
-the previous / next Codex or Claude session. A quick menu-button tap leaves the menu
+the focused editor. Back clears the input; on the old remote TV opens the Skill picker.
+On aluminum remotes Skill has moved to ordinary Play/Pause and the menu's TV slot is inactive.
+Play/Pause pastes on aluminum remotes (⌘V), Volume Up redoes (⌘⇧Z), and Volume
+Down undoes (⌘Z). The icons are a clipboard and forward/backward curved arrows. A quick menu-button tap leaves the menu
 open; hold it for 250 ms or longer to peek, then release to close. While holding it,
 another action button executes immediately on press. In the latched menu, actions
 execute once on release. Either action closes the menu and consumes the remaining
 releases. Click outside, press Escape, or tap the menu button again to cancel.
-The clickpad, Siri and Power keep their normal behavior. The old remote has four
+Power sends ⌘Enter while the menu is open, closes it, and owns both press edges;
+outside the menu Power remains Enter. The clickpad and Siri keep their normal behavior. The old remote has four
 menu actions because its Play/Pause is the opener and Siri remains unchanged.
 
-The aluminum remote's auxiliary buttons use captured reports in both modes, sharing
-one action owner with media suppression. Normal audio-mode actions retain the HID
+The aluminum remote's auxiliary buttons use captured reports, sharing one action
+owner with media suppression. Normal button actions retain the HID
 connection quarantine and idle tracking. Settings always labels the physical opener
 Advanced Menu, overriding a previous mode-switch assignment on that button.
+
+On the first-generation glass remote, a quick one-way swipe and lift outside caret
+mode sends one arrow key. Accumulating 1000 units of touch travel still enters caret
+mode; lift then only settles its preview, and center click or idle confirms it.
