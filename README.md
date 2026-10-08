@@ -24,7 +24,7 @@ paired at the same time and each keeps its own mapping.
   for Siri Button and auto disconnect on the right, with a text-cursor usage guide.
   There is one working configuration: microphone and fixed buttons stay available.
   Touch no longer moves the mouse, clicks, scrolls, or deletes text.
-  The menu bar retains status, Advanced Menu, Settings and Quit. Settings' ellipsis
+  The menu bar retains status, Settings and Quit; Advanced Menu opens from the remote. Settings' ellipsis
   includes Audio Output and Diagnostics. Only Siri's action is customizable.
   Aluminum Play/Pause opens Skill ($ in Codex, / in other apps); Mute opens Advanced Menu.
 - Automatic per-generation button profiles. The 1st-gen remote has no Mute and
@@ -282,15 +282,17 @@ first generation) to show a glass menu beside the text insertion caret (falling 
 to the mouse pointer if no text caret bounds are available). The menu preserves
 the focused editor. Back clears the input; on the old remote TV opens the Skill picker.
 On aluminum remotes Skill has moved to ordinary Play/Pause and the menu's TV slot is inactive.
-Play/Pause pastes on aluminum remotes (⌘V), Volume Up redoes (⌘⇧Z), and Volume
-Down undoes (⌘Z). The icons are a clipboard and forward/backward curved arrows. A quick menu-button tap leaves the menu
+The middle-left Stop current task button sends Esc: Siri on the first generation,
+Play/Pause on the second and third generations. Volume Up redoes (⌘⇧Z), and Volume
+Down undoes (⌘Z), with forward/backward curved-arrow icons. A quick menu-button tap leaves the menu
 open; hold it for 250 ms or longer to peek, then release to close. While holding it,
 another action button executes immediately on press. In the latched menu, actions
-execute once on release. Either action closes the menu and consumes the remaining
+execute once on release, except Stop current task, which executes on press. Each action closes the menu and consumes the remaining
 releases. Click outside, press Escape, or tap the menu button again to cancel.
 Power sends ⌘Enter while the menu is open, closes it, and owns both press edges;
-outside the menu Power remains Enter. The clickpad and Siri keep their normal behavior. The old remote has four
-menu actions because its Play/Pause is the opener and Siri remains unchanged.
+outside the menu Power remains Enter. The clickpad keeps its normal behavior.
+In Advanced Menu, Siri sends Esc once on press to stop the current task. Both layouts show a stop icon in the middle-left slot. Normal dictation and the microphone
+audio tail are suppressed for this hold; the next ordinary Siri hold restores the configured voice action.
 
 The aluminum remote's auxiliary buttons use captured reports, sharing one action
 owner with media suppression. Normal button actions retain the HID

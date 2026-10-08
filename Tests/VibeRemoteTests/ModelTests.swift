@@ -1,10 +1,151 @@
 import HelperProtocol
+import RemoteAudioProtocol
 import AppKit
 import Carbon.HIToolbox
 import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
+    func testGlassMediaEventsWaitForHIDWithoutRequiringPassiveCapture() {
+        XCTAssertTrue(RemoteButtonMapping.shouldAwaitMediaSource(generation: .glassTouchSurface, passiveCapture: false))
+        XCTAssertTrue(RemoteButtonMapping.shouldAwaitMediaSource(generation: .aluminumClickpad, passiveCapture: true))
+        XCTAssertTrue(RemoteButtonMapping.shouldAwaitMediaSource(generation: .aluminumClickpad, passiveCapture: false))
+        XCTAssertFalse(RemoteButtonMapping.shouldAwaitMediaSource(generation: .unknown, passiveCapture: false))
+    }
+
+    func testGlassPlayPauseHIDAndNXOrderingDoesNotLeakMusicOrSwallowKeyboard() throws {
+        // Replay one quick menu-opening click. Both native NX edges may arrive
+        // before HID callbacks, or the main loop may stall while showing the menu.
+        for callbackDelay in [0.01, 0.12, 1.0] {
+            var correlation = RemoteMediaEventCorrelation()
+            let down = 100.0, up = 100.101
+            let nxDown = down + 0.004, nxUp = up + 0.004
+            for (pressed, time) in [(true, down), (false, up)] {
+                let rawHID = UInt64(time * 1e9 * 3 / 125)
+                let observed = try XCTUnwrap(RemoteMediaEventClock.uptime(timestamp: rawHID,
+                    now: time + callbackDelay, numer: 125, denom: 3))
+                correlation.record(button: "playPause", pressed: pressed, sender: 123, now: observed)
+            }
+            XCTAssertEqual(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: nxDown), 123)
+            XCTAssertEqual(correlation.resolve(button: "playPause", pressed: false, repeating: false, now: nxUp), 123)
+            XCTAssertNil(correlation.resolve(button: "playPause", pressed: true, repeating: false, now: nxUp + 0.01),
+                         "One remote click cannot consume a second ordinary keyboard click")
+            XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: nxDown))
+        }
+        var stale = RemoteMediaEventCorrelation()
+        stale.record(button: "playPause", pressed: true, sender: 123, now: 100)
+        XCTAssertNil(stale.resolve(button: "playPause", pressed: true, repeating: false, now: 100.181),
+                     "Keep the existing narrow correlation window")
+    }
+
+    func testBothMenuLayoutsStopOnMiddleLeftPressWithoutLeakingBaselineAction() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let button = generation == .glassTouchSurface ? "siri" : "playPause"
+            XCTAssertEqual(AdvancedMenuInputState.action(button: button, generation: generation), .stopTask)
+            for holdOpener in [false, true] {
+                var state = AdvancedMenuInputState()
+                XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
+                XCTAssertFalse(state.handle(button: button, pressed: false, device: "a", generation: generation).consumed)
+                let opener = AdvancedMenuInputState.trigger(for: generation)
+                _ = state.handle(button: opener, pressed: true, device: "a", generation: generation, time: 1)
+                if !holdOpener {
+                    _ = state.handle(button: opener, pressed: false, device: "a", generation: generation, time: 1.1)
+                }
+                XCTAssertFalse(state.handle(button: button, pressed: true, device: "b", generation: generation).consumed)
+                let press = state.handle(button: button, pressed: true, device: "a", generation: generation, time: 1.2)
+                XCTAssertTrue(press.consumed)
+                XCTAssertEqual(press.command, .perform(.stopTask))
+                state.dismiss()
+                for pressed in [true, false] {
+                    let edge = state.handle(button: button, pressed: pressed, device: "a", generation: generation, time: 1.3)
+                    XCTAssertTrue(edge.consumed)
+                    XCTAssertNil(edge.command, "Neither repeat nor release may paste, invoke Skill, or stop twice")
+                }
+                if holdOpener {
+                    _ = state.handle(button: opener, pressed: false, device: "a", generation: generation, time: 1.4)
+                }
+                XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation, time: 2).consumed)
+            }
+        }
+    }
+
+    func testMenuSiriStopsOnceAndBlocksVoiceUntilNextOrdinaryHold() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            for holdOpener in [false, true] {
+                var state = AdvancedMenuInputState()
+                let opener = AdvancedMenuInputState.trigger(for: generation)
+                XCTAssertFalse(state.suppressesVoice)
+                _ = state.handle(button: opener, pressed: true, device: "a", generation: generation, time: 1)
+                XCTAssertTrue(state.suppressesVoice, "Block the firmware mic before Siri's voice marker arrives")
+                if !holdOpener { _ = state.handle(button: opener, pressed: false, device: "a", generation: generation, time: 1.1) }
+                var voice = VoiceSessionGate()
+                voice.started(blocked: state.suppressesVoice)
+                XCTAssertFalse(voice.allowsPackets)
+                let down = state.handle(button: "siri", pressed: true, device: "a", generation: generation, time: 1.2)
+                XCTAssertTrue(down.consumed)
+                XCTAssertEqual(down.command, .perform(.stopTask))
+                state.dismiss()
+                for pressed in [true, true, false] {
+                    let edge = state.handle(button: "siri", pressed: pressed, device: "a", generation: generation, time: 1.3)
+                    XCTAssertTrue(edge.consumed)
+                    XCTAssertNil(edge.command)
+                    XCTAssertTrue(state.suppressesVoice)
+                }
+                if holdOpener { _ = state.handle(button: opener, pressed: false, device: "a", generation: generation, time: 1.4) }
+                voice.update(blocked: state.suppressesVoice)
+                XCTAssertFalse(voice.allowsPackets, "No release-tail audio may resume after dismissal")
+                XCTAssertFalse(state.handle(button: "siri", pressed: true, device: "a", generation: generation, time: 2).consumed)
+                XCTAssertFalse(state.suppressesVoice)
+                voice.update(blocked: state.suppressesVoice)
+                XCTAssertFalse(voice.allowsPackets, "The cancelled session stays cancelled")
+                voice.started(blocked: state.suppressesVoice)
+                XCTAssertTrue(voice.allowsPackets, "A new ordinary hold restores dictation")
+                XCTAssertFalse(state.handle(button: "siri", pressed: false, device: "a", generation: generation, time: 2.2).consumed)
+            }
+        }
+    }
+
+    func testMenuSiriPreservesSourceAndConsumesReleaseAcrossReopening() {
+        var state = AdvancedMenuInputState()
+        state.show(owner: "a")
+        XCTAssertFalse(state.handle(button: "siri", pressed: true, device: "b", generation: .glassTouchSurface).consumed)
+        XCTAssertEqual(state.handle(button: "siri", pressed: true, device: "a", generation: .glassTouchSurface).command, .perform(.stopTask))
+        state.dismiss(); state.show(owner: "a")
+        let release = state.handle(button: "siri", pressed: false, device: "a", generation: .glassTouchSurface)
+        XCTAssertTrue(release.consumed)
+        XCTAssertNil(release.command)
+        XCTAssertTrue(state.isVisible)
+        state.reset()
+        XCTAssertFalse(state.suppressesVoice)
+        XCTAssertFalse(state.handle(button: "siri", pressed: true, device: "a", generation: .glassTouchSurface).consumed)
+    }
+
+    func testBothRemoteVolumeKeysUseHistoryCommandsInsideAdvancedMenu() throws {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            for holdOpener in [false, true] {
+                for (usage, action, flags) in [(UInt32(0xE9), AdvancedMenuAction.redo, CGEventFlags([.maskCommand, .maskShift])),
+                                             (UInt32(0xEA), .undo, CGEventFlags.maskCommand)] {
+                    let button = try XCTUnwrap(RemoteInputHandler.identifyButton(page: 0x0C, usage: usage))
+                    var state = AdvancedMenuInputState()
+                    let opener = AdvancedMenuInputState.trigger(for: generation)
+                    XCTAssertEqual(state.handle(button: opener, pressed: true, device: "remote", generation: generation, time: 1).command, .showMenu)
+                    if !holdOpener {
+                        XCTAssertNil(state.handle(button: opener, pressed: false, device: "remote", generation: generation, time: 1.1).command)
+                    }
+                    let down = state.handle(button: button, pressed: true, device: "remote", generation: generation, time: 1.2)
+                    // A held opener executes on down and closes the presentation.
+                    if down.command != nil { state.dismiss() }
+                    let up = state.handle(button: button, pressed: false, device: "remote", generation: generation, time: 1.3)
+                    XCTAssertTrue(down.consumed && up.consumed, "Neither edge may reach baseline list editing")
+                    XCTAssertEqual([down.command, up.command].compactMap { $0 }, [.perform(action)])
+                    let shortcut = try XCTUnwrap(RemoteInputHandler.advancedEditingShortcut(action))
+                    XCTAssertEqual(shortcut.keyCode, kVK_ANSI_Z)
+                    XCTAssertEqual(shortcut.flags, flags)
+                }
+            }
+        }
+    }
+
     func testRapidBackPressesStayNormalUntilAdvancedMenuIsOpened() {
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
             let button = generation == .glassTouchSurface ? "menu" : "back"
@@ -42,7 +183,7 @@ final class ModelTests: XCTestCase {
         let actions: [(AdvancedMenuAction, Int, CGEventFlags)] = [
             (.redo, kVK_ANSI_Z, [.maskCommand, .maskShift]),
             (.undo, kVK_ANSI_Z, .maskCommand), (.paste, kVK_ANSI_V, .maskCommand),
-            (.commandEnter, kVK_Return, .maskCommand)]
+            (.commandEnter, kVK_Return, .maskCommand), (.stopTask, kVK_Escape, [])]
         for (action, code, flags) in actions {
             let shortcut = try XCTUnwrap(RemoteInputHandler.advancedEditingShortcut(action))
             let event = try XCTUnwrap(RemoteInputHandler.makeKeyEvent(keyCode: shortcut.keyCode, flags: shortcut.flags, keyDown: true))
@@ -60,10 +201,10 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(state.handle(button: "mute", pressed: true, device: "a", generation: generation, time: 1).command, .showMenu)
         XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: generation, time: 1.1).command)
         state.show(owner: "a")
-        for button in ["siri", "select", "navUp", "navDown", "navLeft", "navRight"] {
+        for button in ["select", "navUp", "navDown", "navLeft", "navRight"] {
             XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
         }
-        for (button, action) in [("back", AdvancedMenuAction.deleteAll), ("volumeUp", .redo), ("volumeDown", .undo), ("playPause", .paste), ("power", .commandEnter)] {
+        for (button, action) in [("back", AdvancedMenuAction.deleteAll), ("volumeUp", .redo), ("volumeDown", .undo), ("power", .commandEnter)] {
             XCTAssertTrue(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
             XCTAssertNil(state.handle(button: button, pressed: true, device: "a", generation: generation).command)
             XCTAssertFalse(state.handle(button: button, pressed: false, device: "b", generation: generation).consumed)
@@ -74,7 +215,7 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(AdvancedMenuInputState.action(button: "playPause", generation: .glassTouchSurface))
         XCTAssertEqual(AdvancedMenuInputState.action(button: "volumeUp", generation: .glassTouchSurface), .redo)
         XCTAssertEqual(AdvancedMenuInputState.action(button: "volumeDown", generation: .glassTouchSurface), .undo)
-        XCTAssertNil(AdvancedMenuInputState.action(button: "siri", generation: .glassTouchSurface))
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "siri", generation: .glassTouchSurface), .stopTask)
     }
 
     func testMovedSkillLeavesAluminumMenuTVInactiveAndPreservesOldRemote() {
@@ -124,7 +265,7 @@ final class ModelTests: XCTestCase {
     }
 
     func testAdvancedMenuHoldAndChordConsumeEitherReleaseOrder() {
-        for (button, action) in [("playPause", AdvancedMenuAction.paste),
+        for (button, action) in [("playPause", AdvancedMenuAction.stopTask),
                                  ("volumeUp", .redo), ("volumeDown", .undo), ("power", .commandEnter)] {
             for triggerReleasedFirst in [false, true] {
                 var state = AdvancedMenuInputState()
@@ -149,7 +290,7 @@ final class ModelTests: XCTestCase {
                 XCTAssertEqual(state.handle(button: "volumeDown", pressed: true, device: "a", generation: generation, time: 10.4).command, .perform(.undo))
                 state.dismiss() // The controller hides the menu after its first action.
                 _ = state.handle(button: "volumeDown", pressed: false, device: "a", generation: generation, time: 10.5)
-                let buttons = ["volumeUp", "volumeDown", "back", "tv"] + (generation == .aluminumClickpad ? ["playPause", "power"] : [])
+                let buttons = ["volumeUp", "volumeDown", "back", "tv", "siri"] + (generation == .aluminumClickpad ? ["playPause", "power"] : [])
                 for button in buttons {
                     for pressed in [true, true, false, true, false] {
                         let result = state.handle(button: button, pressed: pressed, device: "a", generation: generation, time: 10.6)
@@ -157,7 +298,7 @@ final class ModelTests: XCTestCase {
                         XCTAssertNil(result.command, "Only one action per menu presentation")
                     }
                 }
-                for button in ["siri", "select", "navUp", "navDown", "navLeft", "navRight"] {
+                for button in ["select", "navUp", "navDown", "navLeft", "navRight"] {
                     XCTAssertFalse(state.handle(button: button, pressed: true, device: "a", generation: generation).consumed)
                 }
                 XCTAssertFalse(state.handle(button: "volumeUp", pressed: true, device: "b", generation: generation).consumed)
@@ -1199,6 +1340,19 @@ final class ModelTests: XCTestCase {
     }
 
     // MARK: - Siri Remote generations
+
+    func testCapturedOpenerAndHIDSiriResolveOnlyOnePhysicalRemote() throws {
+        let descriptors = [interface(deviceKey: "remote-a"), interface(deviceKey: "remote-a", usage: 0x04)]
+        let device = try XCTUnwrap(RemoteInputHandler.deviceKeyForCapturedLabel("Siri Remote", descriptors: descriptors))
+        XCTAssertEqual(device, "remote-a", "Multiple HID collections belong to one menu owner")
+        XCTAssertNil(RemoteInputHandler.deviceKeyForCapturedLabel("Other Remote", descriptors: descriptors))
+        XCTAssertNil(RemoteInputHandler.deviceKeyForCapturedLabel("Siri Remote", descriptors: descriptors + [interface(deviceKey: "remote-b")]))
+        XCTAssertNil(RemoteInputHandler.deviceKeyForCapturedLabel("Siri Remote", descriptors: [interface(transport: "USB")]))
+        var state = AdvancedMenuInputState()
+        _ = state.handle(button: "mute", pressed: true, device: device, generation: .aluminumClickpad, time: 1)
+        _ = state.handle(button: "mute", pressed: false, device: device, generation: .aluminumClickpad, time: 1.1)
+        XCTAssertEqual(state.handle(button: "siri", pressed: true, device: "remote-a", generation: .aluminumClickpad, time: 1.2).command, .perform(.stopTask))
+    }
 
     private func interface(
         deviceKey: String = "48:a9:1c:91:77:5c",

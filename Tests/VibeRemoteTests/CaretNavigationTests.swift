@@ -307,7 +307,7 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertEqual(RemoteButtonMapping.action(button: "select", generation: .aluminumClickpad,
                                                   siriAction: .rightOpt), .none)
         XCTAssertFalse(ButtonAction.positionCaret.isAssignableToSiriButton)
-        XCTAssertEqual(AdvancedMenuInputState.action(button: "playPause", generation: .aluminumClickpad), .paste)
+        XCTAssertEqual(AdvancedMenuInputState.action(button: "playPause", generation: .aluminumClickpad), .stopTask)
     }
     func testGraphemeStopsNeverSplitEmojiOrCombiningMarks() {
         let text = "a中👨‍👩‍👧‍👦e\u{301}"

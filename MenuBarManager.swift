@@ -217,10 +217,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private var diagnosticsMenu = NSMenu()
-    var advancedMenuHandler: (() -> Void)?
-    @objc private func showAdvancedMenu() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.advancedMenuHandler?() }
-    }
     private var settingsWindowController: SettingsWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
@@ -421,9 +417,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "VibeRemote")
-        let advanced = NSMenuItem(title: "Advanced Menu", action: #selector(showAdvancedMenu), keyEquivalent: "")
-        advanced.target = self
-        appMenu.addItem(advanced)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
@@ -614,9 +607,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
-        let advancedItem = NSMenuItem(title: "Advanced Menu", action: #selector(showAdvancedMenu), keyEquivalent: "")
-        advancedItem.target = self
-        menu.addItem(advancedItem)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)

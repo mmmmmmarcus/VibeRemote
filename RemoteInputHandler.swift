@@ -85,6 +85,8 @@ final class RemoteInputHandler {
     /// Which remote family is currently attached. Drives the button profile and the
     /// microphone path; `.unknown` until at least one interface is open.
     var onAdvancedButton: ((String, Bool, String, RemoteGeneration) -> Bool)?
+    /// Observe the native HID edge before menu/AX/bridge work can re-enter the event loop.
+    var onHIDMediaButton: ((String, Bool, UInt64, UInt64) -> Void)?
     var usesPassiveButtonCapture: ((RemoteGeneration) -> Bool)?
     private(set) var generation: RemoteGeneration = .unknown
 
@@ -806,6 +808,11 @@ final class RemoteInputHandler {
         if sourceGeneration == .aluminumClickpad,
            AdvancedMenuInputState.auxiliaryButtons.contains(buttonName),
            usesPassiveButtonCapture?(sourceGeneration) == true { return }
+        if ["playPause", "mute", "volumeUp", "volumeDown"].contains(buttonName),
+           buttonState[buttonName] != (intValue != 0),
+           let interfaceID, let sender = deviceRegistryIDs[interfaceID] {
+            onHIDMediaButton?(buttonName, intValue != 0, sender, IOHIDValueGetTimeStamp(value))
+        }
         processButton(buttonName, isPressed: intValue != 0, interfaceID: interfaceID,
                       sourceGeneration: sourceGeneration)
     }
@@ -816,6 +823,21 @@ final class RemoteInputHandler {
         }) else { return }
         remoteIdleTracker.recordActivity(deviceKey: descriptor.deviceKey, now: ProcessInfo.processInfo.systemUptime)
         startRemoteKeepAliveIfNeeded(); scheduleRemoteIdleTimer()
+    }
+
+    /// The aluminum opener is passive, but Siri arrives over HID. Both must use
+    /// the physical device identity so the menu recognizes its owner's Siri key.
+    func deviceKeyForCapturedButton(_ edge: PacketLoggerButtonParser.Edge) -> String? {
+        Self.deviceKeyForCapturedLabel(edge.deviceLabel, descriptors: interfaceDescriptors.compactMap {
+            generation(ofInterface: $0.key) == .aluminumClickpad ? $0.value : nil
+        })
+    }
+
+    nonisolated static func deviceKeyForCapturedLabel(_ label: String, descriptors: [RemoteInterfaceDescriptor]) -> String? {
+        let keys = Set(descriptors.filter {
+            $0.isBluetooth && String(($0.productName ?? "").prefix(17)) == label
+        }.map(\.deviceKey))
+        return keys.count == 1 ? keys.first : nil
     }
 
     func resetCapturedButtons() {
@@ -870,8 +892,11 @@ final class RemoteInputHandler {
             rmDebug("Latency Siri \(isPressed ? "down" : "up") epoch=\(String(format: "%.6f", Date().timeIntervalSince1970))")
         }
 
+        if isPressed {
+            Self.lastProcessedButton = buttonName
+            Self.lastProcessedTime = mach_absolute_time()
+        }
         if onAdvancedButton?(buttonName, isPressed, interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid", sourceGeneration) == true {
-            if isPressed { Self.lastProcessedButton = buttonName; Self.lastProcessedTime = mach_absolute_time() }
             if ["mute", "volumeUp", "volumeDown"].contains(buttonName) { VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed) }
             return
         }
@@ -885,11 +910,6 @@ final class RemoteInputHandler {
 
         let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
             ?? ButtonAction.none
-
-        if isPressed {
-            Self.lastProcessedButton = buttonName
-            Self.lastProcessedTime = mach_absolute_time()
-        }
 
         microphoneBridgeManager?.handleButton(button: buttonName, pressed: isPressed)
 
@@ -1237,7 +1257,7 @@ final class RemoteInputHandler {
                 rmDebug("Advanced Menu: focused control is not an editor; skipped \(action.rawValue)"); return
             }
             performChord(.clearInput)
-        case .redo, .undo, .paste, .commandEnter:
+        case .redo, .undo, .paste, .commandEnter, .stopTask:
             // Let the focused app own undo history and clipboard interpretation.
             // The nonactivating menu preserves focus; do not read/rewrite its text.
             guard let shortcut = Self.advancedEditingShortcut(action) else { return }
@@ -1264,6 +1284,7 @@ final class RemoteInputHandler {
         case .undo: return (kVK_ANSI_Z, .maskCommand)
         case .paste: return (kVK_ANSI_V, .maskCommand)
         case .commandEnter: return (kVK_Return, .maskCommand)
+        case .stopTask: return (kVK_Escape, [])
         case .deleteAll, .skill: return nil
         }
     }

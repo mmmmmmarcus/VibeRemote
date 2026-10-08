@@ -70,7 +70,7 @@ struct AdvancedMenuTextAnchor: Sendable {
 }
 
 enum AdvancedMenuAction: String, CaseIterable, Sendable {
-    case deleteAll, skill, redo, undo, paste, commandEnter
+    case deleteAll, skill, redo, undo, paste, commandEnter, stopTask
     var title: String {
         switch self {
         case .deleteAll: return "Delete all"
@@ -79,6 +79,7 @@ enum AdvancedMenuAction: String, CaseIterable, Sendable {
         case .undo: return "Undo"
         case .paste: return "Paste"
         case .commandEnter: return "Command + Enter"
+        case .stopTask: return "Stop current task"
         }
     }
     func symbolName(for bundleID: String? = nil) -> String {
@@ -89,6 +90,7 @@ enum AdvancedMenuAction: String, CaseIterable, Sendable {
         case .undo: return "arrow.uturn.backward"
         case .paste: return "doc.on.clipboard"
         case .commandEnter: return "return"
+        case .stopTask: return "stop.fill"
         }
     }
 }
@@ -105,6 +107,8 @@ struct AdvancedMenuInputState {
     private var presses: [Key: Press] = [:]
     private(set) var session: UUID?
     private(set) var owner: String?
+    private var suppressedSiriSession = false
+    var suppressesVoice: Bool { isVisible || suppressedSiriSession }
     var isVisible: Bool { session != nil }
     static let auxiliaryButtons: Set<String> = ["back", "menu", "tv", "playPause", "mute", "volumeUp", "volumeDown"]
     static func trigger(for generation: RemoteGeneration) -> String { generation == .glassTouchSurface ? "playPause" : "mute" }
@@ -114,14 +118,15 @@ struct AdvancedMenuInputState {
         case "tv": return generation == .glassTouchSurface ? .skill : nil
         case "volumeUp": return .redo
         case "volumeDown": return .undo
-        case "playPause": return generation == .glassTouchSurface ? nil : .paste
+        case "playPause": return generation == .glassTouchSurface ? nil : .stopTask
         case "power": return generation == .glassTouchSurface ? nil : .commandEnter
+        case "siri": return .stopTask
         default: return nil
         }
     }
     mutating func show(owner: String?) { session = UUID(); self.owner = owner }
     mutating func dismiss() { session = nil; owner = nil }
-    mutating func reset() { dismiss(); presses.removeAll() }
+    mutating func reset() { dismiss(); presses.removeAll(); suppressedSiriSession = false }
     mutating func handle(button: String, pressed: Bool, device: String, generation: RemoteGeneration, time: TimeInterval = Date.timeIntervalSinceReferenceDate) -> Result {
         let key = Key(device: device, button: button)
         if pressed {
@@ -138,8 +143,10 @@ struct AdvancedMenuInputState {
             if isVisible, owner == nil || owner == device, let action = Self.action(button: button, generation: generation) {
                 let trigger = Key(device: device, button: Self.trigger(for: generation))
                 let held = presses[trigger]?.session == session
-                presses[key] = Press(command: .perform(action), session: session, beganAt: time, executed: held)
-                return Result(consumed: true, command: held ? .perform(action) : nil)
+                let immediate = held || action == .stopTask
+                if button == "siri" { suppressedSiriSession = true }
+                presses[key] = Press(command: .perform(action), session: session, beganAt: time, executed: immediate)
+                return Result(consumed: true, command: immediate ? .perform(action) : nil)
             }
             // A hold executes one menu action and hides the presentation immediately.
             // Until the opener is released, further auxiliary clicks still belong to
@@ -156,9 +163,13 @@ struct AdvancedMenuInputState {
             }
             if presses[trigger] != nil,
                let action = Self.action(button: button, generation: generation) {
+                if button == "siri" { suppressedSiriSession = true }
                 presses[key] = Press(command: .perform(action), session: nil, beganAt: time, executed: true)
                 return Result(consumed: true)
             }
+            // Keep a menu-owned Siri hold and its buffered audio tail suppressed.
+            // Only a fresh ordinary Siri down can re-enable the next voice session.
+            if button == "siri" { suppressedSiriSession = false }
             return Result(consumed: false)
         }
         guard let press = presses.removeValue(forKey: key) else { return Result(consumed: false) }
@@ -268,10 +279,20 @@ final class AdvancedMenuController {
     private var localMonitor: Any?
     private var activationObserver: NSObjectProtocol?
     var onAction: ((AdvancedMenuAction, pid_t) -> Void)?
+    var onVoiceSuppression: ((Bool) -> Void)?
+    private var publishedVoiceSuppression = false
+    var suppressesVoice: Bool { input.suppressesVoice }
     var isVisible: Bool { input.isVisible }
+
+    private func publishVoiceSuppression() {
+        guard input.suppressesVoice != publishedVoiceSuppression else { return }
+        publishedVoiceSuppression = input.suppressesVoice
+        onVoiceSuppression?(publishedVoiceSuppression)
+    }
 
     func handle(button: String, pressed: Bool, device: String, generation: RemoteGeneration, time: TimeInterval = Date.timeIntervalSinceReferenceDate) -> Bool {
         let result = input.handle(button: button, pressed: pressed, device: device, generation: generation, time: time)
+        publishVoiceSuppression()
         switch result.command {
         case .showMenu: preparePresentation(generation: generation)
         case .dismissMenu: dismiss()
@@ -283,6 +304,7 @@ final class AdvancedMenuController {
     func show(generation: RemoteGeneration = .aluminumClickpad, owner: String? = nil) {
         dismiss()
         input.show(owner: owner)
+        publishVoiceSuppression()
         preparePresentation(generation: generation)
     }
     private func preparePresentation(generation: RemoteGeneration) {
@@ -368,10 +390,8 @@ final class AdvancedMenuController {
             let skill = glass(NSRect(x: x+44, y: y, width: 36, height: 36))
             button(.skill, in: skill, frame: skill.bounds)
         }
-        if generation != .glassTouchSurface {
-            let paste = glass(NSRect(x: x, y: y+44, width: 36, height: 36))
-            button(.paste, in: paste, frame: paste.bounds)
-        }
+        let middleLeft = glass(NSRect(x: x, y: y+44, width: 36, height: 36))
+        button(.stopTask, in: middleLeft, frame: middleLeft.bounds)
 
         let close = glass(NSRect(x: x, y: y+88, width: 36, height: 36))
         button(nil, in: close, frame: close.bounds)
@@ -509,6 +529,7 @@ final class AdvancedMenuController {
     }
     func dismiss() {
         input.dismiss(); targetPID = nil
+        publishVoiceSuppression()
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }; outsideMonitor = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }; localMonitor = nil
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }; activationObserver = nil
@@ -537,7 +558,7 @@ final class AdvancedMenuController {
         dismissalCompletion = completion
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: completion)
     }
-    func reset() { dismiss(); input.reset() }
+    func reset() { dismiss(); input.reset(); publishVoiceSuppression() }
     private func perform(_ action: AdvancedMenuAction) {
         guard let pid = targetPID, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
             rmDebug("Advanced Menu: \(action.rawValue) cancelled because focus changed")

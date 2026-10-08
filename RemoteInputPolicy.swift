@@ -2,6 +2,10 @@ import Foundation
 
 /// Product-defined button behavior. Only Siri has a persisted user assignment.
 enum RemoteButtonMapping {
+    static func shouldAwaitMediaSource(generation: RemoteGeneration, passiveCapture: Bool) -> Bool {
+        // Glass uses HID observations; aluminum's passive path keeps its single owner.
+        generation != .unknown || passiveCapture
+    }
     static func usesPassiveCapture(generation: RemoteGeneration, packetLogger: Bool, mediaTap: Bool) -> Bool {
         packetLogger && mediaTap && generation != .glassTouchSurface
     }
@@ -34,7 +38,7 @@ enum RemoteMediaEventClock {
     }
 }
 
-/// Correlate source-less NX media events with remote-only PacketLogger observations.
+/// Correlate source-less NX media events with remote-only HID or PacketLogger observations.
 /// Retain both edges because a complete quick tap can arrive before the deferred NX down.
 struct RemoteMediaEventCorrelation {
     private struct Marker { let button: String; let pressed: Bool; let sender: UInt64; let time: TimeInterval }

@@ -164,7 +164,7 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 `remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. The Siri
 button is the only customizable button (`siriButtonAction`). `RemoteButtonMapping` is the
 shared source of truth for runtime and Settings callouts. Aluminum Play/Pause opens Skill outside Advanced Menu (`.skillPicker`), using the
-focused app trigger. Its native media event remains consumed. Within the menu it pastes.
+focused app trigger. Its native media event remains consumed. Within the menu it stops the current task.
 The aluminum menu TV slot is now inactive and consumes both edges without a newline;
 old-remote TV retains Skill because its Play/Pause is the menu opener. Power sends
 Cmd+Enter in the menu and ordinary Enter outside it. Power remains HID-owned: never
@@ -375,6 +375,16 @@ retry. Aluminum mute/play/volume edges have one passive owner. Unmatched keyboar
 keys must still pass through. Black-glass ATT 0023 is shared by touch and voice: decode
 only 13/20-byte reports whose marker byte is 0x32 as touch. Voice data is never a button
 or touch mask.
+
+The glass remote's Play/Pause opener also emits a native NX media key. Record both
+HID edges, with IOHIDValue's original timestamp, before menu/AX/bridge callbacks and
+connection quarantine. Its NX events use the same 160 ms deferred source matching as
+aluminum (180 ms correlation bound); a post-action `lastProcessedButton` marker alone
+can be set too late and let opening Advanced Menu start music. Keep aluminum passive
+ownership unchanged, deduplicate HID mirrors, and forward unmatched keyboard keys once.
+Black-glass hardware verification on 2026-10-09: repeated menu opens/closes produced
+`consumed=true` on both NX edges, with 0.1–0.2 ms HID/NX timestamp deltas; the user
+confirmed music no longer starts. This run did not physically retest aluminum remotes.
 
 PacketLogger's capture clock can lead app wall time: this Mac was measured at 80–93 ms
 ahead even on newly appended records. Touch parsing therefore allows up to 180 ms of
@@ -656,12 +666,24 @@ The physical bottom-left button now opens a nonactivating glass panel beside the
 Mute for aluminum, Play/Pause for glass remotes. This explicit product change overrides
 that button's prior Skill/modifier or optional mode-switch assignment. Back = clear input,
 Old-remote TV = Skill; aluminum TV is inactive in this menu after Skill moved to
-ordinary Play/Pause. Aluminum menu Play/Pause = Paste, Power = Cmd+Enter,
-volume up = Redo, volume down = Undo.
-Use doc.on.clipboard, arrow.uturn.forward and arrow.uturn.backward respectively.
-The old remote has only four menu actions; never repurpose Siri to create a fifth.
-Directions/center and Siri are excluded. Preserve focused-app identity, consume
+ordinary Play/Pause. Aluminum menu Play/Pause = Stop current task, Power = Cmd+Enter.
+Both generations share volume up = Redo (Cmd+Shift+Z), volume down = Undo (Cmd+Z)
+while Advanced Menu owns the input; ordinary volume-key list editing must not run then.
+Use arrow.uturn.forward and arrow.uturn.backward for Redo and Undo.
+Both layouts share the middle-left Stop current task slot (`stop.fill`): Siri on glass,
+Play/Pause on aluminum. Both execute one Esc immediately on press and consume the release.
+Both generations' Siri key sends one unmodified Esc on down while Advanced Menu owns
+the input; consume repeats and release even after dismissal. Outside the menu it retains
+the saved Siri mapping. Directions/center remain excluded. Preserve focused-app identity, consume
 paired releases on cancellation, and perform only one action per presentation.
+
+Block voice output before opening Advanced Menu and retain suppression through a consumed
+Siri hold and its release tail; only the next ordinary Siri down restores voice. Combine
+menu and caret suppression with OR so cancelling one cannot unmute the other. Firmware may
+still transmit microphone packets; the voice helper's existing session gate discards them.
+Aluminum capture-owned opener edges and HID Siri edges must share the same physical device
+key. Resolve only an unambiguous Bluetooth label among that generation's open interfaces;
+never attribute one remote's Siri press to another remote's menu.
 
 PacketLogger now parses the six aluminum auxiliary bits (TV 0, volume 1/2, Back 6, Mute 7,
 Play 8). Raw capture owns dispatch; NX correlation only suppresses matched media events,
@@ -672,7 +694,7 @@ all system media keys without a matching fresh capture. The old/direct-HID path 
 same advanced-menu model via its physical-button callback.
 
 Advanced Menu editing actions synthesize Command+Shift+Z (Redo), Command+Z (Undo),
-Command+V (Paste), and Command+Return (Power) in the preserved foreground app. Never inspect clipboard content
+Escape (Stop current task), and Command+Return (Power) in the preserved foreground app. Never inspect clipboard content
 or rewrite AXValue for these actions. Skill
 directly types the focused client's trigger without an AX role gate. Only clear-input
 requires an editable AX role. Read the current focused editor's AX selected range and
@@ -750,8 +772,9 @@ aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
 configuration lives in Settings; Audio Output and Diagnostics are in its More menu.
-Keep live status, Advanced Menu, Settings and Quit, plus actionable permission/setup
-errors when applicable. The retained
+Keep live status, Settings and Quit, plus actionable permission/setup
+errors when applicable. Advanced Menu is opened from the remote only; do not expose
+another entry in the status menu or Settings' application menu. The retained
 Diagnostics submenu still refreshes through its delegate, including while disconnected.
 
 

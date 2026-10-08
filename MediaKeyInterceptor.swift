@@ -22,6 +22,13 @@ final class MediaKeyInterceptor {
     var onEscape: (() -> Bool)?
     var onSourceReset: (() -> Void)?
     func resetRemoteCorrelation() { remoteEvents = RemoteMediaEventCorrelation() }
+    func recordHIDButton(_ button: String, pressed: Bool, sender: UInt64, timestamp: UInt64) {
+        guard let time = RemoteMediaEventClock.uptime(timestamp: timestamp,
+            now: ProcessInfo.processInfo.systemUptime,
+            numer: Self.timebase.numer, denom: Self.timebase.denom) else { return }
+        remoteEvents.record(button: button, pressed: pressed, sender: sender, now: time)
+        rmDebug("HID media source: \(button) \(pressed ? "down" : "up") sender=\(sender) eventTime=\(String(format: "%.6f", time))")
+    }
     private static let forwardedMarker: Int64 = 0x56524D45444941
     private static let timebase: mach_timebase_info_data_t = {
         var info = mach_timebase_info_data_t()
@@ -199,7 +206,7 @@ final class MediaKeyInterceptor {
             let sender = vr_media_event_sender(event)
             let remote = isRemoteSource(sender) ? sender : nil
             if shouldAwaitRemoteSource?(key) == true, let copy = event.copy() {
-                // The passive capture and NX tap use independent delivery paths;
+                // HID/passive capture and NX tap use independent delivery paths;
                 // either may arrive first. Hold only configured switch keys briefly, then
                 // consume confirmed remote events or forward unrelated keyboard events once.
                 let repeating = keyFlags & 1 != 0

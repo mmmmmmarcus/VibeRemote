@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mediaKeyInterceptorStarted = false
     private var didCleanUp = false
     private let caretController = RemoteCaretController()
+    private var caretVoiceSuppressed = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 VibeRemote starting...")
@@ -125,11 +126,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarManager.setRemoteIdleTimeoutHandler { [weak self] timeout in
             self?.remoteInputHandler?.updateRemoteIdleTimeout(timeout)
         }
-        caretController.onVoiceSuppression = { [weak self] blocked in self?.microphoneBridgeManager.setVoiceSuppressed(blocked) }
+        caretController.onVoiceSuppression = { [weak self] blocked in
+            guard let self else { return }
+            self.caretVoiceSuppressed = blocked
+            self.updateInteractionVoiceSuppression()
+        }
+        advancedMenu.onVoiceSuppression = { [weak self] _ in self?.updateInteractionVoiceSuppression() }
         caretController.onDirectionalSwipe = { [weak self] direction in
             self?.remoteInputHandler?.performTouchSwipe(direction)
         }
-        menuBarManager.advancedMenuHandler = { [weak self] in self?.caretController.cancel(); self?.advancedMenu.show() }
         advancedMenu.onAction = { [weak self] action, pid in
             guard let self, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
             self.caretController.cancel()
@@ -157,6 +162,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // access is confirmed. Requesting permission is an explicit menu action.
         mediaKeyInterceptor = MediaKeyInterceptor()
         mediaKeyInterceptor?.capturePath = microphoneBridgeManager.buttonCapturePath
+        remoteInputHandler?.onHIDMediaButton = { [weak self] button, pressed, sender, timestamp in
+            self?.mediaKeyInterceptor?.recordHIDButton(button, pressed: pressed, sender: sender, timestamp: timestamp)
+        }
         remoteInputHandler?.usesPassiveButtonCapture = { [weak self] generation in
             guard let self else { return false }
             return self.usesPassiveButtonCapture(generation: generation)
@@ -176,7 +184,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         mediaKeyInterceptor?.onCapturedButton = { [weak self] edge in self?.handleCapturedAuxiliaryButton(edge) ?? false }
         mediaKeyInterceptor?.shouldAwaitRemoteSource = { [weak self] key in
-            guard let self, self.usesPassiveButtonCapture(generation: self.remoteInputHandler?.generation ?? .unknown) else { return false }
+            guard let self else { return false }
+            let generation = self.remoteInputHandler?.generation ?? .unknown
+            guard RemoteButtonMapping.shouldAwaitMediaSource(generation: generation,
+                passiveCapture: self.usesPassiveButtonCapture(generation: generation)) else { return false }
             return [.playPause, .mute, .volumeUp, .volumeDown].contains(key)
         }
         mediaKeyInterceptor?.onMediaKey = { [weak self] keyType, isPressed, remoteSource in
@@ -532,6 +543,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Double(nanos) / 1_000_000_000.0
     }
     
+    private func updateInteractionVoiceSuppression() {
+        microphoneBridgeManager.setVoiceSuppressed(caretVoiceSuppressed || advancedMenu.suppressesVoice)
+    }
+
     private func usesPassiveButtonCapture(generation: RemoteGeneration) -> Bool {
         RemoteButtonMapping.usesPassiveCapture(generation: generation,
             packetLogger: UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger",
@@ -542,7 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard usesPassiveButtonCapture(generation: .aluminumClickpad) else { return false }
         if edge.pressed { caretController.cancel() }
         remoteInputHandler?.recordCapturedActivity(edge)
-        let device = "capture:\(edge.sender)"
+        let device = remoteInputHandler?.deviceKeyForCapturedButton(edge) ?? "capture:\(edge.sender)"
         let claimed = advancedMenu.handle(button: edge.button, pressed: edge.pressed, device: device, generation: .aluminumClickpad, time: edge.capturedAt.timeIntervalSinceReferenceDate)
         if ["mute", "volumeUp", "volumeDown"].contains(edge.button) {
             VolumeRevertGuard.shared.handleRemoteButton(edge.button, pressed: edge.pressed)
