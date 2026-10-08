@@ -109,7 +109,12 @@ struct PacketLoggerButtonParser {
         let handle = UInt16(b[0]) | UInt16(b[1] & 15) << 8
         guard UInt16(header.last!.dropFirst(2), radix: 16) == handle,
               let stamp = formatter.date(from: "\(header[0]) \(header[1]) \(header[2]) \(Calendar.current.component(.year, from: now))"),
-              now.timeIntervalSince(stamp) >= -0.03, now.timeIntervalSince(stamp) <= 0.18 else { return nil }
+              // PacketLogger's capture clock can lead the app's wall clock: live
+              // records on this Mac arrived 80–93 ms "in the future". The former
+              // 30 ms bound silently dropped every touch. Allow bounded clock skew
+              // without widening stale replay acceptance or rewriting frame times
+              // (batched frames must keep their original gesture intervals).
+              now.timeIntervalSince(stamp) >= -0.18, now.timeIntervalSince(stamp) <= 0.18 else { return nil }
         let payload = Array(b[11...])
         switch (b[9], b[10]) {
         case (0x3d, 0):
@@ -141,6 +146,11 @@ final class PacketLoggerButtonMonitor {
     private var labelsUpdated = Date.distantPast
     private var startedAt = Date()
     private var path: String?
+    private var loggedTouchStream = false
+    private let labelProvider: (() -> Set<String>)?
+    init(labelProvider: (() -> Set<String>)? = nil) {
+        self.labelProvider = labelProvider
+    }
     var isReadingCapture: Bool { reader != nil }
     func pollNow() { if let path { poll(path: path) } }
 
@@ -161,11 +171,13 @@ final class PacketLoggerButtonMonitor {
     }
     private func resetReader() {
         try? reader?.close(); reader = nil; inode = nil; offset = 0
+        loggedTouchStream = false
         pending.removeAll(); parser = PacketLoggerButtonParser(); onReset?()
     }
     private func poll(path: String) {
         let now = Date()
-        if now.timeIntervalSince(labelsUpdated) > 15, CBManager.authorization == .allowedAlways {
+        if let labelProvider { labels = labelProvider() }
+        if labelProvider == nil, now.timeIntervalSince(labelsUpdated) > 15, CBManager.authorization == .allowedAlways {
             let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
             // PacketLogger truncates names to 17 characters. Ambiguous labels fail closed.
             let allLabels = devices.compactMap { $0.name }.map { String($0.prefix(17)) }
@@ -250,7 +262,13 @@ final class PacketLoggerButtonMonitor {
                 case .touch:
                     guard let line else { continue }
                     if let touch = parser.touch(line: line, allowedLabels: labels, now: now),
-                       touch.time >= startedAt { onTouch?(touch) }
+                       touch.time >= startedAt {
+                        if !loggedTouchStream {
+                            loggedTouchStream = true
+                            rmDebug("PacketLogger touch stream received: source=\(touch.sender) captureAgeMs=\(Int(now.timeIntervalSince(touch.time) * 1000))")
+                        }
+                        onTouch?(touch)
+                    }
                 case .irrelevant:
                     break
                 }

@@ -663,11 +663,18 @@ final class RemoteCaretController {
             let recognized = travelGesture.observe(frame)
             if frame.count == 0 {
                 cancel()
+                if frame.generation == .glassTouchSurface {
+                    let swipeDescription = direction.map { String(describing: $0) } ?? "none"
+                    rmDebug("Glass touch contact ended; swipe=\(swipeDescription)")
+                }
                 if let direction { onDirectionalSwipe?(direction) }
                 return
             }
             guard let contact = travelGesture.contactID else { cancel(); return }
-            if preparationContact != contact { prepare(contact: contact) }
+            if preparationContact != contact {
+                if frame.generation == .glassTouchSurface { rmDebug("Glass touch contact began") }
+                prepare(contact: contact)
+            }
             if recognized {
                 swipeGesture.reset()
                 beginTravelGesture()

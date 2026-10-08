@@ -183,6 +183,73 @@ final class CaretNavigationTests: XCTestCase {
         controller.stop()
     }
 
+    @MainActor
+    func testCaptureMonitorDeliversFreshGlassTouchFromFile() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        try Data().write(to: path)
+        let monitor = PacketLoggerButtonMonitor(labelProvider: { ["Siri Remote"] })
+        var frames: [RemoteTextTouchFrame] = []
+        monitor.onTouch = { frames.append($0) }
+        monitor.start(path: path.path)
+        defer { monitor.stop() }
+        monitor.pollNow()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM dd HH:mm:ss.SSS"
+        // Live PacketLogger records on this Mac led wall time by 80–93 ms.
+        let captured = Date().addingTimeInterval(0.09)
+        let line = "\(formatter.string(from: captured))  Siri Remote        0x004B  RECV  4B 20 14 00 10 00 04 00 1B 23 00 01 00 32 2A 4F 01 E4 3C D5 74 81 20 83  \n"
+        let writer = try FileHandle(forWritingTo: path)
+        defer { try? writer.close() }
+        try writer.write(contentsOf: Data(line.utf8))
+        monitor.pollNow()
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames.first?.generation, .glassTouchSurface)
+    }
+
+    func testCapturedGlassTouchPassesByteRoutingAndParsing() throws {
+        let line = "Sep 25 01:37:55.303  Siri Remote        0x004B  RECV  4B 20 14 00 10 00 04 00 1B 23 00 01 00 32 2A 4F 01 E4 3C D5 74 81 20 83  "
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let now = try XCTUnwrap(formatter.date(from: "2026-09-25 01:37:55.330"))
+        let data = Data(line.utf8)
+        XCTAssertEqual(PacketLoggerLineRoute.classify(data[...]), .touch)
+        let frame = try XCTUnwrap(PacketLoggerButtonParser().touch(line: line, allowedLabels: ["Siri Remote"], now: now))
+        XCTAssertEqual(frame.generation, .glassTouchSurface)
+        XCTAssertEqual(frame.count, 1)
+        let ahead = now.addingTimeInterval(-0.12)
+        XCTAssertNotNil(PacketLoggerButtonParser().touch(line: line, allowedLabels: ["Siri Remote"], now: ahead))
+        XCTAssertNil(PacketLoggerButtonParser().touch(line: line, allowedLabels: ["Siri Remote"], now: now.addingTimeInterval(-1)))
+        XCTAssertNil(PacketLoggerButtonParser().touch(line: line, allowedLabels: ["Siri Remote"], now: now.addingTimeInterval(0.2)))
+    }
+
+    func testTouchClockTolerancePreservesBothGenerationsAndFrameTiming() throws {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let now = try XCTUnwrap(formatter.date(from: "2026-09-25 01:37:55.210"))
+        let reports: [(String, RemoteGeneration)] = [
+            ("14 00 10 00 04 00 1B 23 00 01 00 32 2A 4F 01 E4 3C D5 74 81 20 83", .glassTouchSurface),
+            ("12 00 0E 00 04 00 1B 3D 00 32 00 00 00 F5 01 C8 04 03 28 00", .aluminumClickpad)
+        ]
+        let parser = PacketLoggerButtonParser()
+        for (report, generation) in reports {
+            let line = "Sep 25 01:37:55.303  Siri Remote  0x004B  RECV  4B 20 \(report)"
+            let next = line.replacingOccurrences(of: "55.303", with: "55.314")
+            let first = try XCTUnwrap(parser.touch(line: line, allowedLabels: ["Siri Remote"], now: now))
+            let second = try XCTUnwrap(parser.touch(line: next, allowedLabels: ["Siri Remote"], now: now))
+            XCTAssertEqual(first.generation, generation)
+            XCTAssertEqual(first.count, 1)
+            XCTAssertEqual(second.time.timeIntervalSince(first.time), 0.011, accuracy: 0.0001)
+            XCTAssertEqual(parser.touch(line: line, allowedLabels: ["Siri Remote"], now: now.addingTimeInterval(0.12)), first)
+            XCTAssertNil(parser.touch(line: line, allowedLabels: ["Keyboard"], now: now))
+            XCTAssertNil(parser.touch(line: line, allowedLabels: ["Siri Remote"], now: now.addingTimeInterval(-0.2)))
+            XCTAssertNil(parser.touch(line: line, allowedLabels: ["Siri Remote"], now: now.addingTimeInterval(0.4)))
+        }
+    }
+
     func testTextMarkersUseVerifiedLocalUTF16SegmentsInBothDirections() {
         let text = "a中👨‍👩‍👧‍👦e\u{301}"
         let stops = CaretNavigation.boundaries(text)
@@ -765,6 +832,8 @@ final class CaretNavigationTests: XCTestCase {
             XCTAssertNil(gate.observe(frame(0, x: 0, y: 0)))
             XCTAssertNil(gate.observe(frame(0.18, x: x, y: y)))
             XCTAssertEqual(gate.observe(frame(0.22, x: 0, y: 0, count: 0)), expected)
+            // Physical black-glass lift sends a duplicate zero-pressure report.
+            XCTAssertNil(gate.observe(frame(0.231, x: 0, y: 0, count: 0)))
             XCTAssertFalse(gate.isTracking)
         }
         var aluminum = RemoteTouchSwipeGate()

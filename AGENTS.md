@@ -376,6 +376,13 @@ keys must still pass through. Black-glass ATT 0023 is shared by touch and voice:
 only 13/20-byte reports whose marker byte is 0x32 as touch. Voice data is never a button
 or touch mask.
 
+PacketLogger's capture clock can lead app wall time: this Mac was measured at 80–93 ms
+ahead even on newly appended records. Touch parsing therefore allows up to 180 ms of
+future clock skew as well as the existing 180 ms stale cutoff. Do not restore the former
+30 ms future bound; it drops valid touch reports before either gesture recognizer runs.
+Preserve original capture times so multiple frames delivered together retain their gesture
+intervals. This tolerance does not change NX media-key correlation or audio parsing.
+
 The bridge auto-starts at launch via `startAtLaunchIfPromptFree()`, but only when the
 start is guaranteed silent (Direct HID engine, or PacketLogger engine with the approved
 helper daemon current). Anything that would raise an administrator prompt stays behind
