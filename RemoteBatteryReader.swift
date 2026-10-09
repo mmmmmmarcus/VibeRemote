@@ -387,6 +387,7 @@ final class RemoteBatteryReader: NSObject,
     }
 
     private nonisolated static func isRemoteName(_ value: String) -> Bool {
+        if RemoteNameMatch.isLearned(value) { return true }
         let lowercased = value.lowercased()
         return lowercased.contains("siri remote")
             || lowercased.contains("apple tv remote")

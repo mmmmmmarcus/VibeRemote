@@ -81,7 +81,7 @@ let package = Package(
                 "RemoteInputHandler.swift",
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
-                "SystemVolume.swift"
+                "SystemVolume.swift", "RemoteNameMatch.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],

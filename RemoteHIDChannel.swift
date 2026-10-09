@@ -529,9 +529,6 @@ final class RemoteHIDChannel: NSObject,
     }
 
     private nonisolated static func isRemoteName(_ name: String) -> Bool {
-        let normalized = name.lowercased()
-        return normalized.contains("remote")
-            || normalized.contains("siri")
-            || normalized.contains("apple tv")
+        RemoteNameMatch.isRemoteName(name)
     }
 }
