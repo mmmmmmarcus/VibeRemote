@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hidDetectionStarted = false
     private var mediaKeyInterceptorStarted = false
     private var didCleanUp = false
+    private var commandWindow: CommandWindowController?
+    private let siriCommand = SiriCommandGate()
     private let caretController = RemoteCaretController()
     private var caretVoiceSuppressed = false
     
@@ -140,11 +142,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.caretController.cancel()
             self.remoteInputHandler?.performAdvancedAction(action, targetPID: pid)
         }
+        menuBarManager.onCommandInput = { [weak self] in self?.showCommandInput() }
+        siriCommand.openCommand = { [weak self] in
+            self?.remoteInputHandler?.releaseSiriForCommand()
+            self?.showCommandInput()
+        }
+        siriCommand.holdEdge = { [weak self] pressed, generation, physicalStart in
+            if pressed { self?.commandWindow?.prepareForDictation() }
+            self?.remoteInputHandler?.performDeferredSiri(pressed: pressed, generation: generation, physicalStart: physicalStart)
+        }
         remoteInputHandler?.onAdvancedButton = { [weak self] button, pressed, device, generation in
-            if button == "select", pressed { self?.advancedMenu.dismiss() }
-            if self?.caretController.button(button, pressed: pressed, device: device,
-                                             generation: generation) == true { return true }
-            return self?.advancedMenu.handle(button: button, pressed: pressed, device: device, generation: generation) ?? false
+            guard let self else { return false }
+            if button == "siri", self.siriCommand.owns(device: device) {
+                return self.siriCommand.handle(button: button, pressed: pressed, device: device, generation: generation)
+            }
+            if button == "select", pressed { self.advancedMenu.dismiss() }
+            if self.caretController.button(button, pressed: pressed, device: device, generation: generation) { return true }
+            if self.advancedMenu.handle(button: button, pressed: pressed, device: device, generation: generation) { return true }
+            return self.siriCommand.handle(button: button, pressed: pressed, device: device, generation: generation)
         }
 
         bluetoothAccessManager.onStateChanged = { [weak self] state in
@@ -170,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return self.usesPassiveButtonCapture(generation: generation)
         }
         mediaKeyInterceptor?.onSourceReset = { [weak self] in
+            self?.siriCommand.reset()
             self?.caretController.reset()
             self?.advancedMenu.reset(); self?.remoteInputHandler?.resetCapturedButtons()
         }
@@ -355,6 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleBluetoothDeviceDisconnected(deviceDescription: String, address: String?) {
+        siriCommand.reset()
         caretController.reset()
         if let address {
             // The notification is spent once it fires; the connect handler re-arms it.
@@ -480,6 +497,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
     
+    private func showCommandInput() {
+        caretController.cancel()
+        advancedMenu.dismiss()
+        if commandWindow == nil { commandWindow = CommandWindowController() }
+        commandWindow?.present()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         cleanup()
     }
@@ -488,6 +512,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cleanup() {
         guard !didCleanUp else { return }
         didCleanUp = true
+        siriCommand.reset()
+        commandWindow?.shutdown()
 
         bridgeHealthTimer?.invalidate()
         bridgeHealthTimer = nil

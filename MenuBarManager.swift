@@ -217,6 +217,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private var diagnosticsMenu = NSMenu()
+    var onCommandInput: (() -> Void)?
+    @objc private func openCommandInput() { onCommandInput?() }
     private var settingsWindowController: SettingsWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
@@ -417,6 +419,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "VibeRemote")
+        let command = NSMenuItem(title: "Command…", action: #selector(openCommandInput), keyEquivalent: "")
+        command.target = self
+        appMenu.addItem(command)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
@@ -428,6 +433,16 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         appMenu.addItem(quit)
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
+        // Native field-editor shortcuts are essential for the command input (including dictation edits).
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        for (title, selector, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"),
+                                       ("Copy", "copy:", "c"), ("Paste", "paste:", "v"),
+                                       ("Select All", "selectAll:", "a")] {
+            editMenu.addItem(withTitle: title, action: Selector(selector), keyEquivalent: key)
+        }
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -606,6 +621,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus))
         menu.addItem(.separator())
 
+        let commandItem = NSMenuItem(title: "Command…", action: #selector(openCommandInput), keyEquivalent: "")
+        commandItem.target = self
+        menu.addItem(commandItem)
         // Settings must remain reachable before pairing and while the remote sleeps.
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self

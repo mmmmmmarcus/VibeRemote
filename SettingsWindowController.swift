@@ -66,6 +66,7 @@ struct RemoteSettingsLayout {
 enum RemoteSettingsGuide {
     static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
 
+        if key == "siri" { return "Command / Hold: \(snapshot.siriAction.settingsTitle)" }
         if key == "touch.edit" { return "Slide to position caret" }
         if key == "select" {
             return snapshot.generation == .glassTouchSurface

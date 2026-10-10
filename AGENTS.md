@@ -908,3 +908,56 @@ The upstream glass-only quick one-way swipe sends one arrow on lift only outside
 full caret mode. Entering full mode resets the swipe recognizer; its lift must never
 also send an arrow. Mechanical surface clicks block touch while held and for 160 ms
 after release, without replacing active center-click confirmation with Enter.
+
+### Remote Command prototype (2026-10-10)
+
+Both generations now open CommandWindowController on a short Siri tap. SiriCommandGate
+waits 250 ms before forwarding the configured Siri hold action. Preserve physical
+Siri-down time for audio tail/drain matching; never use the delayed key-down time.
+Menu and caret-owned Siri presses retain their existing behavior. Once a normal
+Siri press is owned, keep its release owned even if focus/menu state changes.
+Reset pending timers on capture reset/disconnect/quit. Short taps release any older
+held Siri tail before focusing Command. Playback mappings are unchanged (aluminum
+Skill, glass Advanced Menu). A `Command…` status/application-menu entry opens the
+same retained input panel; it is an action, not a setting.
+
+CommandExecution uses the existing local Codex login and separately installed,
+permissioned CuaDriver.app via MCP. Do not copy credentials, rewrite global config,
+run submitted text through a shell, or disable driver authorization. CLI config is
+per invocation with --ignore-user-config, --ephemeral, read-only shell sandbox,
+shell tools disabled, only Cua's explicit desktop tool allowlist, and no other
+connectors/task subagents. Required MCP approvals go through Codex auto_review;
+never bypass a denied review. Parse bounded JSONL off the main thread; never log submitted
+commands, raw tool results or screenshots. One task at a time, five-minute timeout,
+cancel on Stop/close/quit; do not quit the user's shared CuaDriver daemon. Validate
+failure/cancel/focus behavior, not merely successful model text. Keep the input
+native so dictation, IME marked text and standard edit commands still work.
+
+Command input must remain editable while execution runs (only submission is gated).
+Every presentation restores its field editor, including after asynchronous app
+activation; a mapped Siri hold reasserts that focus only when Command is the key
+window. Do not refocus on task completion. 2026-10-10: a real Codex/Cua run operated
+Calculator and verified 128 × 36 = 4,608; Stop cancelled an independent request.
+The user confirmed aluminum Siri short-tap presentation and held Right Option
+voice input after the focus fix. Glass hardware still needs physical verification.
+
+Command MCP traffic must pass through CommandMCPProxy (the app executable's internal
+--command-mcp-proxy mode, before AppKit initialization). Never point Codex directly at
+Cua again: prompt-only background guidance is insufficient. The proxy pins omitted
+delivery modes to background and pauses each foreground/bring_to_front call before
+forwarding. A per-call UUID in a task-private mailbox is approved only by the native
+继续执行 button. Consent is consumed once, cannot authorize another call/run, expires
+after 15 minutes, and is revoked by Stop/close/quit. Keep the original Codex turn and
+MCP connection alive; never replay the task to continue it. Pause the five-minute
+execution budget while waiting. MCP's timeout must exceed the consent wait.
+
+Require exact targets, reject desktop-global input and unknown tools/MCP methods,
+and block the command agent from inspecting/operating its own host PID (including
+token-addressed input). Keep the shared Cua daemon running when the proxy exits.
+Observe owner death/cancellation while blocked so a queued action cannot run after
+the app exits. Do not persist tool arguments, text or screenshots in the mailbox.
+Submit, finish and consent presentation must not call activate/orderFront or restore
+the former app; update the existing panel without switching Space. Explicitly opening
+Command still activates its editable input. Return submits text, never foreground
+consent; only clicking 继续执行 grants it. Native app reactions to background actions
+remain app-owned, so do not promise full desktop isolation.
