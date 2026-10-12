@@ -56,3 +56,12 @@ The experimental touch adapter dynamically loads the macOS system framework. Con
 layout references: https://github.com/lauschue/Remotastic/blob/main/MultitouchSupport.h
 and https://github.com/calftrail/TrackMagic/blob/master/MultitouchSupport.h . The wrapper
 and gesture implementation are original VibeRemote code; the private ABI may change.
+
+## User-supplied Siri Remote CAD references
+
+The original `Apple_TV_4K_Remote.step` and `Siri Remote 2021.step` supplied by the
+repository owner are preserved in `Design/RemoteModels/`. Their embedded STEP
+metadata remains intact. The display meshes in `Resources/RemoteModels/` are
+tessellations of those assemblies, generated with FreeCAD / Open CASCADE; those
+conversion tools are not bundled with VibeRemote. No separate model license was
+provided with these files; this notice does not relicense them.

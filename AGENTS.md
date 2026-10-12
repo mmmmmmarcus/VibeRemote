@@ -182,16 +182,27 @@ mapping or microphone action. The same opening event arms `VolumeRevertGuard` so
 volume changes that bypass HID mappings are consumed and reverted to the warm baseline.
 Do not implement this only as a delay in button dispatch: that leaves system volume exposed.
 
-The settings artwork and callout placement must support **two distinct physical
-layouts**. First generation uses the user's supplied `Resources/SiriRemoteFirstGeneration.png`:
-Menu / TV on the upper button row, microphone / volume-up on the middle row,
-Play/Pause / volume-down below, and touch-surface press = confirm caret while positioning, otherwise Enter. Second/third
-generation retains `Resources/SiriRemote.png` with its own Power, side-Siri and Mute
-positions. `RemoteSettingsLayout` selects both artwork and callout coordinates from
-the snapshot generation. Never reuse the aluminum photo with hidden controls as the
-first-generation layout. Both resources must be bundled; verify light/dark rendering
-and switching generations in the same settings window. Both layouts use noninteractive
-text callouts with connector lines. Only Siri is editable, in the right settings pane.
+Settings uses the user's two STEP assemblies as the geometry source of truth:
+`Design/RemoteModels/Apple_TV_4K_Remote.step` is the first-generation black-glass model;
+`Design/RemoteModels/Siri Remote 2021.step` is shared by second and third generations.
+Do not replace their shapes with procedural approximations. `scripts/convert_remote_models.py`
+uses FreeCAD offline to tessellate every solid/face and preserve CAD colors into the
+bundled `Resources/RemoteModels/*.dae`; accompanying JSON records source SHA-256,
+coordinate transform, uniform display scale, solid counts and control coordinates.
+Keep the original STEP bytes and regenerated assets together. FreeCAD is a conversion
+tool only, never an app/build prerequisite. Both meshes must load from the installed
+SwiftPM resource bundle; verify the final app, not just development paths.
+
+`RemoteModelView.swift` uses a transparent on-demand SceneKit view. Preserve separate
+black-glass and aluminum layouts, including side Siri, Mute and Power only on aluminum.
+First-generation CAD has no printed legends: small ink planes use imported button-face
+bounds, without replacing the CAD buttons. The aluminum symbols are CAD geometry.
+`RemoteSettingsLayout` callouts follow the converted control coordinates in a 398-point
+reference frame. Drag has bounded pitch/yaw and release restores the guide pose; Reduce
+Motion skips that animation. No remote actions, extra HID/Bluetooth managers, idle spin
+or frame timers. Keep `rendersContinuously` and `isPlaying` off; rebuild only on generation
+changes. Check both generations in light/dark appearance and in the same retained window.
+Original PNGs remain bundled references. Callouts are read-only; only Siri is editable.
 Preserve first-generation composite defaults except its fixed Advanced Menu opener.
 
 Opening Settings switches the app's activation policy to `.regular` so its Dock icon

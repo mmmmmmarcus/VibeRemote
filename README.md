@@ -20,7 +20,8 @@ paired at the same time and each keeps its own mapping.
 
 - A native settings window with a visual Siri Remote button guide, opened from
   the menu bar's **Settings…** item (also available while the remote is disconnected).
-- Settings has a read-only remote diagram with button callouts on the left, and controls
+  Both physical layouts use the supplied STEP CAD assemblies (second/third generation share one model); drag to turn, release to restore the guide.
+- Settings has a 3D remote with read-only button callouts on the left, and controls
   for Siri Button and auto disconnect on the right, with a text-cursor usage guide.
   There is one working configuration: microphone and fixed buttons stay available.
   Touch no longer moves the mouse, clicks, scrolls, or deletes text.

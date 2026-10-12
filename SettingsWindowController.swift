@@ -34,7 +34,7 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
 }
 
 /// Coordinates are measured from the top of each generation's 398-point artwork.
-/// Keep images and callouts together: hiding new-remote buttons is not an old layout.
+/// Coordinates follow the imported CAD controls. Keep both physical layouts distinct.
 struct RemoteSettingsLayout {
     struct Callout: Identifiable {
         let key: String
@@ -51,13 +51,13 @@ struct RemoteSettingsLayout {
         if generation == .glassTouchSurface {
             resourceName = "SiriRemoteFirstGeneration"
             artworkWidth = 123
-            left = [.init(key: "back", centerY: 149), .init(key: "siri", centerY: 201), .init(key: "playPause", centerY: 252)]
-            right = [.init(key: "select", centerY: 70), .init(key: "tv", centerY: 149), .init(key: "volumeUp", centerY: 201), .init(key: "volumeDown", centerY: 252)]
+            left = [.init(key: "back", centerY: 147.3), .init(key: "siri", centerY: 198.8), .init(key: "playPause", centerY: 251.5)]
+            right = [.init(key: "select", centerY: 70), .init(key: "tv", centerY: 147.3), .init(key: "volumeUp", centerY: 198.8), .init(key: "volumeDown", centerY: 251.5)]
         } else {
             resourceName = "SiriRemote"
             artworkWidth = 104
-            left = [.init(key: "select", centerY: 62), .init(key: "touch.edit", centerY: 103), .init(key: "back", centerY: 146), .init(key: "playPause", centerY: 192), .init(key: "mute", centerY: 238)]
-            right = [.init(key: "power", centerY: 18), .init(key: "siri", centerY: 82), .init(key: "tv", centerY: 144), .init(key: "volumeUp", centerY: 186), .init(key: "volumeDown", centerY: 236)]
+            left = [.init(key: "select", centerY: 84.6), .init(key: "touch.edit", centerY: 124.5), .init(key: "back", centerY: 150.8), .init(key: "playPause", centerY: 193.5), .init(key: "mute", centerY: 236.2)]
+            right = [.init(key: "power", centerY: 22.2), .init(key: "siri", centerY: 84.6), .init(key: "tv", centerY: 150.8), .init(key: "volumeUp", centerY: 193.5), .init(key: "volumeDown", centerY: 236.2)]
         }
     }
 }
@@ -295,8 +295,8 @@ private struct RemoteSettingsView: View {
             VStack(spacing: 24) {
                 HStack(alignment: .top, spacing: 0) {
                     callouts(layout.left, side: .left)
-                    RemoteArtwork(generation: model.snapshot.generation)
-                        .frame(width: layout.artworkWidth, height: 398)
+                    RemoteModelView(generation: model.snapshot.generation)
+                        .frame(width: 144, height: 398)
                         .accessibilityLabel(model.snapshot.generation.displayName)
                     callouts(layout.right, side: .right)
                 }
@@ -309,7 +309,7 @@ private struct RemoteSettingsView: View {
                     }.foregroundStyle(.secondary)
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("settings.connection")
-                    Text("Remote controls")
+                    Text("Drag to rotate")
                         .font(.system(size: 11)).foregroundStyle(.tertiary)
                 }
             }
@@ -399,51 +399,6 @@ private struct RemoteSettingsView: View {
 
     private var connector: some View {
         Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 36, height: 1)
-    }
-}
-
-/// Draw the original photo at its reference scale, clipping only the surrounding
-/// white canvas. Native image drawing also renders reliably in offscreen previews.
-@MainActor
-private struct RemoteArtwork: NSViewRepresentable {
-    let generation: RemoteGeneration
-    func makeNSView(context: Context) -> ArtworkView { ArtworkView() }
-    func updateNSView(_ nsView: ArtworkView, context: Context) {
-        nsView.configure(generation: generation)
-    }
-
-    final class ArtworkView: NSView {
-        private var resourceName = ""
-        private var image: NSImage?
-        private var isFirstGeneration = false
-
-        func configure(generation: RemoteGeneration) {
-            let layout = RemoteSettingsLayout(generation: generation)
-            guard resourceName != layout.resourceName else { return }
-            resourceName = layout.resourceName
-            isFirstGeneration = generation == .glassTouchSurface
-            image = SettingsAssets.bundle.url(forResource: resourceName, withExtension: "png")
-                .flatMap { NSImage(contentsOf: $0) }
-            needsDisplay = true
-        }
-
-        override var intrinsicContentSize: NSSize { NSSize(width: 104, height: 398) }
-
-        override func draw(_ dirtyRect: NSRect) {
-            super.draw(dirtyRect)
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1.2, dy: 1.5), xRadius: 21, yRadius: 21).addClip()
-            NSGraphicsContext.current?.imageInterpolation = .high
-            if isFirstGeneration {
-                image?.draw(in: bounds)
-                return
-            }
-            image?.draw(in: NSRect(
-                x: (bounds.width - 476) / 2,
-                y: (bounds.height - 476) / 2,
-                width: 476,
-                height: 476
-            ))
-        }
     }
 }
 

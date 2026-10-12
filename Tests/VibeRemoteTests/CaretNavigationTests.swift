@@ -288,6 +288,12 @@ final class CaretNavigationTests: XCTestCase {
         let image = try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, bundle: resources))
         XCTAssertEqual(image.width, 96)
         XCTAssertEqual(image.height, 128)
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let scene = try RemoteModelScene.make(generation: generation, bundle: resources)
+            let remote = try XCTUnwrap(scene.rootNode.childNode(withName: "remote", recursively: false))
+            XCTAssertNotNil(remote.childNode(withName: "body", recursively: true)?.geometry)
+            XCTAssertNotNil(remote.childNode(withName: "siri", recursively: true)?.geometry)
+        }
     }
     func testCancelledVoiceHoldCannotResumeFromTail() {
         var gate = VoiceSessionGate()

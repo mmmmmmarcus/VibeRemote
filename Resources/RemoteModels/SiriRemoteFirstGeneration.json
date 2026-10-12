@@ -1,0 +1,160 @@
+{
+  "source": "Apple_TV_4K_Remote.step",
+  "sha256": "20cf95cfd99d5e0de18f091d3b2db08df9c93ef3906cc83bf1fd3776a95a95ff",
+  "freecad": "0.21.1",
+  "linearDeflectionMM": 0.06,
+  "angularDeflectionRadians": 0.2,
+  "transform": "(-z, y, x)",
+  "uniformScale": 3.1762407634785026,
+  "sourceCenter": [
+    -1.0999999999999999,
+    26.85464594154574,
+    -52.0885354187847
+  ],
+  "sourceSizeMM": [
+    7.000000200000001,
+    124.04601204365429,
+    38.27941022666252
+  ],
+  "triangles": 27998,
+  "solids": [
+    {
+      "index": 0,
+      "name": "back-ring",
+      "faces": 6,
+      "triangles": 3300,
+      "center": [
+        -26.7402,
+        51.6633,
+        8.4172
+      ],
+      "top": 147.3367,
+      "colors": [
+        "Plastic - Glossy (White)"
+      ]
+    },
+    {
+      "index": 1,
+      "name": "back",
+      "faces": 3,
+      "triangles": 248,
+      "center": [
+        -26.7389,
+        51.6633,
+        8.0994
+      ],
+      "top": 147.3367,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 2,
+      "name": "tv",
+      "faces": 4,
+      "triangles": 2264,
+      "center": [
+        26.1696,
+        51.735,
+        8.4174
+      ],
+      "top": 147.265,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 3,
+      "name": "siri",
+      "faces": 4,
+      "triangles": 2264,
+      "center": [
+        -26.7402,
+        0.1641,
+        8.4174
+      ],
+      "top": 198.8359,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 4,
+      "name": "playPause",
+      "faces": 4,
+      "triangles": 2264,
+      "center": [
+        -26.7782,
+        -52.5271,
+        8.4174
+      ],
+      "top": 251.5271,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 5,
+      "name": "volume",
+      "faces": 10,
+      "triangles": 2410,
+      "center": [
+        26.6167,
+        -26.1586,
+        8.419
+      ],
+      "top": 225.1586,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 6,
+      "name": "body",
+      "faces": 58,
+      "triangles": 8716,
+      "center": [
+        0.0143,
+        0.0143,
+        -3.8298
+      ],
+      "top": 198.9857,
+      "colors": [
+        "Aluminum - Anodized Rough (Grey)",
+        "Plastic - Glossy (Black)",
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 7,
+      "name": "inner-shell",
+      "faces": 14,
+      "triangles": 340,
+      "center": [
+        -0.0,
+        -0.0,
+        3.0174
+      ],
+      "top": 199.0,
+      "colors": [
+        "Plastic - Matte (Black)"
+      ]
+    },
+    {
+      "index": 8,
+      "name": "glass-face",
+      "faces": 44,
+      "triangles": 6192,
+      "center": [
+        -0.0,
+        -0.0,
+        7.3054
+      ],
+      "top": 199.0,
+      "colors": [
+        "Plastic - Glossy (Black)",
+        "Plastic - Matte (Black)"
+      ]
+    }
+  ]
+}

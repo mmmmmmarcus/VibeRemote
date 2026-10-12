@@ -1,6 +1,7 @@
 import HelperProtocol
 import RemoteAudioProtocol
 import AppKit
+import SceneKit
 import Carbon.HIToolbox
 import XCTest
 @testable import VibeRemote
@@ -963,6 +964,19 @@ final class ModelTests: XCTestCase {
                 window.effectiveAppearance.performAsCurrentDrawingAppearance {
                     frame.cacheDisplay(in: frame.bounds, to: bitmap)
                 }
+                // AppKit's caching display omits Metal surfaces. Render the same
+                // scene/camera explicitly into its actual layout rect for this preview.
+                let modelView = try XCTUnwrap(descendants(frame).compactMap { $0 as? RemoteModelNSView }.first)
+                let renderer = SCNRenderer(device: nil, options: nil)
+                renderer.scene = modelView.scene
+                renderer.pointOfView = modelView.pointOfView
+                let modelImage = renderer.snapshot(atTime: 0, with: NSSize(width: modelView.bounds.width * 2, height: modelView.bounds.height * 2), antialiasingMode: .multisampling4X)
+                var rect = modelView.convert(modelView.bounds, to: frame)
+                if frame.isFlipped { rect.origin.y = frame.bounds.height - rect.maxY }
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+                modelImage.draw(in: rect)
+                NSGraphicsContext.restoreGraphicsState()
                 let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
                 try png.write(to: URL(fileURLWithPath: "\(output)-\(generation == .glassTouchSurface ? "first" : "new")-\(name).png"))
             }

@@ -59,7 +59,7 @@ let package = Package(
                 "HelperProtocol",
                 "AudioDriver",
                 "build_audio_driver.sh",
-                "AGENTS.md",
+                "AGENTS.md", "Design",
                 "Tests",
                 "README.md",
                 "LICENSE",
@@ -72,7 +72,7 @@ let package = Package(
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
-                "SettingsWindowController.swift",
+                "SettingsWindowController.swift", "RemoteModelView.swift",
                 "MicrophoneBridgeManager.swift",
                 "PrivilegedHelperClient.swift",
                 "RemoteBatteryReader.swift",
@@ -85,7 +85,7 @@ let package = Package(
                 "SystemVolume.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
-                        .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
+                        .copy("Resources/RemoteModels"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),
