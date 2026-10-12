@@ -1,0 +1,27 @@
+{
+  "samples": [
+    {
+      "fresh_seconds": 0.043,
+      "warm_seconds": 0.005
+    },
+    {
+      "fresh_seconds": 0.0583,
+      "warm_seconds": 0.0069
+    },
+    {
+      "fresh_seconds": 0.0589,
+      "warm_seconds": 0.0052
+    },
+    {
+      "fresh_seconds": 0.0449,
+      "warm_seconds": 0.0049
+    },
+    {
+      "fresh_seconds": 0.0446,
+      "warm_seconds": 0.0047
+    }
+  ],
+  "fresh_median": 0.0449,
+  "warm_median": 0.005,
+  "scope": "MCP connection/schema discovery only; not an end-to-end agent benchmark"
+}

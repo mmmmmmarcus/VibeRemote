@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-11",
+  "installed": true,
+  "backend": "Codex + Jev OpenRouter",
+  "task": "Calculator: clear, 128 × 36, verify result",
+  "result": "4608",
+  "native_command_runs": 2,
+  "observed": {
+    "preview_panel_visible": true,
+    "calculator_frame_visible": true,
+    "blue_agent_cursor_visible": true,
+    "preview_files_removed_on_completion": true
+  },
+  "input_design": {
+    "nonactivating_panel": true,
+    "can_become_key": false,
+    "can_become_main": false,
+    "ignores_mouse_events": true
+  },
+  "limits": [
+    "Action-updated recent frames, not continuous video.",
+    "Concurrent physical typing was not retested in this run."
+  ],
+  "validation": {
+    "unit_tests": 174,
+    "strict_concurrency_build": "passed",
+    "signed_arm64_install": "passed"
+  }
+}

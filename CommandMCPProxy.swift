@@ -109,6 +109,7 @@ enum CommandBackgroundPolicy {
 /// The live Codex turn and MCP connection remain intact while waiting.
 enum CommandMCPGate {
     static func process(_ request: [String: Any], protectedPIDs: Set<Int> = [], approve: (CommandForegroundRequest) -> Bool,
+                        jev: (([String: Any]) throws -> [String: Any])? = nil,
                         forward: ([String: Any]) throws -> [String: Any]?) throws -> [String: Any]? {
         let method = request["method"] as? String ?? ""
         if method == "tools/call" {
@@ -119,7 +120,7 @@ enum CommandMCPGate {
                 let target = arguments["target"] as? [String: Any]
                 let addressedPIDs = [arguments["pid"] as? Int, target?["pid"] as? Int].compactMap { $0 }
                 guard protectedPIDs.isDisjoint(with: addressedPIDs) else {
-                    throw CommandBackgroundPolicy.Failure("VibeRemote's own UI cannot be inspected or operated by this agent. Only a human can approve foreground actions.")
+                    throw CommandBackgroundPolicy.Failure("VibeRemote's own UI cannot be inspected or operated by this agent. The host remains excluded from target applications.")
                 }
                 if tool == "launch_app" {
                     let name = (arguments["name"] as? String ?? "").lowercased()
@@ -128,6 +129,14 @@ enum CommandMCPGate {
                         throw CommandBackgroundPolicy.Failure("The agent cannot launch or activate its own host.")
                     }
                 }
+                if tool == CommandJevBatch.toolName {
+                    guard let jev else { throw CommandBackgroundPolicy.Failure("Jev is not enabled for this task.") }
+                    let result = try jev(arguments)
+                    let data = try JSONSerialization.data(withJSONObject: result)
+                    return ["jsonrpc": "2.0", "id": request["id"] ?? NSNull(), "result": [
+                        "structuredContent": result,
+                        "content": [["type": "text", "text": String(decoding: data, as: UTF8.self)]]]]
+                }
                 let prepared = try CommandBackgroundPolicy.prepare(tool: tool, arguments: arguments)
                 if prepared.foreground {
                     let args = prepared.arguments
@@ -135,7 +144,7 @@ enum CommandMCPGate {
                     let pid = ((args["pid"] as? Int) ?? (target?["pid"] as? Int)).flatMap(Int32.init(exactly:))
                     let window = (args["window_id"] as? Int) ?? (target?["window_id"] as? Int)
                     guard approve(CommandForegroundRequest(id: UUID(), tool: tool, pid: pid, windowID: window)) else {
-                        throw CommandBackgroundPolicy.Failure("Foreground action was cancelled or expired. It was NOT executed. Do not retry or use another route.")
+                        throw CommandBackgroundPolicy.Failure("Foreground action was cancelled. It was NOT executed. Do not retry or use another route.")
                     }
                 }
                 var outgoing = request, nextParams = params
@@ -155,9 +164,10 @@ enum CommandMCPGate {
            let tools = result["tools"] as? [[String: Any]] {
             result["tools"] = tools.filter { RemoteCommandConfiguration.tools.contains($0["name"] as? String ?? "") }.map { tool in
                 var tool = tool
-                tool["description"] = (tool["description"] as? String ?? "") + "\nVibeRemote: background by default. Foreground calls pause until the human clicks 继续执行; each call needs separate consent. Try a background alternative first."
+                tool["description"] = (tool["description"] as? String ?? "") + "\nVibeRemote: background by default. Use foreground delivery directly when required, with an exact pid/window_id. No VibeRemote confirmation is needed. Prefer background when it works."
                 return tool
             }
+            if jev != nil { result["tools"] = (result["tools"] as? [[String: Any]] ?? []) + [CommandJevBatch.definition] }
             result.removeValue(forKey: "nextCursor")
             response["result"] = result
         }
@@ -167,8 +177,49 @@ enum CommandMCPGate {
 
 /// Internal app executable mode. Runs before AppKit initialization; never creates a
 /// second menu-bar app or touches the remote/audio pipeline.
+/// Host-owned presentation only: never grants foreground or sends pointer input.
+struct CommandCursorPresentation {
+    let session = "VibeRemote-" + UUID().uuidString
+    var sessionTools = Set<String>()
+    var attempted = false
+    var started = false
+    mutating func observeTools(_ response: [String: Any]) {
+        guard let result = response["result"] as? [String: Any],
+              let tools = result["tools"] as? [[String: Any]] else { return }
+        sessionTools = Set(tools.compactMap { tool in
+            guard let name = tool["name"] as? String,
+                  let schema = tool["inputSchema"] as? [String: Any],
+                  let properties = schema["properties"] as? [String: Any],
+                  properties["session"] != nil else { return nil }
+            return name
+        })
+    }
+    var setup: [(String, [String: Any])] { [
+        ("start_session", ["session": session]),
+        ("set_agent_cursor_enabled", ["session": session, "enabled": true]),
+        ("set_agent_cursor_motion", ["session": session, "glide_duration_ms": 300,
+            "dwell_after_click_ms": 250, "idle_hide_ms": 8000])
+    ] }
+    func bind(_ request: [String: Any]) -> [String: Any] {
+        guard started, request["method"] as? String == "tools/call",
+              var params = request["params"] as? [String: Any],
+              let name = params["name"] as? String, sessionTools.contains(name) else { return request }
+        var args = params["arguments"] as? [String: Any] ?? [:]
+        args["session"] = session
+        params["arguments"] = args
+        var bound = request; bound["params"] = params
+        return bound
+    }
+}
+
 enum CommandMCPProxy {
+    static func foregroundAllowed(cancelled: Bool, ownerAlive: Bool) -> Bool {
+        !cancelled && ownerAlive
+    }
+
     static func run(driver: URL, directory: URL, ownerPID: Int32) -> Int32 {
+        let proxyStartedAt = ProcessInfo.processInfo.systemUptime
+        var measurements = CommandMCPMeasurements()
         let mailbox = CommandApprovalMailbox(directory: directory)
         let child = Process(), input = Pipe(), output = Pipe()
         child.executableURL = driver; child.arguments = ["mcp"]
@@ -193,32 +244,132 @@ enum CommandMCPProxy {
             }
         }
         let source = LineReader(FileHandle.standardInput), replies = LineReader(output.fileHandleForReading)
+        var cursor = CommandCursorPresentation()
+        var lastPreviewAt = 0.0
+        var lastPreviewTarget = ""
+        let exchange: ([String: Any]) throws -> [String: Any]? = { outgoing in
+            try write(outgoing, to: input.fileHandleForWriting)
+            guard let expectedID = outgoing["id"] else { return nil }
+            while let data = try replies.next() {
+                guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                if let id = response["id"], String(describing: id) == String(describing: expectedID) { return response }
+                if response["id"] == nil { try write(response, to: .standardOutput) }
+            }
+            throw CommandBackgroundPolicy.Failure("Cua Driver disconnected.")
+        }
+        func cursorCall(_ name: String, _ args: [String: Any]) -> [String: Any] {
+            ["jsonrpc": "2.0", "id": "cursor-" + UUID().uuidString, "method": "tools/call",
+             "params": ["name": name, "arguments": args]]
+        }
         do {
             while let line = try source.next(),
                   let request = try JSONSerialization.jsonObject(with: line) as? [String: Any] {
-                let response = try CommandMCPGate.process(request, protectedPIDs: [Int(ownerPID), Int(getpid())], approve: { request in
-                    do { try mailbox.publish(request) } catch { return false }
-                    defer { mailbox.clearRequest() }
-                    let deadline = ProcessInfo.processInfo.systemUptime + 900
-                    while ProcessInfo.processInfo.systemUptime < deadline {
-                        if mailbox.isCancelled { return false }
-                        if mailbox.consumeApproval(for: request.id) { return !mailbox.isCancelled }
-                        Thread.sleep(forTimeInterval: 0.1)
+                // The user authorized automatic foreground delivery. Preserve task
+                // cancellation/owner liveness, without publishing a consent request.
+                let approve: (CommandForegroundRequest) -> Bool = { _ in
+                    foregroundAllowed(cancelled: mailbox.isCancelled, ownerAlive: kill(ownerPID, 0) == 0)
+                }
+                let forward: ([String: Any]) throws -> [String: Any]? = { outgoing in
+                    let began = ProcessInfo.processInfo.systemUptime
+                    defer {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if outgoing["method"] as? String == "initialize" {
+                            measurements.connectionSeconds = now - proxyStartedAt
+                        } else if outgoing["method"] as? String == "tools/call" {
+                            measurements.toolSeconds += now - began
+                            measurements.toolCalls += 1
+                        }
+                        measurements.save(to: directory)
                     }
-                    return false
-                }, forward: { outgoing in
-                    try write(outgoing, to: input.fileHandleForWriting)
-                    guard let expectedID = outgoing["id"] else { return nil }
-                    while let data = try replies.next() {
-                        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                        if let id = response["id"], String(describing: id) == String(describing: expectedID) { return response }
-                        // Forward upstream notifications, never an unsolicited server request.
-                        if response["id"] == nil { try write(response, to: .standardOutput) }
+                    if outgoing["method"] as? String == "tools/call", !cursor.attempted {
+                        cursor.attempted = true
+                        // These host-only calls are never exposed as model tools. Older
+                        // Drivers can keep their default overlay if setup is unavailable.
+                        for (name, args) in cursor.setup {
+                            guard let reply = try exchange(cursorCall(name, args)), reply["error"] == nil,
+                                  let result = reply["result"] as? [String: Any], result["isError"] as? Bool != true else { break }
+                            if name == "start_session" { cursor.started = true }
+                        }
                     }
-                    throw CommandBackgroundPolicy.Failure("Cua Driver disconnected.")
-                })
+                    let response = try exchange(cursor.bind(outgoing))
+                    if outgoing["method"] as? String == "tools/list", let response { cursor.observeTools(response) }
+                    if outgoing["method"] as? String == "tools/call",
+                       let params = outgoing["params"] as? [String: Any],
+                       let name = params["name"] as? String,
+                       let args = params["arguments"] as? [String: Any] {
+                        let previewURL = directory.appendingPathComponent("preview.json")
+                        if name == "end_session" { try? FileManager.default.removeItem(at: previewURL) }
+                        let target = args["target"] as? [String: Any]
+                        let pid = args["pid"] as? Int ?? target?["pid"] as? Int
+                        let window = args["window_id"] as? Int ?? target?["window_id"] as? Int
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if let pid, pid > 0, pid != Int(ownerPID), pid != Int(getpid()), let window, window > 0,
+                           cursor.started, name != "end_session",
+                           now - lastPreviewAt > 0.4 || lastPreviewTarget != "\(pid):\(window)" {
+                            lastPreviewAt = now; lastPreviewTarget = "\(pid):\(window)"
+                            // Capture-only never walks AX or replaces its action tokens.
+                            // Keep these local frames out of model replies and timing logs.
+                            let capture = try? exchange(cursorCall("get_window_state", ["pid": pid, "window_id": window,
+                                "include_accessibility_tree": false, "include_screenshot": true,
+                                "max_dimension": 720, "session": cursor.session]))
+                            let cursorReply = try? exchange(cursorCall("get_agent_cursor_state", ["session": cursor.session]))
+                            let state = (cursorReply?["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+                            if let capture, let frame = CommandPreviewFrame.make(response: capture, cursor: state),
+                               let encoded = try? JSONEncoder().encode(frame), !mailbox.isCancelled {
+                                try? encoded.write(to: previewURL, options: .atomic)
+                                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: previewURL.path)
+                            } else { try? FileManager.default.removeItem(at: previewURL) }
+                        }
+                    }
+                    return response
+                }
+                let protected: Set<Int> = [Int(ownerPID), Int(getpid())]
+                let enabled = FileManager.default.fileExists(atPath: directory.appendingPathComponent("jev-enabled").path)
+                let jev: (([String: Any]) throws -> [String: Any])? = enabled ? { args in
+                    guard args["ordered_labels"] != nil else {
+                        throw CommandJevWorker.Failure("Provide the complete ordered_labels plan. No action executed.")
+                    }
+                    let plan = try CommandJevBatch.Plan(args)
+                    guard let key = try CommandKeychain.read(), !key.isEmpty else {
+                        return ["status": "handoff", "reason": "OpenRouter key unavailable. Codex may continue after inspecting current state."]
+                    }
+                    let api = CommandJevWorker.API(key: key)
+                    measurements.jevBatches += 1
+                    let batch = CommandJevBatch.execute(plan, choose: { state, criteria, instructions in
+                        let started = ProcessInfo.processInfo.systemUptime
+                        defer {
+                            measurements.jevDecisions += 1
+                            measurements.jevDecisionSeconds += ProcessInfo.processInfo.systemUptime - started
+                            measurements.save(to: directory)
+                        }
+                        return try api.choose(state: state, criteria: criteria, instructions: instructions)
+                    }, call: { name, arguments in
+                        let nested: [String: Any] = ["jsonrpc": "2.0", "id": "jev-\(UUID().uuidString)", "method": "tools/call",
+                            "params": ["name": name, "arguments": arguments]]
+                        guard let response = try CommandMCPGate.process(nested, protectedPIDs: protected,
+                                approve: approve, forward: forward),
+                              let result = response["result"] as? [String: Any],
+                              result["isError"] as? Bool != true,
+                              let structured = result["structuredContent"] as? [String: Any] else {
+                            throw CommandJevWorker.Failure("Driver refused the bounded action. Inspect current state before continuing.")
+                        }
+                        return structured
+                    })
+                    measurements.jevActions += (batch["clicked_labels"] as? [String] ?? []).count
+                    measurements.save(to: directory)
+                    return batch
+                } : nil
+                let response: [String: Any]?
+                do {
+                    response = try CommandMCPGate.process(request, protectedPIDs: protected,
+                        approve: approve, jev: jev, forward: forward)
+                } catch {
+                    response = ["jsonrpc": "2.0", "id": request["id"] ?? NSNull(), "result": ["isError": true,
+                        "content": [["type": "text", "text": "Invalid Jev plan or unavailable configuration. No further action executed."]]]]
+                }
                 if let response { try write(response, to: .standardOutput) }
             }
+            if cursor.started { _ = try? exchange(cursorCall("end_session", ["session": cursor.session])) }
             return 0
         } catch { return 1 }
     }
@@ -242,5 +393,30 @@ enum CommandMCPProxy {
                 guard pending.count <= 32_000_000 else { throw CommandBackgroundPolicy.Failure("Oversized MCP message") }
             }
         }
+    }
+}
+
+/// Task-private, fixed numeric schema. Replaced atomically and removed with the
+/// task directory; foreground waiting is counted separately from driver work.
+struct CommandMCPMeasurements: Codable {
+    var connectionSeconds: TimeInterval?
+    var toolSeconds: TimeInterval = 0
+    var consentSeconds: TimeInterval = 0
+    var toolCalls = 0
+    var jevDecisionSeconds: TimeInterval = 0
+    var jevDecisions = 0
+    var jevBatches = 0
+    var jevActions = 0
+    func save(to directory: URL) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        try? data.write(to: directory.appendingPathComponent("timing.json"), options: .atomic)
+    }
+    static func read(from directory: URL) -> Self? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("timing.json")) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }
+    var summary: String {
+        let connection = connectionSeconds.map { String(format: "%.3f", $0) } ?? "unavailable"
+        return "connection_s=\(connection) driver_s=\(String(format: "%.3f", toolSeconds)) consent_wait_s=\(String(format: "%.3f", consentSeconds)) driver_calls=\(toolCalls) jev_s=\(String(format: "%.3f", jevDecisionSeconds)) jev_decisions=\(jevDecisions) jev_batches=\(jevBatches) jev_actions=\(jevActions)"
     }
 }

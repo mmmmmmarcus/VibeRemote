@@ -195,7 +195,10 @@ final class AdvancedMenuController {
     private final class Canvas: NSView { override var isFlipped: Bool { true } }
     final class ShadowView: NSView {
         override var isFlipped: Bool { true }
-        var buttonFrames: [NSRect] = [] { didSet { renderedShadow = nil; needsDisplay = true } }
+        var buttonFrames: [NSRect] = [] {
+            didSet { if buttonFrames != oldValue { renderedShadow = nil; needsDisplay = true } }
+        }
+        var cornerRadius: CGFloat = 18 { didSet { renderedShadow = nil; needsDisplay = true } }
         private var renderedShadow: NSImage?
         private var renderedScale: CGFloat = 0
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -225,7 +228,8 @@ final class AdvancedMenuController {
             context.cgContext.scaleBy(x: 1, y: -1)
             let silhouette = NSBezierPath()
             for frame in buttonFrames {
-                silhouette.append(NSBezierPath(roundedRect: frame, xRadius: 18, yRadius: 18))
+                let radius = min(cornerRadius, min(frame.width, frame.height) / 2)
+                silhouette.append(NSBezierPath(roundedRect: frame, xRadius: radius, yRadius: radius))
             }
             // The caster stays offscreen. Knock out only the glass interior, with
             // one device pixel of antialiasing. An exterior feather creates a bright
@@ -248,7 +252,7 @@ final class AdvancedMenuController {
                     let point = NSPoint(x: (CGFloat(x) + 0.5) / scale, y: (CGFloat(y) + 0.5) / scale)
                     var distance = CGFloat.greatestFiniteMagnitude
                     for frame in buttonFrames {
-                        let radius = min(18, min(frame.width, frame.height) / 2)
+                        let radius = min(cornerRadius, min(frame.width, frame.height) / 2)
                         let dx = abs(point.x - frame.midX) - (frame.width / 2 - radius)
                         let dy = abs(point.y - frame.midY) - (frame.height / 2 - radius)
                         distance = min(distance, hypot(max(dx, 0), max(dy, 0)) + min(max(dx, dy), 0) - radius)

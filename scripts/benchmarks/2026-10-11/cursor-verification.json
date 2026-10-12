@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-11",
+  "driver": "0.28.2",
+  "installed_signed_proxy": true,
+  "background_clicks": 3,
+  "real_pointer_unchanged_each_click": true,
+  "session_glide_ms": 300,
+  "session_dwell_ms": 250,
+  "session_idle_hide_ms": 8000,
+  "session_cleanup_acknowledged": true,
+  "calculator_display": "12",
+  "user_confirmed_visible_and_own_mouse_normal": true,
+  "unit_tests": 173,
+  "bundle_resource_verified": true
+}

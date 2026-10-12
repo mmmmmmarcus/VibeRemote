@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-11",
+  "installed": "signed arm64, manifest matched",
+  "foreground": "Calculator visibly became frontmost without VibeRemote confirmation",
+  "result": "6 \u00d7 7 = 42; independent readback",
+  "center_entry": "hidden immediately after submit before first tool operation",
+  "preview_size": [
+    280,
+    214
+  ],
+  "preview_cleanup": true,
+  "tests": 175,
+  "bundle_resource_check": "passed separately",
+  "limits": [
+    "Physical remote dictation not retested",
+    "Target apps can change focus or Space when foreground delivery is required"
+  ]
+}

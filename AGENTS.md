@@ -933,9 +933,22 @@ cancel on Stop/close/quit; do not quit the user's shared CuaDriver daemon. Valid
 failure/cancel/focus behavior, not merely successful model text. Keep the input
 native so dictation, IME marked text and standard edit commands still work.
 
-Command input must remain editable while execution runs (only submission is gated).
-Every presentation restores its field editor, including after asynchronous app
-activation; a mapped Siri hold reasserts that focus only when Command is the key
+Command opens as a black pointer at the active screen center, with a small native
+compact glass speech bubble above/right (278 × 44 pt body, 14 pt native text)
+and the placeholder "What do you want me to do?".
+The bubble uses one short glass tail, not stacked beads. Entry and PiP share a
+rounded, stemless Agent arrow, not the macOS pointer silhouette. The bubble keeps
+a native field editor and focuses immediately. Return shrinks the
+bubble into the pointer and hides the entire center panel after 180 ms, including
+during preparation/background-only tasks. Valid target frames appear in the compact
+280 × 214 pt picture-in-picture. There is no top-right status
+capsule. Outside clicks dismiss and clear only an idle input; they pass through and
+never cancel a running task. Backspace/Option+Delete dismiss only an already-empty
+field editor without marked IME text. Completion hides both surfaces. A short Siri
+tap while running reopens a nonactivating speech bubble with Stop; it never
+resubmits or stops implicitly. Brief failure messages use this same speech bubble.
+Every input presentation restores its field editor, including after asynchronous app
+activation; a mapped Siri hold reasserts that focus only while editing in the key
 window. Do not refocus on task completion. 2026-10-10: a real Codex/Cua run operated
 Calculator and verified 128 × 36 = 4,608; Stop cancelled an independent request.
 The user confirmed aluminum Siri short-tap presentation and held Right Option
@@ -943,21 +956,176 @@ voice input after the focus fix. Glass hardware still needs physical verificatio
 
 Command MCP traffic must pass through CommandMCPProxy (the app executable's internal
 --command-mcp-proxy mode, before AppKit initialization). Never point Codex directly at
-Cua again: prompt-only background guidance is insufficient. The proxy pins omitted
-delivery modes to background and pauses each foreground/bring_to_front call before
-forwarding. A per-call UUID in a task-private mailbox is approved only by the native
-继续执行 button. Consent is consumed once, cannot authorize another call/run, expires
-after 15 minutes, and is revoked by Stop/close/quit. Keep the original Codex turn and
-MCP connection alive; never replay the task to continue it. Pause the five-minute
-execution budget while waiting. MCP's timeout must exceed the consent wait.
+Cua again: target restrictions remain enforced in the proxy. As explicitly requested
+on 2026-10-11, foreground/bring_to_front actions execute without a VibeRemote
+Continue prompt. Background remains the default; use targeted foreground when
+necessary. The runtime foreground callback checks cancellation and owner liveness
+and does not publish/wait for an approval mailbox. Keep exact targets, stop/quit
+cancellation, Driver authorization and Codex auto_review; this preference does not
+authorize unrelated consequential actions or bypass a tool rejection. Historical
+mailbox fixtures remain for benchmark compatibility, not as the current UX.
 
 Require exact targets, reject desktop-global input and unknown tools/MCP methods,
 and block the command agent from inspecting/operating its own host PID (including
 token-addressed input). Keep the shared Cua daemon running when the proxy exits.
 Observe owner death/cancellation while blocked so a queued action cannot run after
 the app exits. Do not persist tool arguments, text or screenshots in the mailbox.
-Submit, finish and consent presentation must not call activate/orderFront or restore
-the former app; update the existing panel without switching Space. Explicitly opening
-Command still activates its editable input. Return submits text, never foreground
-consent; only clicking 继续执行 grants it. Native app reactions to background actions
-remain app-owned, so do not promise full desktop isolation.
+Submit and finish must not activate or restore the former app. Explicit command
+entry still activates its editable input. Agent-requested foreground operations may
+now activate a target or change Space directly; do not promise desktop isolation.
+
+Command uses the same full-opacity Regular NSGlassEffectView / container and
+knocked-out soft shadow as Advanced Menu. Keep the window borderless/transparent
+with shadow padding and its native input borderless but editable. The bubble
+contracts around its tail at the pointer tip. Reduced Motion uses fading only.
+Right-click the speech bubble/pointer for Stop, or reopen Command during execution.
+The short submission transition and picture-in-picture pass mouse events through.
+Do not restore a HUD material, opaque field bezel, WindowServer double shadow, or lower the glass opacity to make it clearer.
+Keep native close/Stop/Escape cancellation and dictation focus. Do not restore the
+removed foreground Continue prompt without a new user request.
+Codex and ChatGPT are valid user-requested command targets; do not restore the
+development-only blanket ban on the Codex app. Launch stays background; displaying
+its window uses the same automatically authorized targeted foreground path as any other app.
+
+
+Command performance validation lives in `scripts/benchmarks/README.md`. Compare
+same-task repeated samples through the real foreground gate. A confirmed locked
+desktop invalidates an action sample; unresolved targets alone do not prove locking; never score it as model accuracy or choose a
+replacement from read-only success alone. Record slow runs and permission failures.
+The app's numeric `Command timing` line separates client first-event/first-tool,
+driver execution and human consent waiting; it contains no prompt, AX text, tool
+arguments, screenshots or result text. Task-private timing files die with the task.
+Jev/OpenRouter has opt-in synthetic and bounded live Calculator benchmarks. The live
+pilot uses the installed foreground gate and fresh AX-derived candidates; it is not
+a production executor. Compare achieved state and instruction compliance separately. Never mistake
+`typesafe/jev-router` for Jev, silently change models, or use model confidence to
+approve foreground access. No key or credential belongs in this repository.
+
+
+### Selectable command backends
+
+Command picture-in-picture is a host-owned, mouse-transparent nonactivating panel
+at the top right, with no separate status capsule. It shows the last observed target window and an Agent
+black pointer matching command entry, mapped from global Driver coordinates through that window's bounds. It
+never becomes key/main or raises the target app. The proxy uses capture-only
+get_window_state (include_accessibility_tree=false, max_dimension=720), validated
+against the exact pid/window_id, after window operations; do not re-walk AX for
+preview because that would invalidate action tokens. Updates are action-driven,
+not a continuous video stream, and labelled as the recent frame. Frames are kept
+only in the task-private 0700 directory as a single atomically replaced 0600
+preview.json, never model replies/logs. Failure removes the stale frame. Finish,
+cancel and task cleanup hide the preview and remove temporary data. Keep foreground
+task cancellation intact; preview rendering itself never activates a target or changes Space.
+
+Command cursor presentation is host-owned in `CommandCursorPresentation`. Each
+proxy creates one private named Driver lifecycle session and enables its default
+Agent cursor with a 300 ms glide, 250 ms click dwell and 8 s idle hide. It binds
+only tools whose advertised schema accepts `session`, including nested Jev calls.
+Do not expose cursor configuration tools to the model, modify global Driver
+settings, use move_cursor/real-pointer events for decoration, or grant foreground
+permission to make the overlay visible. Preserve OS Reduce Motion. Normal transport
+EOF ends the named session; cancellation closes the transport/child for Driver
+lease cleanup. Unsupported setup keeps the Driver's default overlay behavior.
+2026-10-11 verification: user saw the independent Agent cursor and confirmed their
+own mouse worked normally. An instrumented installed signed proxy then executed
+three background Calculator clicks with unchanged real-pointer coordinates before
+and after each click, observed the configured motion in the same session, read back
+12 and received successful end_session cleanup. 173 tests and final bundle resource
+check passed. This was a controlled proxy test, not a new full natural-language
+benchmark or a claim about every foreground input path. Sanitized evidence is in
+scripts/benchmarks/2026-10-11/cursor-verification.json.
+
+`CommandBackendSettings` in the right Settings pane selects Codex local CLI,
+Claude local CLI or Codex + Jev through OpenRouter. Standalone Calculator-only Jev
+is not offered. Selection is captured at task start; never change it mid-task.
+Hybrid explicitly authorizes Codex planning/execution plus Jev bounded action selection;
+Jev handing control back to Codex is part of this selected workflow, not a provider switch.
+Default remains Codex. The OpenRouter key is a non-synchronizing, this-device-only
+macOS Keychain generic password (`com.viberemote.openrouter`, account `api-key`).
+Never store it in UserDefaults, process arguments, logs, source or task directories.
+The optional Import saved test key button reads the user's existing private test
+file only on explicit click and leaves that source file unchanged. Secure field
+contents clear on save, backend change or view disappearance. CLI credentials
+remain owned by each CLI; never import/copy them into VibeRemote.
+
+Claude runs with restricted mode, empty setting sources, hooks and skills disabled,
+no built-in tools, strict single-server MCP config and no session persistence.
+Keep automatic permission review and deny unanswered permission prompts; no bypass
+or blanket tool allowlist approval. MCP goes through the same app proxy and native
+foreground mailbox as Codex. Stream result `is_error` or permission denials must
+not become success. On 2026-10-10 local Claude 2.1.273 connected to the proxy with
+only Cua tools, but its OAuth session had expired; actual task execution awaits
+user re-login. Runtime failure capsules briefly retain a concise failure state
+and the detailed error in accessibility help/tooltip without activating a window.
+
+Hybrid uses the task-private `jev-enabled` marker to expose `jev_click_sequence`
+only to its Codex session. The marker has no credentials. The signed MCP proxy reads
+OpenRouter's key directly from Keychain, calls the Decisions endpoint with Jev 1.13,
+and rejects redirects and unexpected model/choice responses. Codex handles discovery,
+text generation/input, navigation and final verification. It can delegate four-or-more
+simple clicks with an explicit pid/window_id, exact allowed labels, complete ordered_labels,
+completion condition and at most 24 steps. The executor resolves unique labels locally;
+Jev only resolves ambiguous matches and checks the final read-back. Never let it re-plan
+each known click or skip setup because the initial display already matches the goal.
+The executor refreshes tokens for every click, cannot launch/type/switch
+windows or request foreground, and routes every nested call through the same policy.
+Batch candidates require a positive finite frame and must not be explicitly hidden.
+Calculator exposes hidden digit menu items without frames alongside its keypad;
+offering both caused five redundant Jev ambiguity decisions. Do not solve this by
+blindly choosing the first same-label element or excluding all visible menu items.
+Do not delegate consequential actions; Codex's automatic review and user scope still apply.
+Every batch returns a handoff, next_step/remaining_labels and action history, never overall
+task success. Codex can assess the returned post-action driver observation directly; do not
+require a duplicate read when the evidence already suffices. Missing/disputed/stale evidence
+still requires a fresh read. Record attempts before dispatch and retain uncertain_label on
+transport/delivery failure; never blindly retry that step. On ambiguity,
+driver refusal, uncertain delivery or API failure, Codex must inspect state before continuing;
+never blindly repeat a partially executed batch. Cancellation/parent death stops the proxy,
+including during an API call. UI state goes to OpenRouter only for delegated batches.
+
+The internal `--command-jev-worker` remains a Calculator-only benchmark entrypoint;
+it is not selectable as a production backend. Do not expose it as a general desktop agent,
+restore silent backend fallback, or mistake Jev Router for the decision model.
+
+2026-10-10 backend delivery validation: 163 unit tests (one bundle-resource test
+initially skipped, then passed against the signed final bundle); strict-concurrency
+build succeeded with existing unrelated warnings. Developer-ID arm64 app installed
+and signature/file-manifest verified. Settings visually checked; saved test key
+imported through the UI into Keychain without exposing it. Native Jev executed
+6 × 7 and independently observed 42 in 24.219 s, refused a TextEdit writing task,
+and Stop removed its worker/proxy processes. Codex remains the selected default.
+No physical Siri-button/dictation regression test was performed during this update.
+
+
+2026-10-10 hybrid follow-up: user replaced the standalone Jev proposal with Codex
++ Jev cooperation. Shipped the three choices Codex / Claude / Codex + Jev, keeping
+Codex selected. OpenRouter key is preserved. Hybrid remains experimental: the
+initial Calculator runs were 70.132 s success and a 120 s benchmark timeout versus
+Codex 73.037 / 71.307 s successes. After adding explicit AX control values and a
+repeated-checkbox guard, a real TextEdit batch enabled four formatting controls
+in 22.077 s with independent read-back. Final Calculator hybrid completed in
+85.728 s, correctly continuing after a two-click partial handoff. Do not claim
+overall speed/accuracy superiority. See scripts/benchmarks/2026-10-10/HYBRID.md.
+168 tests, final bundle resource check, signed arm64 installation and UI startup
+verified; no physical remote/dictation retest.
+
+2026-10-11 ordered cooperation: signed arm64 update installed; 171 tests (bundle
+resource skip separately passed), strict-concurrency build and manifest/signature
+verification passed. One unlocked Calculator pair completed in 66.956 s hybrid
+versus 77.983 s baseline. Hybrid still made six Jev decisions because of ambiguous
+labels; do not claim a one-decision live run. The reverse-order comparison was
+interrupted by independently confirmed screen locking; preserve the preceding
+failed baseline and its unknown lock onset. See scripts/benchmarks/2026-10-11/ORDERED.md.
+The user's selected hybrid backend/key were preserved. Build caches were removed.
+The official Cua jev-use recipe suggests typed/adaptive native actions and optional
+perception; these are documented proposals, not shipped capabilities. Do not
+claim its newer Driver APIs exist in the installed 0.28.2 or its 2048 benchmark
+generalizes to VibeRemote. See JEV-DIRECTION.md in that benchmark directory.
+
+Unlocked follow-up: Calculator's hidden digit menu items lacked frames and caused
+the five extra decisions. After filtering them, a new signed arm64 build passed
+172 tests (bundle resource separately verified) and was installed with manifest
+verification. One unlocked reverse-order pair: Codex 71.331 s, hybrid 55.806 s;
+both verified the full eight-action sequence and 4608. Hybrid made one Jev decision
+and three Codex tool calls. Independent CUA read-back agreed. This is a narrow
+pilot, not general accuracy evidence; earlier failures remain in ORDERED.md.

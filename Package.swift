@@ -66,7 +66,8 @@ let package = Package(
                 "THIRD_PARTY_NOTICES.md",
             ],
             sources: [
-                "main.swift", "CommandExecution.swift", "CommandMCPProxy.swift", "CommandWindowController.swift", "SiriCommandGate.swift",
+                "main.swift", "CommandBackend.swift", "CommandJevWorker.swift",
+                "CommandPreview.swift", "CommandJevBatch.swift", "CommandExecution.swift", "CommandMCPProxy.swift", "CommandWindowController.swift", "SiriCommandGate.swift",
                 "RemoteInputPolicy.swift", "RemoteCaretController.swift",
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",

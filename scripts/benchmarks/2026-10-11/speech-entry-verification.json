@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-11",
+  "installed": "Developer ID signed arm64; installed manifest matches build",
+  "ui": {
+    "rounded_speech_bubble": true,
+    "black_pointer": true,
+    "placeholder": "What do you want me to do?",
+    "input_automatically_focused": true,
+    "typed_without_clicking_input": true,
+    "return_hides_bubble": true,
+    "legacy_status_capsule_removed": true,
+    "preview_action_pointer_visible": true,
+    "completion_hides_preview": true
+  },
+  "task": {
+    "backend": "Codex + Jev",
+    "application": "Calculator",
+    "expression": "128 × 36",
+    "independent_readback": "4,608"
+  },
+  "checks": {
+    "tests": 174,
+    "failures": 0,
+    "strict_concurrency_build": "passed",
+    "build_cache_removed": true
+  },
+  "limits": [
+    "Physical Siri/dictation not retested in this update.",
+    "Typing validation used English; IME behavior remains native but was not manually retested."
+  ]
+}

@@ -331,6 +331,8 @@ private struct RemoteSettingsView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     Divider()
+                    CommandBackendSettings()
+                    Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         sectionTitle("Text cursor")
                         Text("Touch to preview, then slide to activate the cursor. Lift and slide again to adjust; press the center or pause for 3 seconds to confirm.")
