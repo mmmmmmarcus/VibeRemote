@@ -1,0 +1,394 @@
+{
+  "sha256": "9a2c3c002015ef5b11769c6c167a16a03829e5347ab971a4ee501f163022bbbc",
+  "full_file_base": "0x8008000",
+  "table": "0x08064A6C",
+  "transitions": [
+    {
+      "address": "0x8064a94",
+      "source_state": 0,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064aa8",
+      "source_state": 0,
+      "event": "0x1",
+      "destination": 2,
+      "action": "0x8023e65",
+      "name": "EVT_FWU_INIT",
+      "destination_name": "FWU_PAYLOAD_FIRST"
+    },
+    {
+      "address": "0x8064abc",
+      "source_state": 0,
+      "event": "0x2",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_INIT_ERROR",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064ad0",
+      "source_state": 0,
+      "event": "0x5",
+      "destination": 0,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064ae4",
+      "source_state": 0,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064b0c",
+      "source_state": 1,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064b20",
+      "source_state": 1,
+      "event": "0x1",
+      "destination": 2,
+      "action": "0x8023ee9",
+      "name": "EVT_FWU_INIT",
+      "destination_name": "FWU_PAYLOAD_FIRST"
+    },
+    {
+      "address": "0x8064b34",
+      "source_state": 1,
+      "event": "0x2",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_INIT_ERROR",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064b48",
+      "source_state": 1,
+      "event": "0x3",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_REPORT",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064b5c",
+      "source_state": 1,
+      "event": "0x5",
+      "destination": 1,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064b70",
+      "source_state": 1,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064b98",
+      "source_state": 2,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064bac",
+      "source_state": 2,
+      "event": "0x4",
+      "destination": 3,
+      "action": "0x8023fa5",
+      "name": "EVT_FWU_WRITE",
+      "destination_name": "FWU_PAYLOAD"
+    },
+    {
+      "address": "0x8064bc0",
+      "source_state": 2,
+      "event": "0x3",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_REPORT",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064bd4",
+      "source_state": 2,
+      "event": "0x8",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_WRITE_ERROR",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064be8",
+      "source_state": 2,
+      "event": "0x5",
+      "destination": 2,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_PAYLOAD_FIRST"
+    },
+    {
+      "address": "0x8064bfc",
+      "source_state": 2,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064c24",
+      "source_state": 3,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064c38",
+      "source_state": 3,
+      "event": "0x4",
+      "destination": 3,
+      "action": "0x8023fa5",
+      "name": "EVT_FWU_WRITE",
+      "destination_name": "FWU_PAYLOAD"
+    },
+    {
+      "address": "0x8064c4c",
+      "source_state": 3,
+      "event": "0x6",
+      "destination": 4,
+      "action": "0x80241c9",
+      "name": "EVT_FWU_COMMIT",
+      "destination_name": "FWU_SIGNATURE_CHECK"
+    },
+    {
+      "address": "0x8064c60",
+      "source_state": 3,
+      "event": "0x7",
+      "destination": 7,
+      "action": "0x0",
+      "name": "EVT_FWU_BAD_IMAGE",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064c74",
+      "source_state": 3,
+      "event": "0x3",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_REPORT",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064c88",
+      "source_state": 3,
+      "event": "0x8",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_WRITE_ERROR",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064c9c",
+      "source_state": 3,
+      "event": "0x5",
+      "destination": 3,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_PAYLOAD"
+    },
+    {
+      "address": "0x8064cb0",
+      "source_state": 3,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064cd8",
+      "source_state": 4,
+      "event": "0x9",
+      "destination": 5,
+      "action": "0x80243c1",
+      "name": "EVT_FWU_SIGN_GOOD",
+      "destination_name": "FWU_UPDATE_READY"
+    },
+    {
+      "address": "0x8064cec",
+      "source_state": 4,
+      "event": "0xa",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_SIGN_BAD",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064d00",
+      "source_state": 4,
+      "event": "0x7",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_IMAGE",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064d14",
+      "source_state": 4,
+      "event": "0x5",
+      "destination": 4,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_SIGNATURE_CHECK"
+    },
+    {
+      "address": "0x8064d28",
+      "source_state": 4,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064d50",
+      "source_state": 5,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064d64",
+      "source_state": 5,
+      "event": "0xb",
+      "destination": 6,
+      "action": "0x8024469",
+      "name": "EVT_FWU_UBER_COMMIT",
+      "destination_name": "FWU_FINALIZE"
+    },
+    {
+      "address": "0x8064d78",
+      "source_state": 5,
+      "event": "0xc",
+      "destination": 7,
+      "action": "0x8023d65",
+      "name": "EVT_FWU_UBER_COMMIT_ERROR",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064d8c",
+      "source_state": 5,
+      "event": "0x1",
+      "destination": 3,
+      "action": "0x8023f45",
+      "name": "EVT_FWU_INIT",
+      "destination_name": "FWU_PAYLOAD"
+    },
+    {
+      "address": "0x8064da0",
+      "source_state": 5,
+      "event": "0x3",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_REPORT",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064db4",
+      "source_state": 5,
+      "event": "0x5",
+      "destination": 5,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_UPDATE_READY"
+    },
+    {
+      "address": "0x8064dc8",
+      "source_state": 5,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064df0",
+      "source_state": 6,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    },
+    {
+      "address": "0x8064e04",
+      "source_state": 6,
+      "event": "0xd",
+      "destination": 0,
+      "action": "0x80245f5",
+      "name": "EVT_FWU_RESET",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064e18",
+      "source_state": 6,
+      "event": "0x3",
+      "destination": 7,
+      "action": "0x8023ce9",
+      "name": "EVT_FWU_BAD_REPORT",
+      "destination_name": "FWU_ERROR"
+    },
+    {
+      "address": "0x8064e2c",
+      "source_state": 6,
+      "event": "0x5",
+      "destination": 6,
+      "action": "0x8024031",
+      "name": "EVT_FWU_READ",
+      "destination_name": "FWU_FINALIZE"
+    },
+    {
+      "address": "0x8064e40",
+      "source_state": 6,
+      "event": "0xe",
+      "destination": 0,
+      "action": "0x0",
+      "name": "EVT_FWU_TERMINATE",
+      "destination_name": "FWU_OFF"
+    },
+    {
+      "address": "0x8064e68",
+      "source_state": 7,
+      "event": "0x0",
+      "destination": 1,
+      "action": "0x8023dd1",
+      "name": "EVT_FWU_UBER_INIT",
+      "destination_name": "FWU_UPDATE_IMAGE"
+    }
+  ]
+}

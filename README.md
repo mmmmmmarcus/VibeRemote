@@ -353,3 +353,7 @@ denied review or authorize unrelated actions.
 
 References: [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver),
 [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+## Firmware research
+
+First-generation microphone-control findings, evidence, diagnostic tools and cross-machine handoff are indexed in [Design/Research/README.md](Design/Research/README.md). Software-only capture and a reliable unlock/restore workflow remain unverified; current button mappings are unchanged.

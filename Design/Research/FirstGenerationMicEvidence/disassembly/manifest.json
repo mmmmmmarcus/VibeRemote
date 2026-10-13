@@ -1,0 +1,75 @@
+{
+  "note": "Focused static excerpts; original source identity in parent provenance files. Header temporary paths normalized. Not executable firmware. Linear disassembly can include literal pools; use documented control-flow boundaries.",
+  "files": [
+    {
+      "file": "push-to-talk.asm",
+      "sha256": "2a4ec2f0447f23c6de6b22d17536b3243f29bdf3828cfd0defe1e993f36b29c1",
+      "source": "driver-provenance.json"
+    },
+    {
+      "file": "set-feature.asm",
+      "sha256": "05e07d409ca01cf83a45e618b3e370017edbd89c1cafdbae7af25838dad1b4f8",
+      "source": "driver-provenance.json"
+    },
+    {
+      "file": "lock-boot-lock-read.asm",
+      "sha256": "ffdc442f9625b39ed4de5a9aac092cdf591898d06164e0141d88addbe0d4f66b",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-bt-completion.asm",
+      "sha256": "2db99b0e98c556a076691fb743359ef7101551be2089b73faf8feae74e44d282",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-bt-get-build.asm",
+      "sha256": "818619d009a4208d734d964bd578b57a828bc54f057bc025177da71c53a3aa97",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-dsm-read.asm",
+      "sha256": "fd5894cb3cd355d0a2b278978b68b5340724ae837c0c54f799e84e75aaa6b58b",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-e1-read-entry-zero.asm",
+      "sha256": "9b65820598b5c14033e720da58518c81ec048fc7c23b81f3a8e0bbfc8f311be2",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-initialization.asm",
+      "sha256": "bd9f4172e274724d43e62866dbeeb54fc931a3e6da8f87ab01c1bb506f151cc9",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-pmm-dsm-pointer.asm",
+      "sha256": "b11693f40902c696232d05c40c2e33db1452c479a528e55f8b8ee955cfb705ca",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-pmm-get-dispatch.asm",
+      "sha256": "1a74197256f209ea0dcc88a20de51d7f7909d04cec4d44b31570db1e8f39e521",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "lock-pmm-table-register.asm",
+      "sha256": "6c022816436190c466cb052913c0bbc4d4cb6aa4dffc36a9d89d75835f784f18",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "unlock-function.asm",
+      "sha256": "cf85739671a51d0902dc9ac85504db48a10dae695e8953ea08488396acc891ad",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "unlock-fwu-commit.asm",
+      "sha256": "d285dd4e3173b37f58da1a3e451a87fe93e28fac182e486484ef4d5a657d2422",
+      "source": "firmware-provenance.json"
+    },
+    {
+      "file": "unlock-notify.asm",
+      "sha256": "21115743c3ca7f530c3ef7b9860e65a1f4c0d0182afd855b1455011b1e9b1aeb",
+      "source": "firmware-provenance.json"
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "date": "2026-10-13",
+  "timezone": "Asia/Shanghai",
+  "api": "IOHIDDeviceGetReport / IOHIDDeviceSetReport",
+  "scope": "026D / 0A00; vendor-page usage 000B; non-seizing handle; VibeRemote quit and relaunched in finally",
+  "independent_air_capture": false,
+  "results": [
+    {
+      "time": "2026-10-13T08:31:35.678476",
+      "entry": 4295379091,
+      "identity": {
+        "VendorID": 76,
+        "ProductID": 621,
+        "PrimaryUsagePage": 65280,
+        "PrimaryUsage": 11,
+        "Transport": "Bluetooth Low Energy",
+        "kBTHardwareRevisionKey": "0A00"
+      },
+      "open": "0x0"
+    },
+    {
+      "time": "2026-10-13T08:31:35.765415",
+      "report": "0xe1",
+      "result": "0x0",
+      "length": 2,
+      "data": "e1 01",
+      "seconds": 0.087
+    },
+    {
+      "time": "2026-10-13T08:31:35.824405",
+      "entry": 4295379091,
+      "identity": {
+        "VendorID": 76,
+        "ProductID": 621,
+        "PrimaryUsagePage": 65280,
+        "PrimaryUsage": 11,
+        "Transport": "Bluetooth Low Energy",
+        "kBTHardwareRevisionKey": "0A00"
+      },
+      "open": "0x0"
+    },
+    {
+      "time": "2026-10-13T08:31:35.866790",
+      "report": "0xff",
+      "result": "0x0",
+      "length": 2,
+      "data": "ff af",
+      "seconds": 0.042
+    },
+    {
+      "time": "2026-10-13T08:32:37.734602",
+      "entry": 4295379091,
+      "identity": {
+        "VendorID": 76,
+        "ProductID": 621,
+        "PrimaryUsagePage": 65280,
+        "PrimaryUsage": 11,
+        "Transport": "Bluetooth Low Energy",
+        "kBTHardwareRevisionKey": "0A00"
+      },
+      "open": "0x0"
+    },
+    {
+      "time": "2026-10-13T08:32:37.910969",
+      "report": "0xe1",
+      "result": "0x0",
+      "length": 2,
+      "data": "e1 01",
+      "seconds": 0.176
+    },
+    {
+      "time": "2026-10-13T08:32:37.933735",
+      "operation": "zero-duration-31",
+      "bytes": "31 10 00 00 00 00",
+      "result": "0xe00002bc",
+      "seconds": 0.023
+    },
+    {
+      "operation": "LOCK-read-after",
+      "result": "0x0",
+      "length": 2,
+      "data": "e1 01"
+    }
+  ],
+  "app_recovery": "Microphone bridge started successfully at 08:32:41 local time; hardware voice/button acceptance not retested"
+}

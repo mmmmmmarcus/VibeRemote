@@ -343,9 +343,20 @@ few seconds).
 
 ### Helper (`VoiceBridgeHelper/main.swift`) invariants
 
-- The remote gates the mic in firmware. There is **no** always-on capability;
-  every audio session requires a physical Siri-button hold. Do not add features
-  that assume otherwise.
+- The verified capture paths depend on a physical Siri-button hold. No software-only
+  microphone start/stop command has been demonstrated for the first-generation remote.
+  Do not build features that assume one exists. This is an operational constraint,
+  not proof that the firmware has no undocumented command. Research and cross-machine
+  handoff are indexed in `Design/Research/README.md`; the evidence report is
+  `Design/Research/FirstGenerationMicrophoneControl.md`. On 2026-10-13, Feature E1
+  read LOCK=1 on the tested 026D/0A00/v0118 unit; do not assume another unit shares
+  this value or that another firmware shares these offsets. Internal unlock and
+  relock paths exist statically, but host access and reliable recovery are unproven.
+  Current research scope excludes actual unlocking, persistent writes, firmware
+  flashing and mapping changes. The diagnostic script defaults to read-only;
+  its optional zero-duration write was a bounded prior experiment, not permission
+  to repeat it on a different remote. Keep physical Siri capture intact on both
+  generations.
 - `player.stop()` must never be called synchronously from an
   `AVAudioPlayerNode` scheduleBuffer completion callback — it deadlocks. Stops
   go through `stopPlayerSafely()` on a dedicated control queue. This is why

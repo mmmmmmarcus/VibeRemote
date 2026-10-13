@@ -1,0 +1,48 @@
+{
+  "retrieved": "2026-10-12",
+  "sources": {
+    "gen1reva-v118.zip": "https://updates.cdn-apple.com/2019/ios/041-04421-201908730-71130D70-AFC7-11E9-83A5-4F41F70D717D/com_apple_MobileAsset_MobileAccessoryUpdate_WirelessRemoteFirmware_2/afb28cfdde5770cc4807bc0ccc52e47a457961ed.zip"
+  },
+  "observedDevice": {
+    "productID": "026D",
+    "hardwareRevision": "0A00",
+    "firmwareRevision": "B000750001001801300033022000040431001800C1000100"
+  },
+  "AFUMainMapping": {
+    "base": "0x08008000",
+    "fileOffsetZeroMapsToBase": true,
+    "vectorOffset": "0x200",
+    "initialSP": "0x20000300",
+    "resetAddress": "0x0800fcf1",
+    "resetFileOffset": "0x7cf0",
+    "evidence": "2402 absolute literal pointers match string starts with same offset; reset and default vectors land on plausible startup/loop Thumb code."
+  },
+  "files": [
+    {
+      "path": "gen1reva-v118/AssetData/B439-bt-v0233-hw000A-prod-signed.afu",
+      "bytes": 34714,
+      "sha256": "a0964966f39a8223ab5e9ab9653fe7d0bd538d7dc814ddb92fc28ae054c14eb1"
+    },
+    {
+      "path": "gen1reva-v118/AssetData/B439-mt-v0404-hw000A-prod-signed.afu",
+      "bytes": 54854,
+      "sha256": "52699d6f3d10f2a2f4190ecb91da42e70a1047f1713ec2423aa8abb9635702b6"
+    },
+    {
+      "path": "gen1reva-v118/AssetData/B439-remote-v0118-hw000A-prod-signed.afu",
+      "bytes": 446984,
+      "sha256": "9a2c3c002015ef5b11769c6c167a16a03829e5347ab971a4ee501f163022bbbc"
+    },
+    {
+      "path": "gen1reva-v118/Info.plist",
+      "bytes": 1232,
+      "sha256": "fe0eea41efb9a0ac8f3b367db55713fc550d33ad0230479602db39e189652f9c"
+    },
+    {
+      "path": "gen1reva-v118.zip",
+      "bytes": 720908,
+      "sha256": "730400a9336dada6dc0fba0ff40b75d94905be9f556673145f3faa9665608257"
+    }
+  ],
+  "scope": "Offline only. No firmware or captured voice is redistributed. No remote command was sent."
+}

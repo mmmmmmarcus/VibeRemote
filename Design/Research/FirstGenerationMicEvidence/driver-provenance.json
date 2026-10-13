@@ -1,0 +1,16 @@
+{
+  "source": "/System/Volumes/Preboot/B2E91C2C-3EBF-4D00-8094-B3AF4B247F43/boot/E4BDF7907BCE4E340AD7EFA3C23653B83BA962D8AEE104A83FFC177D0971CB11C7A66574E86799DFAA757E48EF5158FD/System/Library/Caches/com.apple.kernelcaches/kernelcache",
+  "source_sha256": "e5771004885080ff804fa43985c7cba14f2eab9d737db7b7389dfbd41c5a07dc",
+  "output_sha256": "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90",
+  "output_bytes": 124354560,
+  "tool": "Python DER parser + macOS libcompression LZFSE",
+  "driver": {
+    "bundle": "com.apple.driver.AppleBluetoothRemote",
+    "version": "1000.6",
+    "fileset_offset": "0x4190e0",
+    "fileset_va": "0xfffffe000741d0e0",
+    "architecture": "arm64e",
+    "symbols": 699
+  },
+  "analysis_view": "Original global file offsets and virtual addresses retained; root Mach-O header replaced with embedded kext header. A transformed analysis view, not a standalone loadable kext."
+}

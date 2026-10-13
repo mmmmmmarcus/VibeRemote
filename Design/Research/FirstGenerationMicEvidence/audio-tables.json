@@ -1,0 +1,169 @@
+{
+  "sha256": "9a2c3c002015ef5b11769c6c167a16a03829e5347ab971a4ee501f163022bbbc",
+  "bytes": 446984,
+  "address_base": "0x8008000",
+  "product_hardware": "0xa026d",
+  "initial_sp": "0x20000300",
+  "reset": "0x800fcf1",
+  "reports": [
+    {
+      "address": "0x80644b0",
+      "type": 3,
+      "report_id": "0x31",
+      "get": true,
+      "set": true,
+      "minimum": 0,
+      "maximum": 5
+    },
+    {
+      "address": "0x8064540",
+      "type": 3,
+      "report_id": "0x98",
+      "get": true,
+      "set": true,
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "address": "0x806457c",
+      "type": 3,
+      "report_id": "0xaf",
+      "get": false,
+      "set": true,
+      "minimum": 0,
+      "maximum": 0
+    },
+    {
+      "address": "0x80645a0",
+      "type": 3,
+      "report_id": "0x96",
+      "get": false,
+      "set": true,
+      "minimum": 1,
+      "maximum": 1
+    }
+  ],
+  "states": [
+    {
+      "state": 5,
+      "name": "CONNECTED",
+      "transitions": [
+        {
+          "address": "0x8063aa0",
+          "event": "0xe",
+          "event_name": "EVT_ENABLE_AUDIO",
+          "next_state": 6,
+          "next_name": "CONNECTED_WITH_AUDIO",
+          "action": "0x8020888"
+        },
+        {
+          "address": "0x8063ac8",
+          "event": "0x12",
+          "event_name": "EVT_DISABLE_AUDIO",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": null
+        },
+        {
+          "address": "0x8063adc",
+          "event": "0x11",
+          "event_name": "EVT_DISABLE_AUDIO_STREAMING",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": null
+        }
+      ]
+    },
+    {
+      "state": 6,
+      "name": "CONNECTED_WITH_AUDIO",
+      "transitions": [
+        {
+          "address": "0x8063be0",
+          "event": "0xf",
+          "event_name": "EVT_ENABLE_AUDIO_STREAMING",
+          "next_state": 7,
+          "next_name": "CONNECTED_WITH_AUDIO_STREAMING",
+          "action": "0x8020d98"
+        },
+        {
+          "address": "0x8063bf4",
+          "event": "0x12",
+          "event_name": "EVT_DISABLE_AUDIO",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": "0x8020038"
+        },
+        {
+          "address": "0x8063c08",
+          "event": "0x11",
+          "event_name": "EVT_DISABLE_AUDIO_STREAMING",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": "0x8020038"
+        }
+      ]
+    },
+    {
+      "state": 7,
+      "name": "CONNECTED_WITH_AUDIO_STREAMING",
+      "transitions": [
+        {
+          "address": "0x8063d0c",
+          "event": "0x12",
+          "event_name": "EVT_DISABLE_AUDIO",
+          "next_state": 8,
+          "next_name": "CONNECTED_WITH_AUDIO_STREAMING_TIMEOUT",
+          "action": "0x8020e44"
+        },
+        {
+          "address": "0x8063d20",
+          "event": "0xf",
+          "event_name": "EVT_ENABLE_AUDIO_STREAMING",
+          "next_state": 7,
+          "next_name": "CONNECTED_WITH_AUDIO_STREAMING",
+          "action": null
+        },
+        {
+          "address": "0x8063d34",
+          "event": "0x11",
+          "event_name": "EVT_DISABLE_AUDIO_STREAMING",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": "0x80200ac"
+        }
+      ]
+    },
+    {
+      "state": 8,
+      "name": "CONNECTED_WITH_AUDIO_STREAMING_TIMEOUT",
+      "transitions": [
+        {
+          "address": "0x8063e38",
+          "event": "0xe",
+          "event_name": "EVT_ENABLE_AUDIO",
+          "next_state": 7,
+          "next_name": "CONNECTED_WITH_AUDIO_STREAMING",
+          "action": "0x8020c04"
+        },
+        {
+          "address": "0x8063e4c",
+          "event": "0xf",
+          "event_name": "EVT_ENABLE_AUDIO_STREAMING",
+          "next_state": 7,
+          "next_name": "CONNECTED_WITH_AUDIO_STREAMING",
+          "action": null
+        },
+        {
+          "address": "0x8063e60",
+          "event": "0x11",
+          "event_name": "EVT_DISABLE_AUDIO_STREAMING",
+          "next_state": 5,
+          "next_name": "CONNECTED",
+          "action": "0x80200ac"
+        }
+      ]
+    }
+  ],
+  "caveat": "Filtered audio transitions from complete version-pinned decoding. An absent 0x0F in CONNECTED is based on the complete source-state table, not the filter."
+}
