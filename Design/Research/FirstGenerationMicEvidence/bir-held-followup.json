@@ -1,0 +1,53 @@
+{
+  "firmwareSha256": "9a2c3c002015ef5b11769c6c167a16a03829e5347ab971a4ee501f163022bbbc",
+  "scope": "Offline static analysis only; raw masks are not recommended or tested gestures",
+  "chordTable": [
+    {
+      "address": "0x8066e84",
+      "rawButtonMask": "0x22",
+      "timerMilliseconds": 1000
+    },
+    {
+      "address": "0x8066e8c",
+      "rawButtonMask": "0x5",
+      "timerMilliseconds": 4000
+    },
+    {
+      "address": "0x8066e94",
+      "rawButtonMask": "0x21",
+      "timerMilliseconds": 5000
+    },
+    {
+      "address": "0x8066e9c",
+      "rawButtonMask": "0x28",
+      "timerMilliseconds": 5000
+    }
+  ],
+  "literalReferences": [
+    {
+      "literalAddress": "0x802f3fc",
+      "stringAddress": "0x806eba8",
+      "text": "ADV"
+    },
+    {
+      "literalAddress": "0x802f420",
+      "stringAddress": "0x806ebb5",
+      "text": "ATV Reset"
+    },
+    {
+      "literalAddress": "0x802f424",
+      "stringAddress": "0x806ebac",
+      "text": "ShutDown"
+    },
+    {
+      "literalAddress": "0x802f428",
+      "stringAddress": "0x806ebbf",
+      "text": "ATV DFU"
+    },
+    {
+      "literalAddress": "0x802f42c",
+      "stringAddress": "0x8074cf8",
+      "text": "UNKNOWN"
+    }
+  ]
+}

@@ -1,0 +1,201 @@
+0314/hw0021/v0060 static excerpts. AFU offset = address + 0x80. Literal pools/table bytes are data.
+
+
+LOCAL_ANALYSIS/gen2-v0060-analysis.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+00000000 <.text>:
+   563fc: b5f0         	push	{r4, r5, r6, r7, lr}
+   563fe: af03         	add	r7, sp, #0xc
+   56400: e92d 0f00    	push.w	{r8, r9, r10, r11}
+   56404: b099         	sub	sp, #0x64
+   56406: 4605         	mov	r5, r0
+   56408: 6840         	ldr	r0, [r0, #0x4]
+   5640a: 468b         	mov	r11, r1
+   5640c: 28d1         	cmp	r0, #0xd1
+   5640e: dd0c         	ble	0x5642a <.text+0x5642a> @ imm = #0x18
+   56410: f89b 0003    	ldrb.w	r0, [r11, #0x3]
+   56414: f8db 1008    	ldr.w	r1, [r11, #0x8]
+   56418: f240 121d    	movw	r2, #0x11d
+   5641c: e9cd 0100    	strd	r0, r1, [sp]
+   56420: 48c7         	ldr	r0, [pc, #0x31c]        @ 0x56740 <.text+0x56740>
+   56422: 49c8         	ldr	r1, [pc, #0x320]        @ 0x56744 <.text+0x56744>
+   56424: 4bc8         	ldr	r3, [pc, #0x320]        @ 0x56748 <.text+0x56748>
+   56426: f01d fa61    	bl	0x738ec <.text+0x738ec> @ imm = #0x1d4c2
+   5642a: f89b 0003    	ldrb.w	r0, [r11, #0x3]
+   5642e: f04f 36ff    	mov.w	r6, #0xffffffff
+   56432: f1a0 01b0    	sub.w	r1, r0, #0xb0
+   56436: 290c         	cmp	r1, #0xc
+   56438: d921         	bls	0x5647e <.text+0x5647e> @ imm = #0x42
+   5643a: f1a0 0154    	sub.w	r1, r0, #0x54
+   5643e: 2904         	cmp	r1, #0x4
+   56440: d938         	bls	0x564b4 <.text+0x564b4> @ imm = #0x70
+   56442: f1a0 013a    	sub.w	r1, r0, #0x3a
+   56446: 2904         	cmp	r1, #0x4
+   56448: f240 8068    	bls.w	0x5651c <.text+0x5651c> @ imm = #0xd0
+   5644c: 2813         	cmp	r0, #0x13
+   5644e: f000 8136    	beq.w	0x566be <.text+0x566be> @ imm = #0x26c
+   56452: 288d         	cmp	r0, #0x8d
+   56454: f000 817a    	beq.w	0x5674c <.text+0x5674c> @ imm = #0x2f4
+   56458: 288e         	cmp	r0, #0x8e
+   5645a: f000 8153    	beq.w	0x56704 <.text+0x56704> @ imm = #0x2a6
+   5645e: 288f         	cmp	r0, #0x8f
+   56460: f000 81de    	beq.w	0x56820 <.text+0x56820> @ imm = #0x3bc
+   56464: 28e0         	cmp	r0, #0xe0
+   56466: f000 8258    	beq.w	0x5691a <.text+0x5691a> @ imm = #0x4b0
+   5646a: 28e1         	cmp	r0, #0xe1
+   5646c: f000 820b    	beq.w	0x56886 <.text+0x56886> @ imm = #0x416
+   56470: 28ff         	cmp	r0, #0xff
+   56472: f000 8215    	beq.w	0x568a0 <.text+0x568a0> @ imm = #0x42a
+   56476: 28d4         	cmp	r0, #0xd4
+   56478: f040 824b    	bne.w	0x56912 <.text+0x56912> @ imm = #0x496
+   5647c: e28b         	b	0x56996 <.text+0x56996> @ imm = #0x516
+   5647e: e8df f011    	tbh	[pc, r1, lsl #1]
+
+
+LOCAL_ANALYSIS/gen2-v0060-analysis.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+00000000 <.text>:
+   5651c: e8df f011    	tbh	[pc, r1, lsl #1]
+   56520: 023b         	lsls	r3, r7, #0x8
+   56522: 023b         	lsls	r3, r7, #0x8
+   56524: 0005         	movs	r5, r0
+   56526: 01ac         	lsls	r4, r5, #0x6
+   56528: 01d3         	lsls	r3, r2, #0x7
+   5652a: f8db 3008    	ldr.w	r3, [r11, #0x8]
+   5652e: f8db 2010    	ldr.w	r2, [r11, #0x10]
+   56532: f8d5 0144    	ldr.w	r0, [r5, #0x144]
+   56536: f10b 010c    	add.w	r1, r11, #0xc
+   5653a: 2600         	movs	r6, #0x0
+   5653c: 9100         	str	r1, [sp]
+   5653e: 2100         	movs	r1, #0x0
+   56540: f00d fe87    	bl	0x64252 <.text+0x64252> @ imm = #0xdd0e
+   56544: 2800         	cmp	r0, #0x0
+   56546: f040 80f7    	bne.w	0x56738 <.text+0x56738> @ imm = #0x1ee
+   5654a: e1b9         	b	0x568c0 <.text+0x568c0> @ imm = #0x372
+   5654c: f023 fac6    	bl	0x79adc <.text+0x79adc> @ imm = #0x2358c
+
+
+LOCAL_ANALYSIS/gen2-v0060-analysis.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+00000000 <.text>:
+   56886: f7f2 ff6b    	bl	0x49760 <.text+0x49760> @ imm = #-0xd12a
+   5688a: f8d0 1180    	ldr.w	r1, [r0, #0x180]
+   5688e: f8db 0010    	ldr.w	r0, [r11, #0x10]
+   56892: 2420         	movs	r4, #0x20
+   56894: 2220         	movs	r2, #0x20
+   56896: f7d4 ff61    	bl	0x2b75c <.text+0x2b75c> @ imm = #-0x2b13e
+   5689a: f8cb 400c    	str.w	r4, [r11, #0xc]
+   5689e: e00e         	b	0x568be <.text+0x568be> @ imm = #0x1c
+   568a0: f8db 1008    	ldr.w	r1, [r11, #0x8]
+   568a4: f8d5 212c    	ldr.w	r2, [r5, #0x12c]
+   568a8: f8db 0010    	ldr.w	r0, [r11, #0x10]
+   568ac: 4291         	cmp	r1, r2
+   568ae: bf38         	it	lo
+   568b0: 460a         	movlo	r2, r1
+   568b2: f8cb 200c    	str.w	r2, [r11, #0xc]
+   568b6: f105 01e8    	add.w	r1, r5, #0xe8
+   568ba: f7d4 ff4f    	bl	0x2b75c <.text+0x2b75c> @ imm = #-0x2b162
+   568be: 2600         	movs	r6, #0x0
+   568c0: f88b 6006    	strb.w	r6, [r11, #0x6]
+   568c4: e04f         	b	0x56966 <.text+0x56966> @ imm = #0x9e
+   568c6: f8d5 1128    	ldr.w	r1, [r5, #0x128]
+   568ca: 2000         	movs	r0, #0x0
+   568cc: ebb0 4f11    	cmp.w	r0, r1, lsr #16
+
+
+LOCAL_ANALYSIS/gen2-v0060-analysis.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+00000000 <.text>:
+   64252: b5f0         	push	{r4, r5, r6, r7, lr}
+   64254: af03         	add	r7, sp, #0xc
+   64256: e92d 0bc0    	push.w	{r6, r7, r8, r9, r11}
+   6425a: 461d         	mov	r5, r3
+   6425c: 4690         	mov	r8, r2
+   6425e: 4606         	mov	r6, r0
+   64260: f000 f822    	bl	0x642a8 <.text+0x642a8> @ imm = #0x44
+   64264: b1c8         	cbz	r0, 0x6429a <.text+0x6429a> @ imm = #0x32
+   64266: 7b01         	ldrb	r1, [r0, #0xc]
+   64268: 2901         	cmp	r1, #0x1
+   6426a: d81b         	bhi	0x642a4 <.text+0x642a4> @ imm = #0x36
+   6426c: eb06 0181    	add.w	r1, r6, r1, lsl #2
+   64270: f8d7 9008    	ldr.w	r9, [r7, #0x8]
+   64274: 8804         	ldrh	r4, [r0]
+   64276: 6ace         	ldr	r6, [r1, #0x2c]
+   64278: 4630         	mov	r0, r6
+   6427a: f006 f8ed    	bl	0x6a458 <.text+0x6a458> @ imm = #0x61da
+   6427e: 4630         	mov	r0, r6
+   64280: 4621         	mov	r1, r4
+   64282: 2200         	movs	r2, #0x0
+   64284: 4643         	mov	r3, r8
+   64286: e9cd 5900    	strd	r5, r9, [sp]
+   6428a: f006 fa0a    	bl	0x6a6a2 <.text+0x6a6a2> @ imm = #0x6414
+   6428e: 4604         	mov	r4, r0
+   64290: 4630         	mov	r0, r6
+   64292: f006 f8fa    	bl	0x6a48a <.text+0x6a48a> @ imm = #0x61f4
+   64296: 4620         	mov	r0, r4
+   64298: e001         	b	0x6429e <.text+0x6429e> @ imm = #0x2
+   6429a: f04f 30ff    	mov.w	r0, #0xffffffff
+   6429e: e8bd 0b0c    	pop.w	{r2, r3, r8, r9, r11}
+   642a2: bdf0         	pop	{r4, r5, r6, r7, pc}
+   642a4: f024 f996    	bl	0x885d4 <.text+0x885d4> @ imm = #0x2432c
+
+
+LOCAL_ANALYSIS/gen2-v0060-analysis.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+00000000 <.text>:
+   6a6a2: b5f0         	push	{r4, r5, r6, r7, lr}
+   6a6a4: af03         	add	r7, sp, #0xc
+   6a6a6: e92d 0f80    	push.w	{r7, r8, r9, r10, r11}
+   6a6aa: f8d7 b008    	ldr.w	r11, [r7, #0x8]
+   6a6ae: f8d7 a00c    	ldr.w	r10, [r7, #0xc]
+   6a6b2: f1bb 0f00    	cmp.w	r11, #0x0
+   6a6b6: d015         	beq	0x6a6e4 <.text+0x6a6e4> @ imm = #0x2a
+   6a6b8: 4698         	mov	r8, r3
+   6a6ba: 4616         	mov	r6, r2
+   6a6bc: 460d         	mov	r5, r1
+   6a6be: 4604         	mov	r4, r0
+   6a6c0: f7ff feca    	bl	0x6a458 <.text+0x6a458> @ imm = #-0x26c
+   6a6c4: f8d4 9018    	ldr.w	r9, [r4, #0x18]
+   6a6c8: 4629         	mov	r1, r5
+   6a6ca: 4648         	mov	r0, r9
+   6a6cc: f7ff fe1d    	bl	0x6a30a <.text+0x6a30a> @ imm = #-0x3c6
+   6a6d0: b128         	cbz	r0, 0x6a6de <.text+0x6a6de> @ imm = #0xa
+   6a6d2: 7901         	ldrb	r1, [r0, #0x4]
+   6a6d4: 7942         	ldrb	r2, [r0, #0x5]
+   6a6d6: ea41 2102    	orr.w	r1, r1, r2, lsl #8
+   6a6da: 42b1         	cmp	r1, r6
+   6a6dc: d206         	bhs	0x6a6ec <.text+0x6a6ec> @ imm = #0xc
+   6a6de: f04f 35ff    	mov.w	r5, #0xffffffff
+   6a6e2: e015         	b	0x6a710 <.text+0x6a710> @ imm = #0x2a
+   6a6e4: 2500         	movs	r5, #0x0
+   6a6e6: f8ca 5000    	str.w	r5, [r10]
+   6a6ea: e014         	b	0x6a716 <.text+0x6a716> @ imm = #0x28
+   6a6ec: 1b8d         	subs	r5, r1, r6
+   6a6ee: 455d         	cmp	r5, r11
+   6a6f0: bf88         	it	hi
+   6a6f2: 465d         	movhi	r5, r11
+   6a6f4: 7981         	ldrb	r1, [r0, #0x6]
+   6a6f6: 79c0         	ldrb	r0, [r0, #0x7]
+   6a6f8: 462a         	mov	r2, r5
+   6a6fa: ea41 2000    	orr.w	r0, r1, r0, lsl #8
+   6a6fe: 4430         	add	r0, r6
+   6a700: eb09 0100    	add.w	r1, r9, r0
+   6a704: 4640         	mov	r0, r8
+   6a706: f7c1 f829    	bl	0x2b75c <.text+0x2b75c> @ imm = #-0x3efae
+   6a70a: f8ca 5000    	str.w	r5, [r10]
+   6a70e: 2500         	movs	r5, #0x0
+   6a710: 4620         	mov	r0, r4
+   6a712: f7ff feba    	bl	0x6a48a <.text+0x6a48a> @ imm = #-0x28c
+   6a716: 4628         	mov	r0, r5
+   6a718: e8bd 0f08    	pop.w	{r3, r8, r9, r10, r11}
+   6a71c: bdf0         	pop	{r4, r5, r6, r7, pc}

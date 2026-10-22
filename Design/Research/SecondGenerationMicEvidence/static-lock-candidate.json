@@ -1,0 +1,21 @@
+{
+  "sha256": "66e98f7616856c4d76aafc547155f849c0c0812ec4e42ea6c2103f2c35e4a659",
+  "size": 669895,
+  "afu_offset_for_address_zero": 128,
+  "header_hex": "c7 a2 00 01 01 00 60 00 27 37 0a 00 13 d4 d2 0d 14 03 21 00 00 00 00 00 00 00 00 00 00 00 00 00",
+  "lock_entry_address": "0x952a8",
+  "lock_entry_bytes": "00 00 00 00 01 00 00 00 07 fc 09 00 00 00 01 00",
+  "lock_name_address": "0x9fc07",
+  "lock_name": "LOCK\u0000",
+  "get_branch_table_address": "0x56520",
+  "get_branch_table_halfwords": [
+    571,
+    571,
+    5,
+    428,
+    467
+  ],
+  "candidate_internal_report": "0x3c",
+  "candidate_branch_address": "0x5652a",
+  "caveat": "Static candidate only. BLE HID registration/request translation not yet verified. Do not probe from this output."
+}

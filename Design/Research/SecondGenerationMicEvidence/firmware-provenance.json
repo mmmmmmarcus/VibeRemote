@@ -1,0 +1,41 @@
+{
+  "source": {
+    "url": "https://updates.cdn-apple.com/2021/patches/001-49033/1EDE69F7-B784-4695-AFE6-625EEB869DB1/com_apple_MobileAsset_MobileAccessoryUpdate_WirelessRemoteFirmware_3/d03bc8447df70216eea80ee72aee487a8936298b.zip",
+    "zipSha256": "aec880ffb88fcadb0d2563c362439a4e5d10be2561243f2c1e857dcef311c34d"
+  },
+  "files": {
+    "gen2-9M6336.zip": {
+      "bytes": 465385,
+      "sha256": "aec880ffb88fcadb0d2563c362439a4e5d10be2561243f2c1e857dcef311c34d"
+    },
+    "p0x314-remote-v00060-hw0033-prod-signed.afu": {
+      "bytes": 669895,
+      "sha256": "66e98f7616856c4d76aafc547155f849c0c0812ec4e42ea6c2103f2c35e4a659"
+    },
+    "p0x314-mt-v0030-hw0033-prod-signed.afu": {
+      "bytes": 62880,
+      "sha256": "d51babd2a1bc592bb69660e02c14666fa460e4c5b5539cebda5fb35aee4c0ca4"
+    }
+  },
+  "metadata": {
+    "Info.plist": {
+      "CFBundleIdentifier": "com.apple.MobileAsset.MobileAccessoryUpdate.WirelessRemoteFirmware.3",
+      "CFBundleInfoDictionaryVersion": "6",
+      "CFBundleName": "WirelessRemoteFirmware_3",
+      "CFBundleShortVersionString": "1",
+      "CFBundleVersion": "1.0",
+      "MobileAssetProperties": {
+        "FirmwareVersions": {
+          "33": {
+            "1": 96,
+            "32": 48
+          }
+        },
+        "_CompatibilityVersion": 3,
+        "_ContentVersion": 61,
+        "__InstallWithOS": true
+      }
+    }
+  },
+  "note": "Downloaded for offline analysis only; not flashed. Installed image was not read back or hash compared."
+}

@@ -1,0 +1,203 @@
+# Offline B439 v0118 hw000A production; AFU SHA-256 9a2c3c002015ef5b11769c6c167a16a03829e5347ab971a4ee501f163022bbbc
+# Complete AFU offset 0 maps 08008000; Thumb-2. Data/literal words are not instructions.
+
+/Users/marcus.fei/Documents/SiriRemote-research/bir/B439.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+08008000 <.text>:
+ 802f1a8: f8d4 02f0    	ldr.w	r0, [r4, #0x2f0]
+ 802f1ac: 2805         	cmp	r0, #0x5
+ 802f1ae: f000 8083    	beq.w	0x802f2b8 <.text+0x272b8> @ imm = #0x106
+ 802f1b2: 2821         	cmp	r0, #0x21
+ 802f1b4: d072         	beq	0x802f29c <.text+0x2729c> @ imm = #0xe4
+ 802f1b6: 2828         	cmp	r0, #0x28
+ 802f1b8: f000 808c    	beq.w	0x802f2d4 <.text+0x272d4> @ imm = #0x118
+ 802f1bc: 2822         	cmp	r0, #0x22
+ 802f1be: f040 8097    	bne.w	0x802f2f0 <.text+0x272f0> @ imm = #0x12e
+ 802f1c2: 6860         	ldr	r0, [r4, #0x4]
+ 802f1c4: 2832         	cmp	r0, #0x32
+ 802f1c6: f2c0 8164    	blt.w	0x802f492 <.text+0x27492> @ imm = #0x2c8
+ 802f1ca: 28c8         	cmp	r0, #0xc8
+ 802f1cc: f2c0 8159    	blt.w	0x802f482 <.text+0x27482> @ imm = #0x2b2
+ 802f1d0: 488a         	ldr	r0, [pc, #0x228]        @ 0x802f3fc <.text+0x273fc>
+ 802f1d2: f44f 72b4    	mov.w	r2, #0x168
+ 802f1d6: 9000         	str	r0, [sp]
+ 802f1d8: 4887         	ldr	r0, [pc, #0x21c]        @ 0x802f3f8 <.text+0x273f8>
+ 802f1da: 4989         	ldr	r1, [pc, #0x224]        @ 0x802f400 <.text+0x27400>
+ 802f1dc: e156         	b	0x802f48c <.text+0x2748c> @ imm = #0x2ac
+
+
+/Users/marcus.fei/Documents/SiriRemote-research/bir/B439.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+08008000 <.text>:
+ 802f29c: 6860         	ldr	r0, [r4, #0x4]
+ 802f29e: 2832         	cmp	r0, #0x32
+ 802f2a0: f2c0 80eb    	blt.w	0x802f47a <.text+0x2747a> @ imm = #0x1d6
+ 802f2a4: 28c8         	cmp	r0, #0xc8
+ 802f2a6: f2c0 80e0    	blt.w	0x802f46a <.text+0x2746a> @ imm = #0x1c0
+ 802f2aa: 485d         	ldr	r0, [pc, #0x174]        @ 0x802f420 <.text+0x27420>
+ 802f2ac: f44f 72b9    	mov.w	r2, #0x172
+ 802f2b0: 9000         	str	r0, [sp]
+ 802f2b2: 4851         	ldr	r0, [pc, #0x144]        @ 0x802f3f8 <.text+0x273f8>
+ 802f2b4: 4952         	ldr	r1, [pc, #0x148]        @ 0x802f400 <.text+0x27400>
+ 802f2b6: e0dd         	b	0x802f474 <.text+0x27474> @ imm = #0x1ba
+ 802f2b8: 6860         	ldr	r0, [r4, #0x4]
+ 802f2ba: 2832         	cmp	r0, #0x32
+ 802f2bc: f2c0 80f5    	blt.w	0x802f4aa <.text+0x274aa> @ imm = #0x1ea
+ 802f2c0: 28c8         	cmp	r0, #0xc8
+ 802f2c2: f2c0 80ea    	blt.w	0x802f49a <.text+0x2749a> @ imm = #0x1d4
+ 802f2c6: 4857         	ldr	r0, [pc, #0x15c]        @ 0x802f424 <.text+0x27424>
+ 802f2c8: f240 126d    	movw	r2, #0x16d
+ 802f2cc: 9000         	str	r0, [sp]
+ 802f2ce: 484a         	ldr	r0, [pc, #0x128]        @ 0x802f3f8 <.text+0x273f8>
+ 802f2d0: 494b         	ldr	r1, [pc, #0x12c]        @ 0x802f400 <.text+0x27400>
+ 802f2d2: e0e7         	b	0x802f4a4 <.text+0x274a4> @ imm = #0x1ce
+ 802f2d4: 6860         	ldr	r0, [r4, #0x4]
+ 802f2d6: 2832         	cmp	r0, #0x32
+ 802f2d8: f2c0 80f7    	blt.w	0x802f4ca <.text+0x274ca> @ imm = #0x1ee
+ 802f2dc: 28c8         	cmp	r0, #0xc8
+ 802f2de: f2c0 80ec    	blt.w	0x802f4ba <.text+0x274ba> @ imm = #0x1d8
+ 802f2e2: 4851         	ldr	r0, [pc, #0x144]        @ 0x802f428 <.text+0x27428>
+ 802f2e4: f240 1277    	movw	r2, #0x177
+ 802f2e8: 9000         	str	r0, [sp]
+ 802f2ea: 4843         	ldr	r0, [pc, #0x10c]        @ 0x802f3f8 <.text+0x273f8>
+ 802f2ec: 4944         	ldr	r1, [pc, #0x110]        @ 0x802f400 <.text+0x27400>
+ 802f2ee: e0e9         	b	0x802f4c4 <.text+0x274c4> @ imm = #0x1d2
+ 802f2f0: 6860         	ldr	r0, [r4, #0x4]
+ 802f2f2: 2832         	cmp	r0, #0x32
+ 802f2f4: f2c0 80f1    	blt.w	0x802f4da <.text+0x274da> @ imm = #0x1e2
+ 802f2f8: 28c8         	cmp	r0, #0xc8
+ 802f2fa: f2c0 8105    	blt.w	0x802f508 <.text+0x27508> @ imm = #0x20a
+ 802f2fe: 484b         	ldr	r0, [pc, #0x12c]        @ 0x802f42c <.text+0x2742c>
+ 802f300: f44f 72c3    	mov.w	r2, #0x186
+ 802f304: 9000         	str	r0, [sp]
+ 802f306: 483c         	ldr	r0, [pc, #0xf0]         @ 0x802f3f8 <.text+0x273f8>
+ 802f308: 493d         	ldr	r1, [pc, #0xf4]         @ 0x802f400 <.text+0x27400>
+ 802f30a: 4b49         	ldr	r3, [pc, #0x124]        @ 0x802f430 <.text+0x27430>
+ 802f30c: e05d         	b	0x802f3ca <.text+0x273ca> @ imm = #0xba
+
+
+/Users/marcus.fei/Documents/SiriRemote-research/bir/B439.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+08008000 <.text>:
+ 802f46a: 48df         	ldr	r0, [pc, #0x37c]        @ 0x802f7e8 <.text+0x277e8>
+ 802f46c: 2100         	movs	r1, #0x0
+ 802f46e: 2200         	movs	r2, #0x0
+ 802f470: 9000         	str	r0, [sp]
+ 802f472: 48da         	ldr	r0, [pc, #0x368]        @ 0x802f7dc <.text+0x277dc>
+ 802f474: 4bdd         	ldr	r3, [pc, #0x374]        @ 0x802f7ec <.text+0x277ec>
+ 802f476: f01f f8e1    	bl	0x804e63c <.text+0x4663c> @ imm = #0x1f1c2
+ 802f47a: f8d4 00e8    	ldr.w	r0, [r4, #0xe8]
+ 802f47e: 210b         	movs	r1, #0xb
+ 802f480: e026         	b	0x802f4d0 <.text+0x274d0> @ imm = #0x4c
+ 802f482: 48db         	ldr	r0, [pc, #0x36c]        @ 0x802f7f0 <.text+0x277f0>
+ 802f484: 2100         	movs	r1, #0x0
+ 802f486: 2200         	movs	r2, #0x0
+ 802f488: 9000         	str	r0, [sp]
+ 802f48a: 48d4         	ldr	r0, [pc, #0x350]        @ 0x802f7dc <.text+0x277dc>
+ 802f48c: 4bd7         	ldr	r3, [pc, #0x35c]        @ 0x802f7ec <.text+0x277ec>
+ 802f48e: f01f f8d5    	bl	0x804e63c <.text+0x4663c> @ imm = #0x1f1aa
+ 802f492: 2500         	movs	r5, #0x0
+ 802f494: 4620         	mov	r0, r4
+ 802f496: 2103         	movs	r1, #0x3
+ 802f498: e00a         	b	0x802f4b0 <.text+0x274b0> @ imm = #0x14
+ 802f49a: 48d6         	ldr	r0, [pc, #0x358]        @ 0x802f7f4 <.text+0x277f4>
+ 802f49c: 2100         	movs	r1, #0x0
+ 802f49e: 2200         	movs	r2, #0x0
+ 802f4a0: 9000         	str	r0, [sp]
+ 802f4a2: 48ce         	ldr	r0, [pc, #0x338]        @ 0x802f7dc <.text+0x277dc>
+ 802f4a4: 4bd1         	ldr	r3, [pc, #0x344]        @ 0x802f7ec <.text+0x277ec>
+ 802f4a6: f01f f8c9    	bl	0x804e63c <.text+0x4663c> @ imm = #0x1f192
+ 802f4aa: 2500         	movs	r5, #0x0
+ 802f4ac: 4620         	mov	r0, r4
+ 802f4ae: 2100         	movs	r1, #0x0
+ 802f4b0: 2200         	movs	r2, #0x0
+ 802f4b2: 2300         	movs	r3, #0x0
+ 802f4b4: f02a fb68    	bl	0x8059b88 <.text+0x51b88> @ imm = #0x2a6d0
+ 802f4b8: e010         	b	0x802f4dc <.text+0x274dc> @ imm = #0x20
+ 802f4ba: 48cf         	ldr	r0, [pc, #0x33c]        @ 0x802f7f8 <.text+0x277f8>
+ 802f4bc: 2100         	movs	r1, #0x0
+ 802f4be: 2200         	movs	r2, #0x0
+ 802f4c0: 9000         	str	r0, [sp]
+ 802f4c2: 48c6         	ldr	r0, [pc, #0x318]        @ 0x802f7dc <.text+0x277dc>
+ 802f4c4: 4bc9         	ldr	r3, [pc, #0x324]        @ 0x802f7ec <.text+0x277ec>
+ 802f4c6: f01f f8b9    	bl	0x804e63c <.text+0x4663c> @ imm = #0x1f172
+ 802f4ca: f8d4 00e8    	ldr.w	r0, [r4, #0xe8]
+ 802f4ce: 210c         	movs	r1, #0xc
+ 802f4d0: 7842         	ldrb	r2, [r0, #0x1]
+ 802f4d2: 4620         	mov	r0, r4
+ 802f4d4: 2301         	movs	r3, #0x1
+ 802f4d6: f002 fd5b    	bl	0x8031f90 <.text+0x29f90> @ imm = #0x2ab6
+ 802f4da: 2500         	movs	r5, #0x0
+
+
+/Users/marcus.fei/Documents/SiriRemote-research/bir/B439.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+08008000 <.text>:
+ 802fa70: 4d74         	ldr	r5, [pc, #0x1d0]        @ 0x802fc44 <.text+0x27c44>
+ 802fa72: 4e75         	ldr	r6, [pc, #0x1d4]        @ 0x802fc48 <.text+0x27c48>
+ 802fa74: 4875         	ldr	r0, [pc, #0x1d4]        @ 0x802fc4c <.text+0x27c4c>
+ 802fa76: f04f 0800    	mov.w	r8, #0x0
+ 802fa7a: 9006         	str	r0, [sp, #0x18]
+ 802fa7c: 486f         	ldr	r0, [pc, #0x1bc]        @ 0x802fc3c <.text+0x27c3c>
+ 802fa7e: 9005         	str	r0, [sp, #0x14]
+ 802fa80: 4873         	ldr	r0, [pc, #0x1cc]        @ 0x802fc50 <.text+0x27c50>
+ 802fa82: 4683         	mov	r11, r0
+ 802fa84: e029         	b	0x802fada <.text+0x27ada> @ imm = #0x52
+ 802fa86: f855 9038    	ldr.w	r9, [r5, r8, lsl #3]
+ 802fa8a: f8d4 02f0    	ldr.w	r0, [r4, #0x2f0]
+ 802fa8e: 4581         	cmp	r9, r0
+ 802fa90: d121         	bne	0x802fad6 <.text+0x27ad6> @ imm = #0x42
+ 802fa92: 2100         	movs	r1, #0x0
+ 802fa94: 4650         	mov	r0, r10
+ 802fa96: f44f 727a    	mov.w	r2, #0x3e8
+ 802fa9a: 4633         	mov	r3, r6
+ 802fa9c: 9100         	str	r1, [sp]
+ 802fa9e: eb05 01c8    	add.w	r1, r5, r8, lsl #3
+ 802faa2: 6d40         	ldr	r0, [r0, #0x54]
+ 802faa4: 6849         	ldr	r1, [r1, #0x4]
+ 802faa6: 4351         	muls	r1, r2, r1
+ 802faa8: 220b         	movs	r2, #0xb
+ 802faaa: f015 fef5    	bl	0x8045898 <.text+0x3d898> @ imm = #0x15dea
+ 802faae: 6860         	ldr	r0, [r4, #0x4]
+ 802fab0: 2832         	cmp	r0, #0x32
+ 802fab2: db10         	blt	0x802fad6 <.text+0x27ad6> @ imm = #0x20
+ 802fab4: 28c8         	cmp	r0, #0xc8
+ 802fab6: db06         	blt	0x802fac6 <.text+0x27ac6> @ imm = #0xc
+ 802fab8: f8cd 9000    	str.w	r9, [sp]
+ 802fabc: f240 12e3    	movw	r2, #0x1e3
+ 802fac0: e9dd 1005    	ldrd	r1, r0, [sp, #20]
+ 802fac4: e004         	b	0x802fad0 <.text+0x27ad0> @ imm = #0x8
+ 802fac6: 9806         	ldr	r0, [sp, #0x18]
+ 802fac8: 2100         	movs	r1, #0x0
+ 802faca: 2200         	movs	r2, #0x0
+ 802facc: f8cd 9000    	str.w	r9, [sp]
+ 802fad0: 465b         	mov	r3, r11
+ 802fad2: f01e fdb3    	bl	0x804e63c <.text+0x4663c> @ imm = #0x1eb66
+ 802fad6: f108 0801    	add.w	r8, r8, #0x1
+ 802fada: f1b8 0f04    	cmp.w	r8, #0x4
+ 802fade: d1d2         	bne	0x802fa86 <.text+0x27a86> @ imm = #-0x5c
+
+
+/Users/marcus.fei/Documents/SiriRemote-research/bir/B439.elf:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+08008000 <.text>:
+ 80302f8: b580         	push	{r7, lr}
+ 80302fa: 466f         	mov	r7, sp
+ 80302fc: 4803         	ldr	r0, [pc, #0xc]          @ 0x803030c <.text+0x2830c>
+ 80302fe: 6980         	ldr	r0, [r0, #0x18]
+ 8030300: f500 7080    	add.w	r0, r0, #0x100
+ 8030304: f7dd fa52    	bl	0x800d7ac <.text+0x57ac> @ imm = #-0x22b5c
+ 8030308: 2000         	movs	r0, #0x0
+ 803030a: bd80         	pop	{r7, pc}
+ 803030c: 27f0         	movs	r7, #0xf0
+ 803030e: 2000         	movs	r0, #0x0

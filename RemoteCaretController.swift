@@ -922,8 +922,18 @@ final class RemoteCaretController {
     }
     private func makeMarkerGeometry(_ editor: Editor) -> MarkerGeometry? {
         var candidate: AXUIElement? = editor.element
-        for _ in 0..<6 {
+        // Lark's composer sits below several layout groups; its Chromium web
+        // area (the text-marker provider) can be beyond the former six-level
+        // limit. Walk ancestors only, with both depth and elapsed-time bounds.
+        // Every provider must still return this exact editor's text: never use
+        // document-wide offsets or another chat's text as insertion geometry.
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.15
+        var visited: [AXUIElement] = []
+        for depth in 0..<24 {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
             guard let provider = candidate else { break }
+            guard !visited.contains(where: { CFEqual($0, provider) }) else { break }
+            visited.append(provider)
             AXUIElementSetMessagingTimeout(provider, 0.015)
             if let raw = attribute(provider, "AXTextMarkerRangeForUIElement", editor.element),
                CFGetTypeID(raw) == AXTextMarkerRangeGetTypeID(),
@@ -947,7 +957,7 @@ final class RemoteCaretController {
                 let context = MarkerGeometry(element: editor.element, provider: provider,
                                              navigator: CaretMarkerNavigator(text: editor.text, markers: markers))
                 seedTextLeafMarkers(in: context, editorRange: range)
-                entryDiagnostic("verified editor-local text markers")
+                entryDiagnostic("verified editor-local text markers at ancestor depth=\(depth)")
                 return context
             }
             guard let parent = attribute(provider, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }

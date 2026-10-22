@@ -1,0 +1,93 @@
+{
+  "date": "2026-10-13",
+  "os": "macOS 27.0.1 (26A434)",
+  "baseline": "8bfe7b7e632b0f75d545371b9316b45638ddc793",
+  "connected_physical_remotes": 1,
+  "address_redacted": true,
+  "remote_usb_interfaces_observed": 0,
+  "interfaces": [
+    {
+      "IORegistryEntryID": 4295051290,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 13,
+      "PrimaryUsage": 1,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051291,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 12,
+      "PrimaryUsage": 265,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051293,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 12,
+      "PrimaryUsage": 1,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051292,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 65280,
+      "PrimaryUsage": 11,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051322,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 32,
+      "PrimaryUsage": 66,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051321,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 32,
+      "PrimaryUsage": 224,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    },
+    {
+      "IORegistryEntryID": 4295051320,
+      "VendorID": 76,
+      "ProductID": 788,
+      "Transport": "Bluetooth Low Energy",
+      "PrimaryUsagePage": 12,
+      "PrimaryUsage": 4,
+      "kBTHardwareRevisionKey": "0x0021",
+      "kBTFirmwareRevisionKey": "0x0060"
+    }
+  ],
+  "lock_read_attempted": false,
+  "lock_value": null,
+  "reason": "Different firmware; candidate host request mapping not yet verified. No HID reports sent by research tools. Registry IDs are a historical snapshot, never reuse.",
+  "final_process_observation": [
+    "335 Core Audio Driver (VibeRemoteAudio.driver)",
+    "403 /Library/PrivilegedHelperTools/com.apple.bluetooth.PacketLoggerHelper",
+    "25793 /Applications/VibeRemote.app/Contents/MacOS/VibeRemote",
+    "36343 /Applications/VibeRemote.app/Contents/Resources/SiriRemoteVoiceControl/VibeRemoteVoiceBridge",
+    "36399 /Applications/VibeRemote.app/Contents/Resources/PacketLogger.app/Contents/Resources/packetlogger",
+    "83778 Contents/MacOS/VibeRemoteHelper"
+  ],
+  "app_lifecycle_changed_by_research": false,
+  "audio_render_verified": false
+}
