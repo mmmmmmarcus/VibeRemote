@@ -970,6 +970,8 @@ final class ModelTests: XCTestCase {
                 let renderer = SCNRenderer(device: nil, options: nil)
                 renderer.scene = modelView.scene
                 renderer.pointOfView = modelView.pointOfView
+                // Prepare materials before the first offscreen Metal snapshot.
+                _ = renderer.prepare(try XCTUnwrap(modelView.scene), shouldAbortBlock: nil)
                 let modelImage = renderer.snapshot(atTime: 0, with: NSSize(width: modelView.bounds.width * 2, height: modelView.bounds.height * 2), antialiasingMode: .multisampling4X)
                 var rect = modelView.convert(modelView.bounds, to: frame)
                 if frame.isFlipped { rect.origin.y = frame.bounds.height - rect.maxY }
@@ -985,6 +987,28 @@ final class ModelTests: XCTestCase {
         window.close()
         XCTAssertTrue(controller.window === window)
         XCTAssertFalse(window.isReleasedWhenClosed)
+    }
+
+    @MainActor
+    func testRemotePreviewKeepsBothModelsInsideFrameDuringDrag() throws {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let scene = try RemoteModelScene.make(generation: generation)
+            let remote = try XCTUnwrap(scene.rootNode.childNode(withName: "remote", recursively: false))
+            let (low, high) = remote.boundingBox
+            let halfHeight = CGFloat(RemoteModelScene.cameraHalfHeight)
+            let halfWidth = halfHeight * RemoteModelScene.previewWidth / RemoteModelScene.previewHeight
+            for pitch: CGFloat in [-0.35, 0, 0.35] {
+                for yaw: CGFloat in [-1.25, 0, 1.25] {
+                    remote.eulerAngles = SCNVector3(CGFloat(RemoteModelScene.restingAngles.x) + pitch,
+                        CGFloat(RemoteModelScene.restingAngles.y) + yaw, 0)
+                    for x in [low.x, high.x] { for y in [low.y, high.y] { for z in [low.z, high.z] {
+                        let point = remote.convertPosition(SCNVector3(x, y, z), to: nil)
+                        XCTAssertLessThan(abs(CGFloat(point.x)), halfWidth - 8, "Keep horizontal clearance during rotation")
+                        XCTAssertLessThan(abs(CGFloat(point.y)), halfHeight - 8, "Keep top/bottom clearance during rotation")
+                    } } }
+                }
+            }
+        }
     }
 
     func testSettingsArtworkAndButtonLayoutsRemainGenerationSpecific() throws {

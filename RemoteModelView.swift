@@ -6,6 +6,14 @@ import SwiftUI
 /// solid and face color; only the display coordinate system and uniform scale change.
 @MainActor
 enum RemoteModelScene {
+    // Keep the CAD comfortably inside the viewport at every supported drag angle.
+    static let previewHeight: CGFloat = 280
+    static let previewWidth: CGFloat = 144
+    static let cameraHalfHeight: Double = 240
+    static func guideY(_ referenceY: CGFloat) -> CGFloat {
+        previewHeight / 2 + (referenceY - 199) * previewHeight / CGFloat(cameraHalfHeight * 2)
+    }
+
     static let restingAngles = SCNVector3(0.025, -0.24, 0)
 
     static func make(generation: RemoteGeneration, bundle: Bundle = SettingsAssets.bundle) throws -> SCNScene {
@@ -103,7 +111,7 @@ enum RemoteModelScene {
         camera.name = "camera"
         camera.camera = SCNCamera()
         camera.camera?.usesOrthographicProjection = true
-        camera.camera?.orthographicScale = 203
+        camera.camera?.orthographicScale = cameraHalfHeight
         camera.camera?.wantsHDR = true
         camera.camera?.exposureOffset = -0.5
         camera.camera?.zNear = 1

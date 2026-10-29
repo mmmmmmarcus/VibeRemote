@@ -17,7 +17,7 @@ Keep a secure backup using Sparkle's documented key management process.
 2. Build a Developer ID signed and notarized bundle:
 
    ```sh
-   APP_VERSION=0.3.0 BUILD_NUMBER=3 SIGNING_MODE=release \
+   APP_VERSION=0.3.1 BUILD_NUMBER=5 SIGNING_MODE=release \
    CODESIGN_IDENTITY='Developer ID Application: <your identity>' \
    NOTARY_PROFILE=NM_NOTARY ./create_app_bundle.sh
    ```
@@ -28,8 +28,8 @@ Keep a secure backup using Sparkle's documented key management process.
 4. Review the archive and appcast. For builds containing the GPL audio driver,
    include its corresponding source (see THIRD_PARTY_NOTICES.md); do not publish
    Apple's PacketLogger without a separate redistribution review.
-5. Publish a normal GitHub Release tagged `v0.3.0` with both generated assets:
-   `VibeRemote-0.3.0-3.zip` and `appcast.xml`. The feed URL is the stable
+5. Publish a normal GitHub Release tagged `v0.3.1` with both generated assets:
+   `VibeRemote-0.3.1-5.zip` and `appcast.xml`. The feed URL is the stable
    `releases/latest/download/appcast.xml` redirect. Each archive uses an immutable
    version-tagged URL. Keep every published archive available.
 6. On a separate older signed installation, check, download, install and relaunch.

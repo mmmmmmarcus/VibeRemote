@@ -3,7 +3,7 @@ import Combine
 import Sparkle
 
 @MainActor
-final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation {
+final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation, NSToolbarItemValidation {
     static let shared = AppUpdater()
     @Published private(set) var canCheck = false
     @Published private(set) var automaticallyChecks = false
@@ -28,6 +28,8 @@ final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation {
         guard canCheck else { return }
         controller?.checkForUpdates(sender)
     }
+
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool { canCheck }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { canCheck }
 

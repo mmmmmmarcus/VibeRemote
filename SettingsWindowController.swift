@@ -145,7 +145,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         self.diagnosticsMenu = diagnosticsMenu
         self.showOnboarding = showOnboarding
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 800),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 660),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -160,7 +160,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("VibeRemote.Settings.Stacked")
+        window.setFrameAutosaveName("VibeRemote.Settings.CompactStacked")
         let hosting = NSHostingController(rootView: RemoteSettingsView(
             model: model,
             setSiriAction: setSiriAction,
@@ -199,11 +199,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 640, height: 800))
+        window.setContentSize(NSSize(width: 640, height: 660))
         // Keep the stacked layout below the transparent toolbar. The full content scrolls
         // on smaller screens, so the update controls always remain reachable.
         window.styleMask.insert(.fullSizeContentView)
-        if !window.setFrameUsingName("VibeRemote.Settings.Stacked") {
+        if !window.setFrameUsingName("VibeRemote.Settings.CompactStacked") {
             window.center()
         }
         update(snapshot)
@@ -242,7 +242,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.moreIdentifier]
+        [.flexibleSpace, NSToolbarItem.Identifier("VibeRemote.CheckForUpdates"), Self.moreIdentifier]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -254,6 +254,19 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
+        if itemIdentifier.rawValue == "VibeRemote.CheckForUpdates" {
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Check for Updates…"
+            item.toolTip = "Check for Updates…"
+            item.target = AppUpdater.shared
+            item.action = #selector(AppUpdater.checkForUpdates(_:))
+            let button = NSButton(title: item.label, target: AppUpdater.shared,
+                                  action: #selector(AppUpdater.checkForUpdates(_:)))
+            button.bezelStyle = .texturedRounded
+            button.setAccessibilityIdentifier("settings.updates.check")
+            item.view = button
+            return item
+        }
         guard itemIdentifier == Self.moreIdentifier else { return nil }
         // Let AppKit supply the toolbar's glass button and anchored system menu.
         // Only Reset is disabled at defaults; the More menu remains available.
@@ -306,7 +319,7 @@ private struct RemoteSettingsView: View {
                     HStack(alignment: .top, spacing: 0) {
                         callouts(layout.left, side: .left)
                         RemoteModelView(generation: model.snapshot.generation)
-                            .frame(width: 144, height: 398)
+                            .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
                             .accessibilityLabel(model.snapshot.generation.displayName)
                         callouts(layout.right, side: .right)
                     }
@@ -355,10 +368,6 @@ private struct RemoteSettingsView: View {
                         Toggle("Check automatically", isOn: Binding(
                             get: { updater.automaticallyChecks }, set: { value in updater.setAutomaticallyChecks(value) }
                         )).accessibilityIdentifier("settings.updates.automatic")
-                        Spacer()
-                        Button("Check for Updates…") { updater.checkForUpdates() }
-                            .disabled(!updater.canCheck)
-                            .accessibilityIdentifier("settings.updates.check")
                     }
                 }
                 .font(.system(size: 13))
@@ -374,9 +383,9 @@ private struct RemoteSettingsView: View {
     private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
         ZStack(alignment: .topLeading) {
             ForEach(items) { item in
-                callout(item.key, side: side).offset(y: item.centerY - 17)
+                callout(item.key, side: side).offset(y: RemoteModelScene.guideY(item.centerY) - 17)
             }
-        }.frame(width: 180, height: 398, alignment: .topLeading)
+        }.frame(width: 180, height: RemoteModelScene.previewHeight, alignment: .topLeading)
     }
 
     private func callout(_ key: String, side: Side) -> some View {
