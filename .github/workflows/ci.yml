@@ -13,6 +13,8 @@ jobs:
         run: swift --version
       - name: Build
         run: swift build
+      - name: Enable motion for animation tests
+        run: defaults write com.apple.universalaccess reduceMotion -bool false
       - name: Test
         run: swift test
       - name: Concurrency diagnostics

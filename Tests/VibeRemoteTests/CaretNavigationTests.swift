@@ -732,7 +732,13 @@ final class CaretNavigationTests: XCTestCase {
         for (index, stage) in stages.enumerated() {
             canvas.opacity = 1; canvas.expansion = stage.0; canvas.lean = stage.1; canvas.symbolOpacity = stage.2
             XCTAssertEqual(canvas.stemRect, stem)
-            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+            // Use a fixed Retina raster so headless 1x runners and local 2x screens
+            // exercise the same subpixel seam assertions.
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil,
+                pixelsWide: Int(canvas.bounds.width * 2), pixelsHigh: Int(canvas.bounds.height * 2),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            bitmap.size = canvas.bounds.size
             canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
             for x in [0, bitmap.pixelsWide - 1] {
                 for y in 0..<bitmap.pixelsHigh { XCTAssertLessThan(bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0, 0.01) }
