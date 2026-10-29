@@ -1003,6 +1003,18 @@ final class ModelTests: XCTestCase {
 
 
 
+    func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            for action in ButtonAction.allCases where action.isAssignableToSiriButton {
+                let snapshot = RemoteSettingsSnapshot(connected: true, batteryPercent: 59,
+                                                      siriAction: action, generation: generation)
+                XCTAssertEqual(RemoteSettingsGuide.title(for: "siri", snapshot: snapshot), action.settingsTitle)
+                XCTAssertEqual(RemoteButtonMapping.action(button: "siri", generation: generation,
+                                                         siriAction: action), action)
+            }
+        }
+    }
+
     func testSettingsNeverShowAStaleBatteryAsAConnection() {
         var snapshot = RemoteSettingsSnapshot(connected: false, batteryPercent: 59, siriAction: .spaceKey)
         XCTAssertEqual(snapshot.connectionText, "DISCONNECTED")

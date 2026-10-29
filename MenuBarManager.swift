@@ -217,9 +217,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
     private var diagnosticsMenu = NSMenu()
-    var onCommandInput: (() -> Void)?
-    @objc private func openCommandInput() { onCommandInput?() }
     private var settingsWindowController: SettingsWindowController?
+    private var onboardingWindowController: OnboardingWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
     private static let siriButtonKey = "siri"
@@ -419,12 +418,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "VibeRemote")
-        let command = NSMenuItem(title: "Command…", action: #selector(openCommandInput), keyEquivalent: "")
-        command.target = self
-        appMenu.addItem(command)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
+        appMenu.addItem(AppUpdater.shared.makeMenuItem())
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide VibeRemote", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -464,6 +461,29 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
 
 
+    private var onboardingAccess: OnboardingAccess {
+        OnboardingAccess(bluetooth: bluetoothAccessState == .allowed,
+                         input: inputAccessIsReady, accessibility: remoteControlState == .ready)
+    }
+
+    func showOnboardingIfNeeded() {
+        if OnboardingState.needsPresentation() { showOnboarding() }
+    }
+
+    func showOnboarding() {
+        statusRefreshHandler?()
+        // A new guide starts from the current choice without changing it until Finish.
+        if onboardingWindowController?.window?.isVisible != true && onboardingWindowController?.window?.isMiniaturized != true {
+            onboardingWindowController = OnboardingWindowController(
+                snapshot: settingsSnapshot, access: onboardingAccess,
+                requestBluetooth: { [weak self] in self?.requestBluetoothAccessHandler?() },
+                requestInput: { [weak self] in self?.requestInputAccessHandler?() },
+                requestAccessibility: { [weak self] in self?.requestControlAccessHandler?() },
+                finish: { [weak self] action in self?.setSiriButtonAction(action) })
+        }
+        onboardingWindowController?.show()
+    }
+
     @objc func showSettings() {
         rmDebug("⚙️ Settings window requested")
         statusRefreshHandler?()
@@ -479,10 +499,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
                 audioSettingsMenu: makeAudioOutputMenu(),
-                diagnosticsMenu: diagnosticsMenu
+                diagnosticsMenu: diagnosticsMenu,
+                showOnboarding: { [weak self] in self?.showOnboarding() }
             )
         }
         settingsWindowController?.update(settingsSnapshot)
+        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
         settingsWindowController?.show()
     }
 
@@ -616,18 +638,17 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
         settingsWindowController?.update(settingsSnapshot)
+        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
         menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus))
         menu.addItem(.separator())
 
-        let commandItem = NSMenuItem(title: "Command…", action: #selector(openCommandInput), keyEquivalent: "")
-        commandItem.target = self
-        menu.addItem(commandItem)
         // Settings must remain reachable before pairing and while the remote sleeps.
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        menu.addItem(AppUpdater.shared.makeMenuItem())
         menu.addItem(.separator())
         updateStatusIcon(microphoneStatus: microphoneStatus)
 

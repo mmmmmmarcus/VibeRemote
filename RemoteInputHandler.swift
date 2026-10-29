@@ -925,16 +925,6 @@ final class RemoteInputHandler {
         )
     }
 
-    /// The gate retains physical Siri-down time, rather than the delayed mapping time,
-    /// so voice-drained completion still matches the correct physical audio session.
-    func performDeferredSiri(pressed: Bool, generation: RemoteGeneration, physicalStart: Date) {
-        let action = menuBarManager?.getMapping(for: "siri", generation: generation) ?? .none
-        executeAction(action, button: "siri", pressed: pressed, generation: generation)
-        if pressed, action.requiresHold { siriHoldStartedAt = physicalStart }
-    }
-
-    func releaseSiriForCommand() { releaseHeldKey(for: "siri") }
-
     // MARK: - Button Identification
 
     /// Pure internal mapping so tests can verify that unknown vendor-defined usages are ignored.

@@ -11,8 +11,8 @@ ENTITLEMENTS="${APP_NAME}.entitlements"
 ICON_SOURCE="${APP_NAME}.icon"
 ICON_INFO_PLIST="$ROOT_DIR/.build/app-icon-info.plist"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.viberemote.app}"
-APP_VERSION="${APP_VERSION:-0.2.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+APP_VERSION="${APP_VERSION:-0.3.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-3}"
 SIGNING_MODE="${SIGNING_MODE:-local}"
 INCLUDE_VOICE_HELPER="${INCLUDE_VOICE_HELPER:-1}"
 
@@ -68,7 +68,8 @@ fi
 
 echo "Creating app bundle: $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
-mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
+mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources" "${APP_BUNDLE}/Contents/Frameworks"
+ditto ".build/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
 cp "$APP_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
 
@@ -193,6 +194,8 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+python3 scripts/configure-updates.py "${APP_BUNDLE}/Contents/Info.plist"
+
 /usr/libexec/PlistBuddy -c "Merge $ICON_INFO_PLIST" "${APP_BUNDLE}/Contents/Info.plist"
 plutil -lint "${APP_BUNDLE}/Contents/Info.plist" "$ENTITLEMENTS"
 chmod 755 "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
@@ -201,6 +204,8 @@ timestamp_args=(--timestamp=none)
 if [ "$signing_identity" != "-" ]; then
     timestamp_args=(--timestamp)
 fi
+
+python3 scripts/sign-sparkle.py "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" "$signing_identity"
 
 helper="${voice_resources}/VibeRemoteVoiceBridge"
 if [ -f "$helper" ]; then

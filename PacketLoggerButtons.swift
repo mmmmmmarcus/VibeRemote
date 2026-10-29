@@ -15,7 +15,7 @@ private struct PacketCaptureFileState {
     }
 }
 
-enum PacketLoggerLineRoute: Equatable {
+enum PacketLoggerLineRoute: Equatable, Sendable {
     case buttons
     case touch
     case irrelevant
@@ -48,7 +48,7 @@ enum PacketLoggerLineRoute: Equatable {
 /// Old-remote 0023 reports are never interpreted as button masks; only their
 /// narrowly framed 0x32 touch payloads are decoded by `touch` below.
 struct PacketLoggerButtonParser {
-    struct Edge: Equatable {
+    struct Edge: Equatable, Sendable {
         let button: String
         let pressed: Bool
         let sender: UInt64
@@ -128,75 +128,224 @@ struct PacketLoggerButtonParser {
 
 }
 
-/// Bounded reads of the private capture file: never opens a remote HID/GATT interface.
-/// Inode/truncation changes reset button state; timestamps reject PacketLogger replay.
+/// Main-thread delivery preserves ordering with the NX event tap. In particular,
+/// pollNow is a serial-worker barrier: queued capture edges are delivered before
+/// MediaKeyInterceptor resolves its 160 ms deferred native event.
 @MainActor
 final class PacketLoggerButtonMonitor {
-    private static let maximumCaptureBytes: UInt64 = 32 * 1024 * 1024
     var onEdge: ((PacketLoggerButtonParser.Edge) -> Void)?
     var onTouch: ((RemoteTextTouchFrame) -> Void)?
     var onReset: (() -> Void)?
-    private var timer: Timer?
+    private var worker: PacketCaptureReader?
+    private var labelsTimer: Timer?
+    private let labelProvider: (() -> Set<String>)?
+    private var labels: Set<String> = []
+
+    init(labelProvider: (() -> Set<String>)? = nil) { self.labelProvider = labelProvider }
+    var isReadingCapture: Bool { worker?.isReading ?? false }
+    var capturePollCount: Int { worker?.pollCount ?? 0 }
+
+    func start(path: String) {
+        guard worker == nil else { return }
+        refreshLabels()
+        let reader = PacketCaptureReader(path: path, labels: labels) { [weak self] in
+            DispatchQueue.main.async { self?.deliverPending() }
+        }
+        worker = reader
+        reader.start()
+        rmDebug("PacketLogger button monitor started: \(path)")
+        // Device inventory is independent of file traffic. No Bluetooth work on
+        // every capture notification, and no persistent high-frequency main timer.
+        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshLabels() }
+        }
+        timer.tolerance = 1
+        labelsTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stop() {
+        labelsTimer?.invalidate(); labelsTimer = nil
+        worker?.stop(); worker = nil
+        onReset?()
+    }
+
+    func pollNow() {
+        if labelProvider != nil { refreshLabels() }
+        worker?.pollNow()
+        deliverPending()
+    }
+
+    private func refreshLabels() {
+        let updated: Set<String>
+        if let labelProvider { updated = labelProvider() }
+        else {
+            guard CBManager.authorization == .allowedAlways else { return }
+            let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+            let allLabels = devices.compactMap { $0.name }.map { String($0.prefix(17)) }
+            updated = Set(devices.compactMap { device -> String? in
+                guard let name = device.name, name.lowercased().contains("remote") || name.lowercased().contains("siri") else { return nil }
+                let label = String(name.prefix(17))
+                return allLabels.filter { $0 == label }.count == 1 ? label : nil
+            })
+        }
+        if labels != updated {
+            labels = updated
+            rmDebug("PacketLogger button sources: \(labels.sorted())")
+        }
+        worker?.updateLabels(labels)
+    }
+
+    private func deliverPending() {
+        guard let worker else { return }
+        for delivery in worker.takeDeliveries() {
+            // A callback can stop/restart capture. Never deliver the old reader's
+            // remaining events into the new session.
+            guard self.worker === worker else { break }
+            switch delivery {
+            case .reset: onReset?()
+            case .edge(let edge): onEdge?(edge)
+            case .touch(let frame): onTouch?(frame)
+            }
+        }
+    }
+}
+
+/// All mutable state is confined to queue. It never calls main synchronously;
+/// the main facade can therefore safely flush it before NX source matching.
+private final class PacketCaptureReader: @unchecked Sendable {
+    enum Delivery: Sendable {
+        case reset
+        case edge(PacketLoggerButtonParser.Edge)
+        case touch(RemoteTextTouchFrame)
+    }
+    private static let maximumCaptureBytes: UInt64 = 32 * 1024 * 1024
+    private let queue = DispatchQueue(label: "com.viberemote.capture-reader", qos: .userInitiated)
+    private let path: String
+    private let notify: @Sendable () -> Void
+    private let startedAt = Date()
+    private var labels: Set<String>
     private var reader: FileHandle?
     private var inode: UInt64?
     private var offset: UInt64 = 0
     private var pending = Data()
     private var parser = PacketLoggerButtonParser()
-    private var labels: Set<String> = []
-    private var labelsUpdated = Date.distantPast
-    private var startedAt = Date()
-    private var path: String?
     private var loggedTouchStream = false
-    private let labelProvider: (() -> Set<String>)?
-    init(labelProvider: (() -> Set<String>)? = nil) {
-        self.labelProvider = labelProvider
-    }
-    var isReadingCapture: Bool { reader != nil }
-    func pollNow() { if let path { poll(path: path) } }
+    private var source: DispatchSourceFileSystemObject?
+    private var fallback: DispatchSourceTimer?
+    private var scheduledRead: DispatchWorkItem?
+    private var running = false
+    private var deliveries: [Delivery] = []
+    private let output = DeliveryBuffer()
+    private var polls = 0
 
-    func start(path: String) {
-        guard timer == nil else { return }
-        startedAt = Date()
-        self.path = path
-        rmDebug("PacketLogger button monitor started: \(path)")
-        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.poll(path: path) }
+    /// Main delivery never waits for file I/O or parser work. Only the explicit
+    /// NX pollNow barrier waits on queue; this lock protects a small value buffer.
+    private final class DeliveryBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Delivery] = []
+        private var scheduled = false
+        private var reading = false
+        var isReading: Bool { lock.lock(); defer { lock.unlock() }; return reading }
+        func setReading(_ value: Bool) { lock.lock(); reading = value; lock.unlock() }
+        func append(_ batch: [Delivery]) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            values.append(contentsOf: batch)
+            // A stalled main runloop cannot build unbounded buffered touch data.
+            // A dropped batch resets held buttons and gestures before new data.
+            if values.count > 4096 { values = [.reset] }
+            guard !values.isEmpty, !scheduled else { return false }
+            scheduled = true
+            return true
         }
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        func take() -> [Delivery] {
+            lock.lock(); defer { lock.unlock() }
+            let result = values
+            values.removeAll(keepingCapacity: true); scheduled = false
+            return result
+        }
+    }
+
+    init(path: String, labels: Set<String>, notify: @escaping @Sendable () -> Void) {
+        self.path = path; self.labels = labels; self.notify = notify
+    }
+    var isReading: Bool { output.isReading }
+    var pollCount: Int { queue.sync { polls } }
+    func updateLabels(_ labels: Set<String>) { queue.async { self.labels = labels } }
+    func start() {
+        queue.async {
+            self.running = true
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.setEventHandler { [weak self] in self?.readAndNotify() }
+            self.fallback = timer
+            self.scheduleFallback(open: false)
+            timer.resume()
+            self.readAndNotify()
+        }
     }
     func stop() {
-        timer?.invalidate(); timer = nil; path = nil
-        resetReader()
+        queue.sync {
+            running = false
+            scheduledRead?.cancel(); scheduledRead = nil
+            fallback?.cancel(); fallback = nil
+            resetReader(); deliveries.removeAll(); _ = output.take()
+        }
+    }
+    func pollNow() { queue.sync { readAndNotify() } }
+    func takeDeliveries() -> [Delivery] { output.take() }
+    private func scheduleFallback(open: Bool) {
+        // Notification is primary. A one-second safety check catches lost events
+        // or path replacement; denied/missing opens retry in 100 ms so a new
+        // capture still arrives within the existing 180 ms touch freshness bound.
+        let interval: DispatchTimeInterval = open ? .seconds(1) : .milliseconds(100)
+        fallback?.schedule(deadline: .now() + interval, repeating: interval,
+                           leeway: open ? .milliseconds(100) : .milliseconds(10))
+    }
+    private func watch(descriptor: Int32) {
+        let watched = Darwin.dup(descriptor)
+        guard watched >= 0 else { return }
+        // dup clears FD_CLOEXEC; command/helper launches must not inherit this fd.
+        guard Darwin.fcntl(watched, F_SETFD, FD_CLOEXEC) == 0 else {
+            Darwin.close(watched); return
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: watched,
+            eventMask: [.write, .extend, .attrib, .rename, .delete, .revoke], queue: queue)
+        source.setEventHandler { [weak self] in
+            guard let self, self.running, self.scheduledRead == nil else { return }
+            // Coalesce Bluetooth bursts without postponing indefinitely. The
+            // former 20 ms cadence is retained as an upper batching delay.
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.scheduledRead = nil; self.readAndNotify()
+            }
+            self.scheduledRead = work
+            self.queue.asyncAfter(deadline: .now() + .milliseconds(20), execute: work)
+        }
+        source.setCancelHandler { Darwin.close(watched) }
+        self.source = source
+        source.resume()
     }
     private func resetReader() {
+        source?.cancel(); source = nil
         try? reader?.close(); reader = nil; inode = nil; offset = 0
+        output.setReading(false)
         loggedTouchStream = false
-        pending.removeAll(); parser = PacketLoggerButtonParser(); onReset?()
+        pending.removeAll(); parser = PacketLoggerButtonParser()
+        deliveries.append(.reset)
+        if running { scheduleFallback(open: false) }
     }
-    private func poll(path: String) {
+    private func readAndNotify() {
+        guard running else { return }
+        polls += 1
+        poll()
+        let shouldNotify = output.append(deliveries)
+        deliveries.removeAll(keepingCapacity: true)
+        if shouldNotify { notify() }
+    }
+    private func poll() {
         let now = Date()
-        if let labelProvider { labels = labelProvider() }
-        if labelProvider == nil, now.timeIntervalSince(labelsUpdated) > 15, CBManager.authorization == .allowedAlways {
-            let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
-            // PacketLogger truncates names to 17 characters. Ambiguous labels fail closed.
-            let allLabels = devices.compactMap { $0.name }.map { String($0.prefix(17)) }
-            let updatedLabels = Set(devices.compactMap { device -> String? in
-                guard let name = device.name, name.lowercased().contains("remote") || name.lowercased().contains("siri") else { return nil }
-                let label = String(name.prefix(17))
-                return allLabels.filter { $0 == label }.count == 1 ? label : nil
-            })
-            if labels != updatedLabels {
-                labels = updatedLabels
-                rmDebug("PacketLogger button sources: \(labels.sorted())")
-            }
-            labelsUpdated = now
-        }
-        // This runs at the touch-report cadence. Foundation's full attribute lookup also
-        // fetches extended attributes and user/group metadata, which made an idle app burn
-        // several percent CPU. lstat supplies the two fields needed for replacement and
-        // truncation detection without that extra filesystem work. Reject symlinks here;
-        // the privileged supervisor creates a regular, user-owned capture file.
+        // Metadata and parsing stay on this serial queue. Reject symlinks before
+        // opening the private capture; the supervisor creates a regular file.
         guard let state = PacketCaptureFileState.read(path: path) else {
             if reader != nil { resetReader() }; return
         }
@@ -221,6 +370,9 @@ final class PacketLoggerButtonMonitor {
             }
             let opened = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             reader = opened
+            output.setReading(true)
+            watch(descriptor: descriptor)
+            scheduleFallback(open: source != nil)
             rmDebug("PacketLogger button reader opened: inode=\(id) size=\(size)")
         }
         if size > Self.maximumCaptureBytes, let reader {
@@ -239,7 +391,7 @@ final class PacketLoggerButtonMonitor {
             // After a stall skip a large backlog rather than block the main event tap.
             if size - offset > 65536 {
                 offset = size - 65536; try reader.seek(toOffset: offset)
-                pending.removeAll(); parser = PacketLoggerButtonParser(); onReset?()
+                pending.removeAll(); parser = PacketLoggerButtonParser(); deliveries.append(.reset)
                 let data = try reader.read(upToCount: 65536) ?? Data()
                 offset += UInt64(data.count)
                 if let newline = data.firstIndex(of: 10) { pending.append(data.suffix(from: data.index(after: newline))) }
@@ -258,7 +410,7 @@ final class PacketLoggerButtonMonitor {
                 case .buttons:
                     guard let line else { continue }
                     let edges = parser.events(line: line, allowedLabels: labels, now: now)
-                    for edge in edges where edge.capturedAt >= startedAt { onEdge?(edge) }
+                    for edge in edges where edge.capturedAt >= startedAt { deliveries.append(.edge(edge)) }
                 case .touch:
                     guard let line else { continue }
                     if let touch = parser.touch(line: line, allowedLabels: labels, now: now),
@@ -267,7 +419,7 @@ final class PacketLoggerButtonMonitor {
                             loggedTouchStream = true
                             rmDebug("PacketLogger touch stream received: source=\(touch.sender) captureAgeMs=\(Int(now.timeIntervalSince(touch.time) * 1000))")
                         }
-                        onTouch?(touch)
+                        deliveries.append(.touch(touch))
                     }
                 case .irrelevant:
                     break

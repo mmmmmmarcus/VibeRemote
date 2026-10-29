@@ -66,7 +66,7 @@ struct RemoteSettingsLayout {
 enum RemoteSettingsGuide {
     static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
 
-        if key == "siri" { return "Command / Hold: \(snapshot.siriAction.settingsTitle)" }
+        if key == "siri" { return snapshot.siriAction.settingsTitle }
         if key == "touch.edit" { return "Slide to position caret" }
         if key == "select" {
             return snapshot.generation == .glassTouchSurface
@@ -127,6 +127,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     private var resetItem: NSMenuItem?
     private let audioSettingsMenu: NSMenu?
     private let diagnosticsMenu: NSMenu?
+    private let showOnboarding: () -> Void
 
     init(
         snapshot: RemoteSettingsSnapshot,
@@ -134,15 +135,17 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         resetSiriAction: @escaping () -> Void,
         setIdleTimeout: @escaping (RemoteIdleTimeout) -> Void = { _ in },
         audioSettingsMenu: NSMenu? = nil,
-        diagnosticsMenu: NSMenu? = nil
+        diagnosticsMenu: NSMenu? = nil,
+        showOnboarding: @escaping () -> Void = {}
     ) {
         model = RemoteSettingsModel(snapshot: snapshot)
         self.setSiriAction = setSiriAction
         self.resetSiriAction = resetSiriAction
         self.audioSettingsMenu = audioSettingsMenu
         self.diagnosticsMenu = diagnosticsMenu
+        self.showOnboarding = showOnboarding
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 800),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -157,7 +160,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("VibeRemote.Settings.Split")
+        window.setFrameAutosaveName("VibeRemote.Settings.Stacked")
         let hosting = NSHostingController(rootView: RemoteSettingsView(
             model: model,
             setSiriAction: setSiriAction,
@@ -196,11 +199,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 1000, height: 660))
-        // Preserve the existing outer window size, extending only the backdrop beneath
-        // the native toolbar. Controls stay within the unobscured safe area above.
+        window.setContentSize(NSSize(width: 640, height: 800))
+        // Keep the stacked layout below the transparent toolbar. The full content scrolls
+        // on smaller screens, so the update controls always remain reachable.
         window.styleMask.insert(.fullSizeContentView)
-        if !window.setFrameUsingName("VibeRemote.Settings.Split") {
+        if !window.setFrameUsingName("VibeRemote.Settings.Stacked") {
             window.center()
         }
         update(snapshot)
@@ -220,7 +223,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     func windowWillClose(_ notification: Notification) {
         // Keep the Dock entry while minimized so it can restore Settings, but return
         // to menu-bar-only operation when the retained settings window is closed.
-        NSApp.setActivationPolicy(.accessory)
+        restoreAccessoryPolicy(closing: window)
     }
 
     func update(_ snapshot: RemoteSettingsSnapshot) {
@@ -231,6 +234,8 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
             item.state = item.representedObject as? String == (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") ? .on : .off
         }
     }
+
+    @objc private func openOnboarding() { showOnboarding() }
 
     @objc private func resetSettings() {
         resetSiriAction()
@@ -265,8 +270,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         reset.target = self
         reset.identifier = NSUserInterfaceItemIdentifier("VibeRemote.ResetSettings")
         reset.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
-        reset.toolTip = "Restore Siri Button, touch speeds and auto disconnect to their defaults."
+        reset.toolTip = "Restore Siri Button and auto disconnect to their defaults."
         menu.addItem(reset)
+        let guide = NSMenuItem(title: "Getting Started…", action: #selector(openOnboarding), keyEquivalent: "")
+        guide.target = self
+        menu.addItem(guide)
         if let audioSettingsMenu {
             menu.addItem(.separator())
             let audio = NSMenuItem(title: "Audio Output", action: nil, keyEquivalent: "")
@@ -286,93 +294,81 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
 @MainActor
 private struct RemoteSettingsView: View {
     @ObservedObject var model: RemoteSettingsModel
+    @ObservedObject private var updater = AppUpdater.shared
     let setSiriAction: (ButtonAction) -> Void
     let setIdleTimeout: (RemoteIdleTimeout) -> Void
     private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: model.snapshot.generation) }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 24) {
-                HStack(alignment: .top, spacing: 0) {
-                    callouts(layout.left, side: .left)
-                    RemoteModelView(generation: model.snapshot.generation)
-                        .frame(width: 144, height: 398)
-                        .accessibilityLabel(model.snapshot.generation.displayName)
-                    callouts(layout.right, side: .right)
+        ScrollView {
+            VStack(spacing: 0) {
+                VStack(spacing: 16) {
+                    HStack(alignment: .top, spacing: 0) {
+                        callouts(layout.left, side: .left)
+                        RemoteModelView(generation: model.snapshot.generation)
+                            .frame(width: 144, height: 398)
+                            .accessibilityLabel(model.snapshot.generation.displayName)
+                        callouts(layout.right, side: .right)
+                    }
+                    VStack(spacing: 7) {
+                        Text(model.snapshot.generation.displayName)
+                            .font(.system(size: 13, weight: .medium))
+                        HStack(spacing: 6) {
+                            Circle().fill(model.snapshot.connected ? Color.green : Color.secondary)
+                                .frame(width: 6, height: 6)
+                            Text(model.snapshot.connectionText).font(.system(size: 11, design: .monospaced))
+                        }.foregroundStyle(.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("settings.connection")
+                    }
                 }
-                VStack(spacing: 7) {
-                    Text(model.snapshot.generation.displayName)
-                        .font(.system(size: 13, weight: .medium))
-                    HStack(spacing: 6) {
-                        Circle().fill(model.snapshot.connected ? Color.green : Color.secondary).frame(width: 6, height: 6)
-                        Text(model.snapshot.connectionText).font(.system(size: 11, design: .monospaced))
-                    }.foregroundStyle(.secondary)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("settings.connection")
-                    Text("Drag to rotate")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
-                }
-            }
-            .frame(width: 556)
-            .frame(maxHeight: .infinity)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("Settings").font(.system(size: 22, weight: .semibold))
-                    VStack(alignment: .leading, spacing: 14) {
-                        sectionTitle("Controls")
-                        HStack {
-                            Text("Siri Button")
-                            Spacer()
-                            SiriActionPopUp(action: model.snapshot.siriAction, onSelect: setSiriAction)
-                                .frame(width: 190, height: 32)
-                        }
-                        Text("Other button actions are fixed.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        Text("Siri Button")
+                        Spacer()
+                        SiriActionPopUp(action: model.snapshot.siriAction, onSelect: setSiriAction)
+                            .frame(width: 190, height: 32)
+                    }
+                    HStack {
+                        Text("Auto disconnect")
+                        Spacer()
+                        Picker("Auto disconnect", selection: Binding(
+                            get: { model.snapshot.idleTimeout }, set: { value in setIdleTimeout(value) }
+                        )) {
+                            ForEach(RemoteIdleTimeout.allCases, id: \.self) { value in Text(value.title).tag(value) }
+                        }.labelsHidden().pickerStyle(.menu).fixedSize()
+                            .accessibilityIdentifier("settings.idleTimeout")
                     }
                     Divider()
-                    CommandBackendSettings()
-                    Divider()
-                    VStack(alignment: .leading, spacing: 10) {
-                        sectionTitle("Text cursor")
-                        Text("Touch to preview, then slide to activate the cursor. Lift and slide again to adjust; press the center or pause for 3 seconds to confirm.")
-                        if model.snapshot.generation == .glassTouchSurface {
-                            Text("Press the touch surface to confirm. Outside cursor mode, a quick swipe and lift sends one arrow key; pressing remains Enter. Siri or Return exits without dictating or submitting.")
-                        } else { Text("Siri or Return exits without dictating or submitting.") }
-                        Text("An active text field is required.")
+                    HStack {
+                        Text("Updates").fontWeight(.semibold)
+                        Spacer()
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                             .foregroundStyle(.secondary)
-                    }.font(.system(size: 12))
-                    Divider()
-                    VStack(alignment: .leading, spacing: 12) {
-                        sectionTitle("Connection")
-                        HStack {
-                            Text("Auto disconnect")
-                            Spacer()
-                            Picker("Auto disconnect", selection: Binding(
-                                get: { model.snapshot.idleTimeout },
-                                set: { value in setIdleTimeout(value) }
-                            )) {
-                                ForEach(RemoteIdleTimeout.allCases, id: \.self) { value in Text(value.title).tag(value) }
-                            }.labelsHidden().pickerStyle(.menu).fixedSize()
-                                .accessibilityIdentifier("settings.idleTimeout")
-                        }
-                        Text("Disconnect after inactivity.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Toggle("Check automatically", isOn: Binding(
+                            get: { updater.automaticallyChecks }, set: { value in updater.setAutomaticallyChecks(value) }
+                        )).accessibilityIdentifier("settings.updates.automatic")
+                        Spacer()
+                        Button("Check for Updates…") { updater.checkForUpdates() }
+                            .disabled(!updater.canCheck)
+                            .accessibilityIdentifier("settings.updates.check")
                     }
                 }
                 .font(.system(size: 13))
-                .padding(28)
+                .frame(maxWidth: 504)
+                .padding(24)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title).font(.system(size: 13, weight: .semibold))
-    }
-
-
 
     private enum Side { case left, right }
     private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
@@ -405,7 +401,7 @@ private struct RemoteSettingsView: View {
 /// NSPopUpButton supplies keyboard navigation, VoiceOver and the system appearance.
 /// Only the Siri button exposes an editable action menu.
 @MainActor
-private struct SiriActionPopUp: NSViewRepresentable {
+struct SiriActionPopUp: NSViewRepresentable {
     let action: ButtonAction
     let onSelect: (ButtonAction) -> Void
 

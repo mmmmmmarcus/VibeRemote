@@ -10,6 +10,7 @@ let package = Package(
         .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"]),
         .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
     ],
+    dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")],
     targets: [
         .target(name: "SharedAudio", path: "SharedAudio", publicHeadersPath: "include"),
         .target(name: "NativeTouch", path: "NativeTouch", publicHeadersPath: "include", linkerSettings: [.linkedFramework("CoreFoundation")]),
@@ -38,7 +39,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemote",
-            dependencies: ["HelperProtocol", "NativeTouch"],
+            dependencies: ["HelperProtocol", "NativeTouch", .product(name: "Sparkle", package: "Sparkle")],
             path: ".",
             exclude: [
                 "SharedAudio", "NativeTouch", "scripts",
@@ -59,15 +60,14 @@ let package = Package(
                 "HelperProtocol",
                 "AudioDriver",
                 "build_audio_driver.sh",
-                "AGENTS.md", "Design",
+                "AGENTS.md", "Design", "Release",
                 "Tests",
                 "README.md",
                 "LICENSE",
                 "THIRD_PARTY_NOTICES.md",
             ],
             sources: [
-                "main.swift", "CommandBackend.swift", "CommandJevWorker.swift",
-                "CommandPreview.swift", "CommandJevBatch.swift", "CommandExecution.swift", "CommandMCPProxy.swift", "CommandWindowController.swift", "SiriCommandGate.swift",
+                "main.swift", "AppUpdater.swift", "OnboardingWindowController.swift",
                 "RemoteInputPolicy.swift", "RemoteCaretController.swift",
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
@@ -94,7 +94,8 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("IOBluetooth"),
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
         ),
         .executableTarget(

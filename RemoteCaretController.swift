@@ -5,7 +5,7 @@ import Carbon.HIToolbox
 /// Passive aluminum-remote FC reports. Wire layout documented by
 /// https://github.com/azais-corentin/siri-remote/blob/main/src/decoder.rs
 /// No HID/GATT ownership changes are needed alongside microphone capture.
-struct RemoteTextTouchFrame: Equatable {
+struct RemoteTextTouchFrame: Equatable, Sendable {
     let sender: UInt64
     let time: Date
     let generation: RemoteGeneration
@@ -495,8 +495,101 @@ struct CaretNavigationTouchGate {
     }
 }
 
+/// One read in flight plus the most recent pending read. Cancellation invalidates
+/// replies without waiting for a slow accessibility provider or queueing old motion.
 @MainActor
-final class RemoteCaretController {
+final class CaretQueryPipeline<Request: Sendable, Reply: Sendable> {
+    private let queue = DispatchQueue(label: "com.viberemote.caret.read", qos: .userInitiated)
+    private let read: @Sendable (Request) -> Reply
+    private let clear: @Sendable () -> Void
+    private var epoch: UInt64 = 0
+    private var busy = false
+    private var pending: (Request, @MainActor (Reply) -> Void)?
+    init(clear: @escaping @Sendable () -> Void = {}, read: @escaping @Sendable (Request) -> Reply) {
+        self.clear = clear; self.read = read
+    }
+    func invalidate() {
+        epoch &+= 1; pending = nil
+        // Drop editor/marker caches after an in-flight read finishes. The UI
+        // never waits, and the next contact cannot race cleanup of old state.
+        queue.async(execute: clear)
+    }
+    func submit(_ request: Request, receive: @escaping @MainActor (Reply) -> Void) {
+        if busy { pending = (request, receive); return }
+        busy = true
+        let generation = epoch, work = read
+        queue.async { [weak self] in
+            let reply = work(request)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if generation == self.epoch { receive(reply) }
+                self.busy = false
+                if let next = self.pending {
+                    self.pending = nil
+                    self.submit(next.0, receive: next.1)
+                }
+            }
+        }
+    }
+}
+
+private struct CaretReadRequest: @unchecked Sendable {
+    let session: UUID
+    let editor: CaretAXQuery.Editor
+    let aim: CGPoint
+    let shownOffset: Int
+    let shownRect: CGRect
+    let active: Bool
+}
+private struct CaretReadReply: Sendable {
+    let valid: Bool
+    let positions: [Int: CGRect]
+}
+
+/// The unchecked conformance transfers ownership to the pipeline's serial queue.
+/// No member (including its separate AX marker cache) is read on the main thread.
+private final class CaretTrackingReader: @unchecked Sendable {
+    private let query = CaretAXQuery()
+    private var session: UUID?
+    private var remaining: [Int] = []
+    private var cursor = 0
+    private var endpointRetries: [Int: Int] = [:]
+    func reset() {
+        session = nil; query.reset(); remaining.removeAll(); cursor = 0; endpointRetries.removeAll()
+    }
+    func read(_ request: CaretReadRequest) -> CaretReadReply {
+        if session != request.session {
+            session = request.session; query.reset()
+            remaining = CaretNavigation.samplingOrder(request.editor.text, near: request.shownOffset)
+            cursor = 0; endpointRetries.removeAll()
+        }
+        guard query.matches(request.editor),
+              let shown = query.caret(request.shownOffset, in: request.editor),
+              CaretOverlayGeometry.aligned(shown, request.shownRect) else {
+            return .init(valid: false, positions: [:])
+        }
+        var positions = [request.shownOffset: shown]
+        if request.active {
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.008
+            var count = 0
+            while cursor < remaining.count, count < 8, ProcessInfo.processInfo.systemUptime < deadline {
+                let offset = remaining[cursor]; cursor += 1; count += 1
+                if let rect = query.caret(offset, in: request.editor) { positions[offset] = rect }
+                else if offset == 0 || offset == request.editor.text.utf16.count {
+                    let retries = endpointRetries[offset, default: 0]
+                    if retries < 2 { endpointRetries[offset] = retries + 1; remaining.append(offset) }
+                }
+            }
+            if let offset = query.offset(at: request.aim, in: request.editor),
+               let rect = query.caret(offset, in: request.editor) { positions[offset] = rect }
+        }
+        return .init(valid: true, positions: positions)
+    }
+}
+
+// Each instance belongs either to the main controller or to the serial read worker.
+// Its mutable text-marker cache is never shared between those execution contexts.
+private final class CaretAXQuery {
     private final class MarkerGeometry {
         let element: AXUIElement
         let provider: AXUIElement
@@ -505,360 +598,43 @@ final class RemoteCaretController {
             self.element = element; self.provider = provider; self.navigator = navigator
         }
     }
-    private struct Editor {
+    struct Editor: @unchecked Sendable {
         let element: AXUIElement
         let pid: pid_t
         let text: String
         let selection: CFRange
         let bounds: CGRect
     }
-    var onDirectionalSwipe: ((RemoteTouchSwipeDirection) -> Void)?
-    var onVoiceSuppression: ((Bool) -> Void)?
-    private var editor: Editor?
-    private var positions: [Int: CGRect] = [:]
-    private var remaining: [Int] = []
-    private var endpointRetries: [Int: Int] = [:]
-    private var destination = 0
-    private var displayedCaret: (offset: Int, rect: CGRect)?
-    private var aim = CGPoint.zero
-    private var isDragging = false
-    private var lastTouch: RemoteTextTouchFrame?
-    private var motion = CaretMotionFilter()
-    private var ignoreTouchUntil = Date.distantPast
-    private var owner: UInt64?
-    private var active = false
-    private var activeGeneration: RemoteGeneration?
-    private var travelGesture = RemoteCaretTravelGate()
-    private var swipeGesture = RemoteTouchSwipeGate()
-    private var heldSurfaceButtons: Set<String> = []
-    private var surfaceSettlingUntil = Date.distantPast
-    private var preparationContact: UUID?
-    private var idleDeadline = CaretIdleDeadline()
-    private var expiredContact: RemoteTextTouchFrame?
-    private var buttons = CaretButtonGate()
-    private var navigationTouch = CaretNavigationTouchGate()
-    private var swallowedReturns: Set<Int> = []
-    private var notifiedSuppression = false
-    private var timer: Timer?
-    private var voiceBlockedByPress = false
-    private let overlay = CaretOverlay()
-    private var lastRead = Date.distantPast
-    private var geometryCorrection: (element: AXUIElement, mode: CaretRangeGeometry.Correction)?
+    var geometryCorrection: (element: AXUIElement, mode: CaretRangeGeometry.Correction)?
     private var markerGeometry: MarkerGeometry?
-    private var diagnosingEntry = false
-    var isActive: Bool { active }
-
-    func reset() { heldSurfaceButtons.removeAll(); surfaceSettlingUntil = .distantPast; buttons = .init(); navigationTouch = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false; cancel() }
-    func stop() { reset() }
-
-    /// A mechanical click confirms only while positioning; consume both edges so
-    /// the old remote cannot also submit Enter after placing the caret.
-    func button(_ button: String, pressed down: Bool, device: String,
-                generation: RemoteGeneration) -> Bool {
-        if button == "select" {
-            if down { heldSurfaceButtons.insert(device) }
-            else { heldSurfaceButtons.remove(device); surfaceSettlingUntil = Date().addingTimeInterval(0.16) }
-            swipeGesture.reset()
-        }
-        if navigationTouch.button(button, down: down, device: device, generation: generation, now: Date()) {
-            if down { cancel() }
-            return false // Navigation still receives both edges and normal repeat.
-        }
-        let intent = buttons.handle(button: button, down: down, device: device, active: active)
-        switch intent {
-        case .confirm:
-            commit(); return true
-        case .exitVoice:
-            voiceBlockedByPress = true; cancel(); return true
-        case .exit:
-            cancel(); return true
-        case .consume:
-            if !down {
-                lastTouch = nil; motion.reset()
-                // Releasing the mechanical click moves the finger too. Establish
-                // a fresh contact baseline after the short release settling period.
-                ignoreTouchUntil = Date().addingTimeInterval(0.1)
-            }
-            return true
-        case .pass:
-            if down {
-                // A cancelled dictation hold stays muted through its release tail;
-                // only the next ordinary Siri press may start a fresh voice session.
-                if button == "siri" { voiceBlockedByPress = false }
-                cancel()
-            }
-            return false
-        }
+    var diagnosingEntry = false
+    func reset() { geometryCorrection = nil; markerGeometry = nil }
+    func matches(_ expected: Editor) -> Bool {
+        guard let current = observe() else { return false }
+        return current.pid == expected.pid && CFEqual(current.element, expected.element)
+            && current.text == expected.text && current.selection.location == expected.selection.location
+            && current.selection.length == expected.selection.length && current.bounds == expected.bounds
     }
-
-    func keyboardInput(code: Int?, down: Bool) -> Bool {
-        if let code, swallowedReturns.contains(code) {
-            if !down { swallowedReturns.remove(code) }
-            return true
-        }
-        guard down else { return false }
-        let consume = active && (code == 36 || code == 76)
-        if consume, let code { swallowedReturns.insert(code) }
-        cancel()
-        return consume
-    }
-
-    func receive(_ frame: RemoteTextTouchFrame) {
-        guard Date().timeIntervalSince(frame.time) <= 0.18 else { cancel(); return }
-        guard !navigationTouch.suppress(frame) else { return }
-        // Preserve the remote update's mechanical-click jitter guard without
-        // replacing center-click confirmation with the old Enter-only behavior.
-        if !heldSurfaceButtons.isEmpty || frame.time < surfaceSettlingUntil {
-            swipeGesture.reset(); travelGesture.reset()
-            if !active { cancel() }
-            return
-        }
-        // A timeout while the finger rests on the pad must not immediately show
-        // preparation again. Require that same contact to lift before a fresh entry.
-        if let expired = expiredContact, expired.sender == frame.sender, expired.generation == frame.generation {
-            if frame.count == 0 { expiredContact = nil }
-            return
-        }
-        if active {
-            guard activeGeneration == frame.generation else { return }
-            guard owner == nil || owner == frame.sender else { return }
-            owner = frame.sender
-            if frame.count != 1 {
-                // Lift settles only the preview. The session and real selection
-                // survive repositioning the finger for another stroke.
-                if isDragging { settle() }
-                lastTouch = nil; motion.reset()
-                return
-            }
-            guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else {
-                lastTouch = nil; motion.reset(); return
-            }
-            defer { lastTouch = frame }
-            guard let last = lastTouch, frame.time > last.time,
-                  frame.time.timeIntervalSince(last.time) < 0.25 else {
-                motion.reset()
-                if !isDragging, let shown = displayedCaret { aim = CGPoint(x: shown.rect.minX, y: shown.rect.midY) }
-                return
-            }
-            let dx = frame.x - last.x, dy = frame.y - last.y
-            guard abs(dx) < 700, abs(dy) < 700, let editor else { return }
-            let movement = motion.movement(dx: dx, dy: dy)
-            guard movement != .zero else { return }
-            idleDeadline.moved(at: ProcessInfo.processInfo.systemUptime)
-            isDragging = true
-            aim.x = min(max(aim.x + movement.x, editor.bounds.minX), editor.bounds.maxX - 1)
-            aim.y = min(max(aim.y + movement.y * 0.65, editor.bounds.minY), editor.bounds.maxY - 1)
-            if Date().timeIntervalSince(lastRead) > 0.025 {
-                lastRead = Date()
-                guard valid() else { cancel(); return }
-                refreshDestination(in: editor)
-            }
-            if let target = displayedCaret {
-                let free = CaretNavigation.preview(at: aim, line: target.rect, editor: editor.bounds)
-                overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
-            }
-        } else {
-            guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else { swipeGesture.reset(); return }
-            let direction = swipeGesture.observe(frame)
-            let recognized = travelGesture.observe(frame)
-            if frame.count == 0 {
-                cancel()
-                if frame.generation == .glassTouchSurface {
-                    let swipeDescription = direction.map { String(describing: $0) } ?? "none"
-                    rmDebug("Glass touch contact ended; swipe=\(swipeDescription)")
-                }
-                if let direction { onDirectionalSwipe?(direction) }
-                return
-            }
-            guard let contact = travelGesture.contactID else { cancel(); return }
-            if preparationContact != contact {
-                if frame.generation == .glassTouchSurface { rmDebug("Glass touch contact began") }
-                prepare(contact: contact)
-            }
-            if recognized {
-                swipeGesture.reset()
-                beginTravelGesture()
-            } else if let editor, let shown = displayedCaret {
-                overlay.show(caret: shown.rect, editor: editor.bounds, progress: travelGesture.progress,
-                             preparationLean: travelGesture.preparationLean)
-            }
-        }
-    }
-
-    private func prepare(contact: UUID) {
-        // One AX attempt per continuous contact, including in unsupported editors.
-        // Touch feedback never enables voice suppression or changes the real selection.
-        preparationContact = contact
-        editor = nil; displayedCaret = nil
-        geometryCorrection = nil; markerGeometry = nil
-        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else {
-            overlay.hide(); return
-        }
-        editor = candidate; displayedCaret = (candidate.selection.location, rect)
-        overlay.show(caret: rect, editor: candidate.bounds, progress: 0)
-        startWatchdog()
-    }
-
-    private func beginTravelGesture() {
-        guard let frame = travelGesture.latest else { return }
-        begin(owner: frame.sender, generation: frame.generation)
-        if active { lastTouch = frame }
-    }
-
-    private func begin(owner: UInt64? = nil, generation: RemoteGeneration = .aluminumClickpad) {
-        diagnosingEntry = true
-        defer { diagnosingEntry = false }
-        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { cancel(); return }
-        preparationContact = nil
-        editor = candidate; active = true; activeGeneration = generation
-        idleDeadline.start(at: ProcessInfo.processInfo.systemUptime)
-        self.owner = owner; lastTouch = nil
-        isDragging = false
-        motion.reset()
-        destination = candidate.selection.location
-        displayedCaret = (destination, rect)
-        positions = [destination: rect]; aim = CGPoint(x: rect.minX, y: rect.midY)
-        endpointRetries.removeAll()
-        remaining = CaretNavigation.samplingOrder(candidate.text, near: destination)
-        publishSuppression(true)
-        gatherPositions()
-        overlay.show(caret: rect, editor: candidate.bounds, progress: 1)
-        startWatchdog()
-        rmDebug("Caret positioning entered: generation=\(generation.rawValue) caretAX=\(rect) overlayError=\(overlay.alignmentError(caret: rect))")
-    }
-
-    private func commit() {
-        // A click or idle expiry resolves the same nearest boundary as a lift,
-        // then writes the real selection exactly once.
-        if isDragging, !settle() { return }
-        guard valid(), let editor, let displayedCaret,
-              let freshRect = caret(displayedCaret.offset, in: editor),
-              CaretOverlayGeometry.aligned(freshRect, displayedCaret.rect) else {
-            // Scrolling/reflow can change glyph geometry without changing AXValue.
-            // Never commit a stale screen position to a different visible location.
-            cancel(); return
-        }
-        var range = CFRange(location: displayedCaret.offset, length: 0)
-        if let value = AXValueCreate(.cfRange, &range),
-           AXUIElementSetAttributeValue(editor.element, kAXSelectedTextRangeAttribute as CFString, value) == .success {
-            if let actual = observe(), actual.pid == editor.pid, CFEqual(actual.element, editor.element),
-               actual.selection.location == displayedCaret.offset {
-                let landed = caret(actual.selection.location, in: actual)
-                let delta = landed.map { $0.midY - displayedCaret.rect.midY }
-                rmDebug("Caret position committed and selection verified: geometryDeltaY=\(delta.map(String.init(describing:)) ?? "unavailable")")
-            } else { rmDebug("Caret position requested; selection acknowledgement unavailable") }
-        } else { rmDebug("Caret position commit unavailable") }
-        cancel()
-    }
-
-    func cancel() {
-        idleDeadline.reset(); expiredContact = nil
-        active = false; activeGeneration = nil; travelGesture.reset(); swipeGesture.reset(); preparationContact = nil
-        editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll(); endpointRetries.removeAll()
-        isDragging = false
-        geometryCorrection = nil
-        markerGeometry = nil
-        lastTouch = nil; motion.reset(); ignoreTouchUntil = .distantPast
-        owner = nil; timer?.invalidate(); timer = nil
-        overlay.hide()
-        publishSuppression(voiceBlockedByPress)
-    }
-
-    private func refreshDestination(in editor: Editor) {
-        gatherPositions()
-        if let offset = offset(at: aim, in: editor), let rect = caret(offset, in: editor) { positions[offset] = rect }
-        if let next = CaretNavigation.lineSnappedTarget(to: aim, positions: positions, current: destination), let rect = positions[next] {
-            destination = next; displayedCaret = (next, rect)
-        }
-    }
-
-    /// Snap only the preview on lift; the real selection waits for a click or idle expiry.
-    @discardableResult
-    private func settle() -> Bool {
-        guard active, valid(), let editor else { cancel(); return false }
-        refreshDestination(in: editor)
-        guard let shown = displayedCaret, let fresh = caret(shown.offset, in: editor),
-              CaretOverlayGeometry.aligned(fresh, shown.rect) else { cancel(); return false }
-        isDragging = false
-        displayedCaret = (shown.offset, fresh)
-        aim = CGPoint(x: fresh.minX, y: fresh.midY)
-        overlay.show(caret: fresh, editor: editor.bounds, progress: 1, tracking: true)
-        return true
-    }
-
-    private func publishSuppression(_ suppressed: Bool) {
-        guard suppressed != notifiedSuppression else { return }
-        notifiedSuppression = suppressed
-        onVoiceSuppression?(suppressed)
-    }
-
-    private func startWatchdog() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                guard self.valid() else { self.cancel(); return }
-                if self.active {
-                    if self.idleDeadline.takeExpired(at: ProcessInfo.processInfo.systemUptime) {
-                        let contact = self.lastTouch
-                        rmDebug("Caret positioning idle for 3 seconds; settling and committing")
-                        self.commit()
-                        self.expiredContact = contact
-                        return
-                    }
-                    self.gatherPositions()
-                } else {
-                    guard self.preparationContact != nil, let last = self.travelGesture.latest,
-                          Date().timeIntervalSince(last.time) < 0.3,
-                          let editor = self.editor, let shown = self.displayedCaret,
-                          let fresh = self.caret(shown.offset, in: editor),
-                          CaretOverlayGeometry.aligned(fresh, shown.rect) else { self.cancel(); return }
-                }
-            }
-        }
-        timer = t; RunLoop.main.add(t, forMode: .common)
-    }
-
-    private func valid() -> Bool {
-        guard let editor, let now = observe() else { return false }
-        return now.pid == editor.pid && CFEqual(now.element, editor.element) && now.text == editor.text &&
-            now.selection.location == editor.selection.location && now.selection.length == editor.selection.length && now.bounds == editor.bounds
-    }
-
-    private func gatherPositions() {
-        guard let editor else { return }
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.018
-        var count = 0
-        while !remaining.isEmpty, count < 16, ProcessInfo.processInfo.systemUptime < deadline {
-            let offset = remaining.removeFirst(); count += 1
-            if let rect = caret(offset, in: editor) { positions[offset] = rect }
-            else if offset == 0 || offset == editor.text.utf16.count {
-                // A bounded marker query can time out while discovering the leaf.
-                // Retry endpoints after the other positions populate the cache.
-                let attempts = endpointRetries[offset, default: 0]
-                if attempts < 2 {
-                    endpointRetries[offset] = attempts + 1
-                    remaining.append(offset)
-                }
-            }
-        }
-    }
-
-    private func attribute(_ element: AXUIElement, _ name: String, _ parameter: CFTypeRef? = nil) -> CFTypeRef? {
+    func attribute(_ element: AXUIElement, _ name: String, _ parameter: CFTypeRef? = nil) -> CFTypeRef? {
         var value: CFTypeRef?
         let status = parameter.map { AXUIElementCopyParameterizedAttributeValue(element, name as CFString, $0, &value) }
             ?? AXUIElementCopyAttributeValue(element, name as CFString, &value)
         return status == .success ? value : nil
     }
-    private func unpack<T: BitwiseCopyable>(_ raw: CFTypeRef?, _ type: AXValueType, _ result: inout T) -> Bool {
+    func unpack<T: BitwiseCopyable>(_ raw: CFTypeRef?, _ type: AXValueType, _ result: inout T) -> Bool {
         guard let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return false }
         let value = unsafeBitCast(raw, to: AXValue.self)
         return AXValueGetType(value) == type && AXValueGetValue(value, type, &result)
     }
-    private func observe() -> Editor? {
+    func observe() -> Editor? {
         func blocked(_ reason: String) -> Editor? { entryDiagnostic(reason); return nil }
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let application = AXUIElementCreateApplication(app.processIdentifier)
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.02)
+        guard let rawApplication = attribute(system, kAXFocusedApplicationAttribute),
+              CFGetTypeID(rawApplication) == AXUIElementGetTypeID() else { return nil }
+        let application = unsafeBitCast(rawApplication, to: AXUIElement.self)
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(application, &pid) == .success, pid > 0 else { return nil }
         AXUIElementSetMessagingTimeout(application, 0.02)
         guard let raw = attribute(application, kAXFocusedUIElementAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return blocked("focused element unavailable") }
         let element = unsafeBitCast(raw, to: AXUIElement.self)
@@ -877,9 +653,9 @@ final class RemoteCaretController {
               unpack(attribute(element, kAXPositionAttribute), .cgPoint, &position),
               unpack(attribute(element, kAXSizeAttribute), .cgSize, &size), size.width > 0, size.height > 0,
               position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite else { return blocked("selection or editor bounds unavailable") }
-        return Editor(element: element, pid: app.processIdentifier, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
+        return Editor(element: element, pid: pid, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
     }
-    private func caret(_ offset: Int, in editor: Editor) -> CGRect? {
+    func caret(_ offset: Int, in editor: Editor) -> CGRect? {
         if let context = markerGeometry, !CFEqual(context.element, editor.element) { markerGeometry = nil }
         func bounds(_ requested: NSRange) -> CGRect? {
             if let context = markerGeometry { return markerBounds(requested, in: context) }
@@ -918,7 +694,7 @@ final class RemoteCaretController {
     }
     private func entryDiagnostic(_ reason: String) {
         guard diagnosingEntry else { return }
-        rmDebug("Caret entry [\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown")]: \(reason)")
+        rmDebug("Caret entry: \(reason)")
     }
     private func makeMarkerGeometry(_ editor: Editor) -> MarkerGeometry? {
         var candidate: AXUIElement? = editor.element
@@ -1068,12 +844,381 @@ final class RemoteCaretController {
         entryDiagnostic("text-marker geometry (collapsed=\(range.length == 0)): \(rect)")
         return rect
     }
-    private func offset(at point: CGPoint, in editor: Editor) -> Int? {
+    func offset(at point: CGPoint, in editor: Editor) -> Int? {
         var p = point, range = CFRange()
         guard let value = AXValueCreate(.cgPoint, &p),
               unpack(attribute(editor.element, kAXRangeForPositionParameterizedAttribute, value), .cfRange, &range) else { return nil }
         return CaretNavigation.boundaries(editor.text).min { abs($0 - range.location) < abs($1 - range.location) }
     }
+}
+
+@MainActor
+final class RemoteCaretController {
+    private typealias Editor = CaretAXQuery.Editor
+    private let query = CaretAXQuery()
+    private var querySession = UUID()
+    private lazy var reads: CaretQueryPipeline<CaretReadRequest, CaretReadReply> = {
+        let reader = CaretTrackingReader()
+        return CaretQueryPipeline(clear: { reader.reset() }) { reader.read($0) }
+    }()
+    var onDirectionalSwipe: ((RemoteTouchSwipeDirection) -> Void)?
+    var onVoiceSuppression: ((Bool) -> Void)?
+    private var editor: Editor?
+    private var positions: [Int: CGRect] = [:]
+    private var remaining: [Int] = []
+    private var endpointRetries: [Int: Int] = [:]
+    private var destination = 0
+    private var displayedCaret: (offset: Int, rect: CGRect)?
+    private var aim = CGPoint.zero
+    private var isDragging = false
+    private var lastTouch: RemoteTextTouchFrame?
+    private var motion = CaretMotionFilter()
+    private var ignoreTouchUntil = Date.distantPast
+    private var owner: UInt64?
+    private var active = false
+    private var activeGeneration: RemoteGeneration?
+    private var travelGesture = RemoteCaretTravelGate()
+    private var swipeGesture = RemoteTouchSwipeGate()
+    private var heldSurfaceButtons: Set<String> = []
+    private var surfaceSettlingUntil = Date.distantPast
+    private var preparationContact: UUID?
+    private var idleDeadline = CaretIdleDeadline()
+    private var expiredContact: RemoteTextTouchFrame?
+    private var buttons = CaretButtonGate()
+    private var navigationTouch = CaretNavigationTouchGate()
+    private var swallowedReturns: Set<Int> = []
+    private var notifiedSuppression = false
+    private var timer: Timer?
+    private var voiceBlockedByPress = false
+    private let overlay = CaretOverlay()
+    private var lastRead = Date.distantPast
+    var isActive: Bool { active }
+
+    func reset() { heldSurfaceButtons.removeAll(); surfaceSettlingUntil = .distantPast; buttons = .init(); navigationTouch = .init(); swallowedReturns.removeAll(); voiceBlockedByPress = false; cancel() }
+    func stop() { reset() }
+
+    /// A mechanical click confirms only while positioning; consume both edges so
+    /// the old remote cannot also submit Enter after placing the caret.
+    func button(_ button: String, pressed down: Bool, device: String,
+                generation: RemoteGeneration) -> Bool {
+        if button == "select" {
+            if down { heldSurfaceButtons.insert(device) }
+            else { heldSurfaceButtons.remove(device); surfaceSettlingUntil = Date().addingTimeInterval(0.16) }
+            swipeGesture.reset()
+        }
+        if navigationTouch.button(button, down: down, device: device, generation: generation, now: Date()) {
+            if down { cancel() }
+            return false // Navigation still receives both edges and normal repeat.
+        }
+        let intent = buttons.handle(button: button, down: down, device: device, active: active)
+        switch intent {
+        case .confirm:
+            commit(); return true
+        case .exitVoice:
+            voiceBlockedByPress = true; cancel(); return true
+        case .exit:
+            cancel(); return true
+        case .consume:
+            if !down {
+                lastTouch = nil; motion.reset()
+                // Releasing the mechanical click moves the finger too. Establish
+                // a fresh contact baseline after the short release settling period.
+                ignoreTouchUntil = Date().addingTimeInterval(0.1)
+            }
+            return true
+        case .pass:
+            if down {
+                // A cancelled dictation hold stays muted through its release tail;
+                // only the next ordinary Siri press may start a fresh voice session.
+                if button == "siri" { voiceBlockedByPress = false }
+                cancel()
+            }
+            return false
+        }
+    }
+
+    func keyboardInput(code: Int?, down: Bool) -> Bool {
+        if let code, swallowedReturns.contains(code) {
+            if !down { swallowedReturns.remove(code) }
+            return true
+        }
+        guard down else { return false }
+        let consume = active && (code == 36 || code == 76)
+        if consume, let code { swallowedReturns.insert(code) }
+        cancel()
+        return consume
+    }
+
+    func receive(_ frame: RemoteTextTouchFrame) {
+        guard Date().timeIntervalSince(frame.time) <= 0.18 else { cancel(); return }
+        guard !navigationTouch.suppress(frame) else { return }
+        // Preserve the remote update's mechanical-click jitter guard without
+        // replacing center-click confirmation with the old Enter-only behavior.
+        if !heldSurfaceButtons.isEmpty || frame.time < surfaceSettlingUntil {
+            swipeGesture.reset(); travelGesture.reset()
+            if !active { cancel() }
+            return
+        }
+        // A timeout while the finger rests on the pad must not immediately show
+        // preparation again. Require that same contact to lift before a fresh entry.
+        if let expired = expiredContact, expired.sender == frame.sender, expired.generation == frame.generation {
+            if frame.count == 0 { expiredContact = nil }
+            return
+        }
+        if active {
+            guard activeGeneration == frame.generation else { return }
+            guard owner == nil || owner == frame.sender else { return }
+            owner = frame.sender
+            if frame.count != 1 {
+                // Lift settles only the preview. The session and real selection
+                // survive repositioning the finger for another stroke.
+                if isDragging { settle() }
+                lastTouch = nil; motion.reset()
+                return
+            }
+            guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else {
+                lastTouch = nil; motion.reset(); return
+            }
+            defer { lastTouch = frame }
+            guard let last = lastTouch, frame.time > last.time,
+                  frame.time.timeIntervalSince(last.time) < 0.25 else {
+                motion.reset()
+                if !isDragging, let shown = displayedCaret { aim = CGPoint(x: shown.rect.minX, y: shown.rect.midY) }
+                return
+            }
+            let dx = frame.x - last.x, dy = frame.y - last.y
+            guard abs(dx) < 700, abs(dy) < 700, let editor else { return }
+            let movement = motion.movement(dx: dx, dy: dy)
+            guard movement != .zero else { return }
+            idleDeadline.moved(at: ProcessInfo.processInfo.systemUptime)
+            isDragging = true
+            aim.x = min(max(aim.x + movement.x, editor.bounds.minX), editor.bounds.maxX - 1)
+            aim.y = min(max(aim.y + movement.y * 0.65, editor.bounds.minY), editor.bounds.maxY - 1)
+            if Date().timeIntervalSince(lastRead) > 0.025 {
+                lastRead = Date()
+                requestTrackingRead()
+                refreshCachedDestination()
+            }
+            if let target = displayedCaret {
+                let free = CaretNavigation.preview(at: aim, line: target.rect, editor: editor.bounds)
+                overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
+            }
+        } else {
+            guard buttons.held.isEmpty, frame.time >= ignoreTouchUntil else { swipeGesture.reset(); return }
+            let direction = swipeGesture.observe(frame)
+            let recognized = travelGesture.observe(frame)
+            if frame.count == 0 {
+                cancel()
+                if frame.generation == .glassTouchSurface {
+                    let swipeDescription = direction.map { String(describing: $0) } ?? "none"
+                    rmDebug("Glass touch contact ended; swipe=\(swipeDescription)")
+                }
+                if let direction { onDirectionalSwipe?(direction) }
+                return
+            }
+            guard let contact = travelGesture.contactID else { cancel(); return }
+            if preparationContact != contact {
+                if frame.generation == .glassTouchSurface { rmDebug("Glass touch contact began") }
+                prepare(contact: contact)
+            }
+            if recognized {
+                swipeGesture.reset()
+                beginTravelGesture()
+            } else if let editor, let shown = displayedCaret {
+                overlay.show(caret: shown.rect, editor: editor.bounds, progress: travelGesture.progress,
+                             preparationLean: travelGesture.preparationLean)
+            }
+        }
+    }
+
+    private func prepare(contact: UUID) {
+        // One AX attempt per continuous contact, including in unsupported editors.
+        // Touch feedback never enables voice suppression or changes the real selection.
+        preparationContact = contact
+        editor = nil; displayedCaret = nil
+        query.reset()
+        querySession = UUID(); reads.invalidate()
+        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else {
+            overlay.hide(); return
+        }
+        editor = candidate; displayedCaret = (candidate.selection.location, rect)
+        overlay.show(caret: rect, editor: candidate.bounds, progress: 0)
+        startWatchdog()
+    }
+
+    private func beginTravelGesture() {
+        guard let frame = travelGesture.latest else { return }
+        begin(owner: frame.sender, generation: frame.generation)
+        if active { lastTouch = frame }
+    }
+
+    private func begin(owner: UInt64? = nil, generation: RemoteGeneration = .aluminumClickpad) {
+        // Entry recaptures the focused editor. A pending preparation read belongs
+        // to its old snapshot even when the physical contact has not lifted.
+        querySession = UUID(); reads.invalidate()
+        query.diagnosingEntry = true
+        defer { query.diagnosingEntry = false }
+        guard let candidate = observe(), let rect = caret(candidate.selection.location, in: candidate) else { cancel(); return }
+        preparationContact = nil
+        editor = candidate; active = true; activeGeneration = generation
+        idleDeadline.start(at: ProcessInfo.processInfo.systemUptime)
+        self.owner = owner; lastTouch = nil
+        isDragging = false
+        motion.reset()
+        destination = candidate.selection.location
+        displayedCaret = (destination, rect)
+        positions = [destination: rect]; aim = CGPoint(x: rect.minX, y: rect.midY)
+        endpointRetries.removeAll()
+        remaining = CaretNavigation.samplingOrder(candidate.text, near: destination)
+        publishSuppression(true)
+        requestTrackingRead()
+        overlay.show(caret: rect, editor: candidate.bounds, progress: 1)
+        startWatchdog()
+        rmDebug("Caret positioning entered: generation=\(generation.rawValue) caretAX=\(rect) overlayError=\(overlay.alignmentError(caret: rect))")
+    }
+
+    private func commit() {
+        reads.invalidate()
+        // A click or idle expiry resolves the same nearest boundary as a lift,
+        // then writes the real selection exactly once.
+        if isDragging, !settle() { return }
+        guard valid(), let editor, let displayedCaret,
+              let freshRect = caret(displayedCaret.offset, in: editor),
+              CaretOverlayGeometry.aligned(freshRect, displayedCaret.rect) else {
+            // Scrolling/reflow can change glyph geometry without changing AXValue.
+            // Never commit a stale screen position to a different visible location.
+            cancel(); return
+        }
+        var range = CFRange(location: displayedCaret.offset, length: 0)
+        if let value = AXValueCreate(.cfRange, &range),
+           AXUIElementSetAttributeValue(editor.element, kAXSelectedTextRangeAttribute as CFString, value) == .success {
+            if let actual = observe(), actual.pid == editor.pid, CFEqual(actual.element, editor.element),
+               actual.selection.location == displayedCaret.offset {
+                let landed = caret(actual.selection.location, in: actual)
+                let delta = landed.map { $0.midY - displayedCaret.rect.midY }
+                rmDebug("Caret position committed and selection verified: geometryDeltaY=\(delta.map(String.init(describing:)) ?? "unavailable")")
+            } else { rmDebug("Caret position requested; selection acknowledgement unavailable") }
+        } else { rmDebug("Caret position commit unavailable") }
+        cancel()
+    }
+
+    func cancel() {
+        querySession = UUID(); reads.invalidate()
+        idleDeadline.reset(); expiredContact = nil
+        active = false; activeGeneration = nil; travelGesture.reset(); swipeGesture.reset(); preparationContact = nil
+        editor = nil; displayedCaret = nil; positions.removeAll(); remaining.removeAll(); endpointRetries.removeAll()
+        isDragging = false
+        query.reset()
+        lastTouch = nil; motion.reset(); ignoreTouchUntil = .distantPast
+        owner = nil; timer?.invalidate(); timer = nil
+        overlay.hide()
+        publishSuppression(voiceBlockedByPress)
+    }
+
+    private func refreshCachedDestination() {
+        if let next = CaretNavigation.lineSnappedTarget(to: aim, positions: positions, current: destination),
+           let rect = positions[next] { destination = next; displayedCaret = (next, rect) }
+    }
+
+    private func requestTrackingRead() {
+        guard let editor, let shown = displayedCaret else { return }
+        let session = querySession
+        reads.submit(.init(session: session, editor: editor, aim: aim,
+                           shownOffset: shown.offset, shownRect: shown.rect, active: active)) { [weak self] reply in
+            guard let self, self.querySession == session, self.editor != nil else { return }
+            guard reply.valid else { self.cancel(); return }
+            self.positions.merge(reply.positions) { _, new in new }
+            // Apply to the current aim, not the old point that triggered this read.
+            if self.active, self.isDragging {
+                self.refreshCachedDestination()
+                if let target = self.displayedCaret {
+                    let free = CaretNavigation.preview(at: self.aim, line: target.rect, editor: editor.bounds)
+                    self.overlay.show(caret: free, editor: editor.bounds, progress: 1, tracking: true)
+                }
+            }
+        }
+    }
+
+    private func refreshDestination(in editor: Editor) {
+        gatherPositions()
+        if let offset = offset(at: aim, in: editor), let rect = caret(offset, in: editor) { positions[offset] = rect }
+        if let next = CaretNavigation.lineSnappedTarget(to: aim, positions: positions, current: destination), let rect = positions[next] {
+            destination = next; displayedCaret = (next, rect)
+        }
+    }
+
+    /// Snap only the preview on lift; the real selection waits for a click or idle expiry.
+    @discardableResult
+    private func settle() -> Bool {
+        reads.invalidate()
+        guard active, valid(), let editor else { cancel(); return false }
+        refreshDestination(in: editor)
+        guard let shown = displayedCaret, let fresh = caret(shown.offset, in: editor),
+              CaretOverlayGeometry.aligned(fresh, shown.rect) else { cancel(); return false }
+        isDragging = false
+        displayedCaret = (shown.offset, fresh)
+        aim = CGPoint(x: fresh.minX, y: fresh.midY)
+        overlay.show(caret: fresh, editor: editor.bounds, progress: 1, tracking: true)
+        return true
+    }
+
+    private func publishSuppression(_ suppressed: Bool) {
+        guard suppressed != notifiedSuppression else { return }
+        notifiedSuppression = suppressed
+        onVoiceSuppression?(suppressed)
+    }
+
+    private func startWatchdog() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.active {
+                    if self.idleDeadline.takeExpired(at: ProcessInfo.processInfo.systemUptime) {
+                        let contact = self.lastTouch
+                        rmDebug("Caret positioning idle for 3 seconds; settling and committing")
+                        self.commit()
+                        self.expiredContact = contact
+                        return
+                    }
+                } else {
+                    guard self.preparationContact != nil, let last = self.travelGesture.latest,
+                          Date().timeIntervalSince(last.time) < 0.3 else { self.cancel(); return }
+                }
+                self.requestTrackingRead()
+            }
+        }
+        timer = t; RunLoop.main.add(t, forMode: .common)
+    }
+
+    private func valid() -> Bool {
+        guard let editor else { return false }
+        return query.matches(editor)
+    }
+
+    private func gatherPositions() {
+        guard let editor else { return }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.018
+        var count = 0
+        while !remaining.isEmpty, count < 16, ProcessInfo.processInfo.systemUptime < deadline {
+            let offset = remaining.removeFirst(); count += 1
+            if let rect = caret(offset, in: editor) { positions[offset] = rect }
+            else if offset == 0 || offset == editor.text.utf16.count {
+                // A bounded marker query can time out while discovering the leaf.
+                // Retry endpoints after the other positions populate the cache.
+                let attempts = endpointRetries[offset, default: 0]
+                if attempts < 2 {
+                    endpointRetries[offset] = attempts + 1
+                    remaining.append(offset)
+                }
+            }
+        }
+    }
+
+    private func observe() -> Editor? { query.observe() }
+    private func caret(_ offset: Int, in editor: Editor) -> CGRect? { query.caret(offset, in: editor) }
+    private func offset(at point: CGPoint, in editor: Editor) -> Int? { query.offset(at: point, in: editor) }
+
 }
 
 import QuartzCore

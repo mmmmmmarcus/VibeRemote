@@ -304,56 +304,27 @@ On the first-generation glass remote, a quick one-way swipe and lift outside car
 mode sends one arrow key. Accumulating 1000 units of touch travel still enters caret
 mode; lift then only settles its preview, and center click or idle confirms it.
 
-### Remote Command (prototype)
-
-Briefly tap Siri to open a focused native command box on either remote generation. Type or dictate a request,
-then press Return (or the aluminum remote's Power / glass surface button) to run it.
-The panel shows progress and the final response. Stop or Escape cancels a running
-request; completed actions are not undone. Only one request runs at a time, with a
-five-minute execution limit (time waiting for foreground consent is excluded). The input remains editable while a task runs; submit the next
-request after the current one completes. `Command…` in the status menu opens the same retained panel.
-
-Commands run in the background by default. Submitting, finishing, or requesting
-consent does not activate the target app or switch Spaces. If a step needs foreground
-delivery, the existing task pauses and the panel shows **继续执行**. Clicking it
-authorizes that single step, which may switch Spaces or use the mouse/keyboard;
-later steps return to background delivery. Each request expires after 15 minutes
-without a click. Stop, closing the panel, or quitting cancels pending consent.
-The panel updates in place without stealing focus; reopen Command if it is obscured.
-Background actions still share the target app's content with you, and target apps
-may have their own window-opening behavior.
-
-Hold Siri for 250 ms to use its configured dictation action. Short taps never send
-the mapped dictation key. Advanced Menu and active caret positioning retain priority
-over this gesture. Aluminum Play still opens Skill, Mute opens Advanced Menu, and
-glass Play remains the Advanced Menu opener. Settings shows Siri's tap/hold functions.
-
-This first version integrates **locally installed** Codex CLI and Cua Driver; it
-is not a self-contained driver distribution. Install Codex, run `codex login` with
-your ChatGPT account, and install/authorize CuaDriver.app (Accessibility and Screen
-Recording). VibeRemote locates executables in `~/.local/bin`, `/opt/homebrew/bin`,
-and `/usr/local/bin`, plus the standard CuaDriver.app path. Current validated
-versions: Codex CLI 0.161.0 and Cua Driver 0.28.2, Apple Silicon.
-
-Each request uses `codex exec --ignore-user-config --ephemeral` with only the Cua
-MCP server behind VibeRemote's native consent proxy and a desktop-tool allowlist. The existing Codex login is reused;
-credentials and global config are never copied or edited. User commands go over
-stdin, not a shell. Shell tools, other apps/connectors and subagents are disabled.
-Codex routes required tool approvals through its automatic approval reviewer;
-rejected actions remain blocked. Cua Driver retains its normal permission policy
-and stable app identity. The model
-receives the submitted request and whatever target UI Cua reads, including screenshots
-when needed. Requests use the user's Codex account allowance. VibeRemote does not
-write command text, screenshots or raw tool results to its diagnostic log. Temporary
-per-request working directories are removed on completion; Cua/Codex may maintain
-their own metadata. Requests requiring clarification stop with an explanation;
-general conversational follow-up and conversation history are not in this prototype.
-Foreground consent is separate from Codex's tool approval and does not override a
-denied review or authorize unrelated actions.
-
-References: [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver),
-[Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
+Siri directly performs its configured action on press and release. Advanced Menu and
+active caret positioning retain priority. The command assistant and computer-use
+backends have been removed.
 
 ## Firmware research
 
 First-generation microphone-control findings, evidence, diagnostic tools and cross-machine handoff are indexed in [Design/Research/README.md](Design/Research/README.md). Software-only capture and a reliable unlock/restore workflow remain unverified; current button mappings are unchanged.
+
+## First launch and Settings
+
+New users get a three-step introduction: basic controls, Bluetooth/permission setup,
+and Siri-button mapping. Finish saves the choice; closing leaves setup unfinished.
+Existing configured installations keep their mapping without a forced tour.
+Reopen the guide with **Settings → More → Getting Started…**.
+
+Settings keeps the remote diagram, Siri mapping, auto-disconnect and update controls.
+Audio Output, Diagnostics and Reset remain in More.
+
+## Automatic updates
+
+VibeRemote 0.3 adds Sparkle, with daily update checks and a manual **Check for Updates…**
+action. Downloads/installations use Sparkle's standard UI and signed archives.
+The first Sparkle-enabled version needs a manual installation. Release preparation
+and update verification are documented in [Release/README.md](Release/README.md).

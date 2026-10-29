@@ -59,6 +59,8 @@ rm -rf "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
 mkdir -p "$ROOT_DIR/.build"
 ditto "$resource_bundle" "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
 
+python3 scripts/stage-sparkle.py "$scratch_path" "$ROOT_DIR/.build/Sparkle.framework"
+
 chmod +x "$APP_NAME" "$VOICE_BRIDGE_NAME" "$HELPER_NAME"
 echo "Built $ROOT_DIR/$APP_NAME"
 xcrun lipo -info "$APP_NAME"

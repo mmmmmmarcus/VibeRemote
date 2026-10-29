@@ -65,3 +65,10 @@ metadata remains intact. The display meshes in `Resources/RemoteModels/` are
 tessellations of those assemblies, generated with FreeCAD / Open CASCADE; those
 conversion tools are not bundled with VibeRemote. No separate model license was
 provided with these files; this notice does not relicense them.
+
+## Sparkle
+
+Automatic updates use [Sparkle 2.10.1](https://github.com/sparkle-project/Sparkle),
+licensed under the MIT License. The complete license and third-party notices are
+preserved inside the embedded Sparkle framework. SwiftPM verifies the pinned
+binary artifact checksum; the packaged framework contains arm64 code only.
