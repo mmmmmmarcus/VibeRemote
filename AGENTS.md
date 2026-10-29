@@ -231,7 +231,7 @@ callouts and connection/battery summary above Siri, Auto Disconnect and Updates.
 The full content scrolls on smaller screens; keep a separate stacked-layout frame
 autosave key so the former wide window size cannot return. Supporting paragraphs and
 rotation hints are removed; basic instructions live in the first-run guide. No mode selector or pointer/scroll sliders.
-Check for Updates sits in the toolbar immediately left of More; automatic checks and the version remain in the content.
+Check for Updates sits in the toolbar immediately left of More; the version remains in the content. Automatic checks are always enabled at updater startup, including for previously opted-out installs; do not expose an opt-out checkbox.
 The More toolbar retains Reset, Audio Output and Diagnostics; Reset restores Siri and
 Auto Disconnect. Window state comes from
 `MenuBarManager` and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM

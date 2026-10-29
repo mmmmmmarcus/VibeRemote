@@ -307,7 +307,6 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
 @MainActor
 private struct RemoteSettingsView: View {
     @ObservedObject var model: RemoteSettingsModel
-    @ObservedObject private var updater = AppUpdater.shared
     let setSiriAction: (ButtonAction) -> Void
     let setIdleTimeout: (RemoteIdleTimeout) -> Void
     private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: model.snapshot.generation) }
@@ -363,11 +362,6 @@ private struct RemoteSettingsView: View {
                         Spacer()
                         Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                             .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Toggle("Check automatically", isOn: Binding(
-                            get: { updater.automaticallyChecks }, set: { value in updater.setAutomaticallyChecks(value) }
-                        )).accessibilityIdentifier("settings.updates.automatic")
                     }
                 }
                 .font(.system(size: 13))

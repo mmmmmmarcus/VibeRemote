@@ -6,7 +6,6 @@ import Sparkle
 final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation, NSToolbarItemValidation {
     static let shared = AppUpdater()
     @Published private(set) var canCheck = false
-    @Published private(set) var automaticallyChecks = false
     private var controller: SPUStandardUpdaterController?
 
     func start() {
@@ -15,13 +14,9 @@ final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation, NSTool
         self.controller = controller
         controller.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: RunLoop.main).assign(to: &$canCheck)
-        controller.updater.publisher(for: \.automaticallyChecksForUpdates)
-            .receive(on: RunLoop.main).assign(to: &$automaticallyChecks)
+        // Automatic checks are mandatory, including for existing opted-out installs.
+        controller.updater.automaticallyChecksForUpdates = true
         controller.startUpdater()
-    }
-
-    func setAutomaticallyChecks(_ enabled: Bool) {
-        controller?.updater.automaticallyChecksForUpdates = enabled
     }
 
     @objc func checkForUpdates(_ sender: Any? = nil) {
