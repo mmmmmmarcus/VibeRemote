@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 enum SettingsAssets {
     // SwiftPM's command-line accessor searches beside the executable bundle. Our
@@ -121,6 +122,8 @@ private final class RemoteSettingsModel: ObservableObject {
 @MainActor
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
     private static let moreIdentifier = NSToolbarItem.Identifier("VibeRemote.MoreSettings")
+    private var updaterObservation: AnyCancellable?
+    private var checkUpdateItem: NSMenuItem?
     private let model: RemoteSettingsModel
     private let setSiriAction: (ButtonAction) -> Void
     private let resetSiriAction: () -> Void
@@ -145,7 +148,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         self.diagnosticsMenu = diagnosticsMenu
         self.showOnboarding = showOnboarding
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -160,7 +163,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("VibeRemote.Settings.CompactStacked")
+        window.setFrameAutosaveName("VibeRemote.Settings.NarrowStacked")
         let hosting = NSHostingController(rootView: RemoteSettingsView(
             model: model,
             setSiriAction: setSiriAction,
@@ -199,13 +202,24 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 640, height: 660))
+        window.setContentSize(NSSize(width: 520, height: 580))
         // Keep the stacked layout below the transparent toolbar. The full content scrolls
         // on smaller screens, so the update controls always remain reachable.
         window.styleMask.insert(.fullSizeContentView)
-        if !window.setFrameUsingName("VibeRemote.Settings.CompactStacked") {
+        if !window.setFrameUsingName("VibeRemote.Settings.NarrowStacked") {
             window.center()
         }
+        updaterObservation = AppUpdater.shared.$updateAvailable.combineLatest(AppUpdater.shared.$canCheck)
+            .sink { [weak self] available, canCheck in
+                guard let self, let toolbar = self.window?.toolbar else { return }
+                let identifier = NSToolbarItem.Identifier("VibeRemote.CheckForUpdates")
+                if available, !toolbar.items.contains(where: { $0.itemIdentifier == identifier }) {
+                    toolbar.insertItem(withItemIdentifier: identifier, at: max(0, toolbar.items.count - 1))
+                } else if !available, let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == identifier }) {
+                    toolbar.removeItem(at: index)
+                }
+                self.checkUpdateItem?.isEnabled = available || canCheck
+            }
         update(snapshot)
     }
 
@@ -242,11 +256,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, NSToolbarItem.Identifier("VibeRemote.CheckForUpdates"), Self.moreIdentifier]
+        [.flexibleSpace, Self.moreIdentifier]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        [.flexibleSpace, NSToolbarItem.Identifier("VibeRemote.CheckForUpdates"), Self.moreIdentifier]
     }
 
     func toolbar(
@@ -256,14 +270,14 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     ) -> NSToolbarItem? {
         if itemIdentifier.rawValue == "VibeRemote.CheckForUpdates" {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Check for Updates…"
-            item.toolTip = "Check for Updates…"
+            item.label = "Update"
+            item.toolTip = "Update VibeRemote"
             item.target = AppUpdater.shared
             item.action = #selector(AppUpdater.checkForUpdates(_:))
             let button = NSButton(title: item.label, target: AppUpdater.shared,
                                   action: #selector(AppUpdater.checkForUpdates(_:)))
             button.bezelStyle = .texturedRounded
-            button.setAccessibilityIdentifier("settings.updates.check")
+            button.setAccessibilityIdentifier("settings.updates.install")
             item.view = button
             return item
         }
@@ -288,6 +302,9 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         let guide = NSMenuItem(title: "Getting Started…", action: #selector(openOnboarding), keyEquivalent: "")
         guide.target = self
         menu.addItem(guide)
+        let check = AppUpdater.shared.makeMenuItem()
+        menu.addItem(check)
+        checkUpdateItem = check
         if let audioSettingsMenu {
             menu.addItem(.separator())
             let audio = NSMenuItem(title: "Audio Output", action: nil, keyEquivalent: "")
@@ -309,30 +326,31 @@ private struct RemoteSettingsView: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
     let setIdleTimeout: (RemoteIdleTimeout) -> Void
+    @State private var hoveredControl: String?
     private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: model.snapshot.generation) }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 VStack(spacing: 16) {
-                    HStack(alignment: .top, spacing: 0) {
-                        callouts(layout.left, side: .left)
-                        RemoteModelView(generation: model.snapshot.generation)
+                    ZStack(alignment: .top) {
+                        RemoteModelView(generation: model.snapshot.generation, onHover: { hoveredControl = $0 })
                             .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
                             .accessibilityLabel(model.snapshot.generation.displayName)
-                        callouts(layout.right, side: .right)
+                        HStack(alignment: .top, spacing: 0) {
+                            callouts(layout.left, side: .left)
+                            Spacer().frame(width: 144)
+                            callouts(layout.right, side: .right)
+                        }.allowsHitTesting(false)
                     }
-                    VStack(spacing: 7) {
-                        Text(model.snapshot.generation.displayName)
-                            .font(.system(size: 13, weight: .medium))
-                        HStack(spacing: 6) {
-                            Circle().fill(model.snapshot.connected ? Color.green : Color.secondary)
-                                .frame(width: 6, height: 6)
-                            Text(model.snapshot.connectionText).font(.system(size: 11, design: .monospaced))
-                        }.foregroundStyle(.secondary)
-                            .accessibilityElement(children: .combine)
+                    HStack(spacing: 12) {
+                        SettingsBatteryGauge(connected: model.snapshot.connected, percent: model.snapshot.batteryPercent)
+                        Text(model.snapshot.connected ? "CONNECTED" : "DISCONNECTED")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
                             .accessibilityIdentifier("settings.connection")
                     }
+
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
@@ -349,23 +367,13 @@ private struct RemoteSettingsView: View {
                     HStack {
                         Text("Auto disconnect")
                         Spacer()
-                        Picker("Auto disconnect", selection: Binding(
-                            get: { model.snapshot.idleTimeout }, set: { value in setIdleTimeout(value) }
-                        )) {
-                            ForEach(RemoteIdleTimeout.allCases, id: \.self) { value in Text(value.title).tag(value) }
-                        }.labelsHidden().pickerStyle(.menu).fixedSize()
-                            .accessibilityIdentifier("settings.idleTimeout")
+                        IdleTimeoutPopUp(value: model.snapshot.idleTimeout, onSelect: setIdleTimeout)
+                            .frame(width: 190, height: 32)
                     }
-                    Divider()
-                    HStack {
-                        Text("Updates").fontWeight(.semibold)
-                        Spacer()
-                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
-                            .foregroundStyle(.secondary)
-                    }
+
                 }
                 .font(.system(size: 13))
-                .frame(maxWidth: 504)
+                .frame(maxWidth: 472)
                 .padding(24)
                 .frame(maxWidth: .infinity)
             }
@@ -377,9 +385,13 @@ private struct RemoteSettingsView: View {
     private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
         ZStack(alignment: .topLeading) {
             ForEach(items) { item in
-                callout(item.key, side: side).offset(y: RemoteModelScene.guideY(item.centerY) - 17)
+                callout(item.key, side: side)
+                    .opacity(hoveredControl == item.key ? 1 : 0)
+                    .accessibilityHidden(hoveredControl != item.key)
+                    .allowsHitTesting(false)
+                    .offset(y: RemoteModelScene.guideY(item.centerY) - 17)
             }
-        }.frame(width: 180, height: RemoteModelScene.previewHeight, alignment: .topLeading)
+        }.frame(width: 164, height: RemoteModelScene.previewHeight, alignment: .topLeading)
     }
 
     private func callout(_ key: String, side: Side) -> some View {
@@ -387,7 +399,7 @@ private struct RemoteSettingsView: View {
         return HStack(spacing: 8) {
             if side == .right { connector }
             Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                .frame(width: 136, alignment: side == .left ? .trailing : .leading)
+                .frame(width: 128, alignment: side == .left ? .trailing : .leading)
             if side == .left { connector }
         }
         .frame(height: 34)
@@ -397,7 +409,43 @@ private struct RemoteSettingsView: View {
     }
 
     private var connector: some View {
-        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 36, height: 1)
+        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 28, height: 1)
+    }
+}
+
+/// Battery-widget style ring; charging is not shown because the snapshot does not
+/// provide a verified charging state. Unknown and disconnected readings stay neutral.
+private struct SettingsBatteryGauge: View {
+    let connected: Bool
+    let percent: Int?
+    private var reading: Int? {
+        guard connected, let percent, (0...100).contains(percent) else { return nil }
+        return percent
+    }
+    private var label: String {
+        if let reading { return "Remote battery: \(reading)%" }
+        return connected ? "Remote battery unavailable" : "Remote disconnected"
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(Color.primary.opacity(0.12), lineWidth: 5)
+            if let reading {
+                Circle().trim(from: 0, to: CGFloat(reading) / 100)
+                    .stroke(reading <= 20 ? Color.red : Color.green,
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            Image(systemName: "appletvremote.gen4.fill")
+                .font(.system(size: 23, weight: .medium))
+                .foregroundStyle(connected ? Color.primary : Color.secondary)
+        }
+        .frame(width: 44, height: 44)
+        .padding(3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("settings.battery")
+        .help(label)
     }
 }
 
@@ -475,7 +523,7 @@ struct SiriActionPopUp: NSViewRepresentable {
         required init?(coder: NSCoder) { nil }
     }
 
-    private final class SizedPopUpButton: NSPopUpButton {
+    final class SizedPopUpButton: NSPopUpButton {
         // Explanations in the menu can be longer than the selected title. Do not let
         // the longest menu item widen a button into the neighboring connector/photo.
         override var intrinsicContentSize: NSSize { NSSize(width: 148, height: 36) }
@@ -494,6 +542,48 @@ struct SiriActionPopUp: NSViewRepresentable {
             guard let raw = sender.selectedItem?.representedObject as? String,
                   let action = ButtonAction(rawValue: raw), action.isAssignableToSiriButton else { return }
             onSelect(action)
+        }
+    }
+}
+
+@MainActor
+private struct IdleTimeoutPopUp: NSViewRepresentable {
+    let value: RemoteIdleTimeout
+    let onSelect: (RemoteIdleTimeout) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onSelect: onSelect) }
+
+    func makeNSView(context: Context) -> SiriActionPopUp.GlassMappingView {
+        let button = SiriActionPopUp.SizedPopUpButton(frame: .zero, pullsDown: false)
+        button.bezelStyle = .rounded
+        button.isBordered = false
+        button.controlSize = .large
+        button.font = .systemFont(ofSize: 13)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.selectValue(_:))
+        button.setAccessibilityIdentifier("settings.idleTimeout")
+        button.setAccessibilityLabel("Auto disconnect")
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for option in RemoteIdleTimeout.allCases { button.addItem(withTitle: option.title) }
+        let glass = SiriActionPopUp.GlassMappingView(button: button)
+        updateNSView(glass, context: context)
+        return glass
+    }
+
+    func updateNSView(_ glass: SiriActionPopUp.GlassMappingView, context: Context) {
+        context.coordinator.onSelect = onSelect
+        let index = RemoteIdleTimeout.allCases.firstIndex(of: value) ?? 0
+        if glass.button.indexOfSelectedItem != index { glass.button.selectItem(at: index) }
+    }
+
+    final class Coordinator: NSObject {
+        var onSelect: (RemoteIdleTimeout) -> Void
+        init(onSelect: @escaping (RemoteIdleTimeout) -> Void) { self.onSelect = onSelect }
+        @objc func selectValue(_ sender: NSPopUpButton) {
+            let choices = RemoteIdleTimeout.allCases
+            guard choices.indices.contains(sender.indexOfSelectedItem) else { return }
+            onSelect(choices[sender.indexOfSelectedItem])
         }
     }
 }

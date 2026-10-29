@@ -198,11 +198,11 @@ black-glass and aluminum layouts, including side Siri, Mute and Power only on al
 First-generation CAD has no printed legends: small ink planes use imported button-face
 bounds, without replacing the CAD buttons. The aluminum symbols are CAD geometry.
 `RemoteSettingsLayout` callouts follow the converted control coordinates in a 398-point
-reference frame, projected into a 280-point preview with camera padding; keep callouts aligned when changing display scale. Drag has bounded pitch/yaw and release restores the guide pose; Reduce
+reference frame, projected into a 280-point preview with camera padding; keep callouts aligned when changing display scale. Drag has continuous pitch/yaw with logarithmic resistance and no hard angle limits and release restores the guide pose; Reduce
 Motion skips that animation. No remote actions, extra HID/Bluetooth managers, idle spin
 or frame timers. Keep `rendersContinuously` and `isPlaying` off; rebuild only on generation
 changes. Check both generations in light/dark appearance and in the same retained window.
-Original PNGs remain bundled references. Callouts are read-only; only Siri is editable.
+Original PNGs remain bundled references. Callouts are read-only and appear only over the corresponding CAD button on hover; highlight the matching CAD button blue and hide both label and highlight while dragging or when the pointer exits. Preserve and restore original materials without tinting shared materials on other parts. Split the volume rocker into upper/lower regions. Only Siri is editable. Do not display the remote generation as a visible heading; keep connection state and battery.
 Preserve first-generation composite defaults except its fixed Advanced Menu opener.
 
 Opening Settings switches the app's activation policy to `.regular` so its Dock icon
@@ -226,12 +226,12 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected. The 640 x 660 stacked window places the generation-specific remote, static
-callouts and connection/battery summary above Siri, Auto Disconnect and Updates.
+disconnected. The 520 x 580 stacked window places the generation-specific remote, hover-only
+button callouts and connection/battery summary above Siri and Auto Disconnect. Both menus use the same native glass capsule style.
 The full content scrolls on smaller screens; keep a separate stacked-layout frame
 autosave key so the former wide window size cannot return. Supporting paragraphs and
 rotation hints are removed; basic instructions live in the first-run guide. No mode selector or pointer/scroll sliders.
-Check for Updates sits in the toolbar immediately left of More; the version remains in the content. Automatic checks are always enabled at updater startup, including for previously opted-out installs; do not expose an opt-out checkbox.
+Manual Check for Updates lives in More. The toolbar shows Update immediately left of More only while Sparkle has a valid update session; no version or Updates section appears in the content. Automatic checks are always enabled at updater startup, including for previously opted-out installs; do not expose an opt-out checkbox.
 The More toolbar retains Reset, Audio Output and Diagnostics; Reset restores Siri and
 Auto Disconnect. Window state comes from
 `MenuBarManager` and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM

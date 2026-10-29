@@ -7,6 +7,25 @@ import XCTest
 @testable import VibeRemote
 
 final class ModelTests: XCTestCase {
+    @MainActor
+    func testCADHoverResolvesButtonsAndVolumeHalves() throws {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let scene = try RemoteModelScene.make(generation: generation)
+            let remote = try XCTUnwrap(scene.rootNode.childNode(withName: "remote", recursively: false))
+            for name in ["back", "siri", "playPause", "tv", "volume"] {
+                let node = try XCTUnwrap(remote.childNode(withName: name, recursively: true))
+                let (low, high) = node.boundingBox
+                for fraction: CGFloat in [0.25, 0.75] {
+                    let local = SCNVector3((low.x + high.x) / 2, low.y + (high.y - low.y) * fraction, high.z)
+                    let point = remote.convertPosition(local, from: node)
+                    let expected = name == "volume" ? (fraction > 0.5 ? "volumeUp" : "volumeDown") : name
+                    XCTAssertEqual(RemoteModelNSView.control(at: point, hitNode: node, remote: remote, generation: generation), expected)
+                }
+            }
+            XCTAssertNil(RemoteModelNSView.control(at: SCNVector3(0, -150, 0), hitNode: remote, remote: remote, generation: generation))
+        }
+    }
+
     func testGlassMediaEventsWaitForHIDWithoutRequiringPassiveCapture() {
         XCTAssertTrue(RemoteButtonMapping.shouldAwaitMediaSource(generation: .glassTouchSurface, passiveCapture: false))
         XCTAssertTrue(RemoteButtonMapping.shouldAwaitMediaSource(generation: .aluminumClickpad, passiveCapture: true))
@@ -990,6 +1009,38 @@ final class ModelTests: XCTestCase {
     }
 
     @MainActor
+    func testHoverTintRestoresCADMaterialsWithoutChangingOtherButtons() throws {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let view = RemoteModelNSView()
+            view.configure(generation: generation)
+            let root = try XCTUnwrap(view.scene?.rootNode)
+            let back = try XCTUnwrap(root.childNode(withName: "back", recursively: true)?.geometry)
+            let tv = try XCTUnwrap(root.childNode(withName: "tv", recursively: true)?.geometry)
+            let originalBack = back.materials
+            let originalTV = tv.materials
+            view.applyHighlight("back")
+            XCTAssertFalse(back.materials[0] === originalBack[0])
+            XCTAssertTrue(tv.materials[0] === originalTV[0])
+            view.applyHighlight("tv")
+            XCTAssertTrue(back.materials[0] === originalBack[0])
+            XCTAssertFalse(tv.materials[0] === originalTV[0])
+            view.applyHighlight(nil)
+            XCTAssertTrue(tv.materials[0] === originalTV[0])
+        }
+    }
+
+    @MainActor
+    func testRemoteRotationResistanceKeepsMovingBeyondFormerStops() {
+        let distances: [CGFloat] = [0, 40, 160, 400, 800, 1600, 3200]
+        let angles = distances.map(RemoteModelScene.dragAngle)
+        for index in 1..<angles.count { XCTAssertGreaterThan(angles[index], angles[index - 1]) }
+        XCTAssertGreaterThan(angles.last!, .pi)
+        XCTAssertLessThan(RemoteModelScene.dragAngle(800) - RemoteModelScene.dragAngle(400),
+                          RemoteModelScene.dragAngle(400) - RemoteModelScene.dragAngle(0))
+        XCTAssertEqual(RemoteModelScene.dragAngle(-400), -RemoteModelScene.dragAngle(400), accuracy: 0.0001)
+    }
+
+    @MainActor
     func testRemotePreviewKeepsBothModelsInsideFrameDuringDrag() throws {
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
             let scene = try RemoteModelScene.make(generation: generation)
@@ -997,8 +1048,8 @@ final class ModelTests: XCTestCase {
             let (low, high) = remote.boundingBox
             let halfHeight = CGFloat(RemoteModelScene.cameraHalfHeight)
             let halfWidth = halfHeight * RemoteModelScene.previewWidth / RemoteModelScene.previewHeight
-            for pitch: CGFloat in [-0.35, 0, 0.35] {
-                for yaw: CGFloat in [-1.25, 0, 1.25] {
+            for pitch in stride(from: CGFloat(-Double.pi), through: CGFloat(Double.pi), by: CGFloat(Double.pi / 8)) {
+                for yaw in stride(from: CGFloat(-Double.pi), through: CGFloat(Double.pi), by: CGFloat(Double.pi / 8)) {
                     remote.eulerAngles = SCNVector3(CGFloat(RemoteModelScene.restingAngles.x) + pitch,
                         CGFloat(RemoteModelScene.restingAngles.y) + yaw, 0)
                     for x in [low.x, high.x] { for y in [low.y, high.y] { for z in [low.z, high.z] {

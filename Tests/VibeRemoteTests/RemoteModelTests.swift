@@ -8,7 +8,7 @@ final class RemoteModelTests: XCTestCase {
     @MainActor
     func testBothModelsHaveDepthDistinctControlsAndIdleRenderer() throws {
         let view = RemoteModelNSView()
-        view.frame = NSRect(x: 0, y: 0, width: 144, height: 398)
+        view.frame = NSRect(x: 0, y: 0, width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
         XCTAssertFalse(view.rendersContinuously)
         XCTAssertFalse(view.isPlaying)
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
@@ -49,7 +49,10 @@ final class RemoteModelTests: XCTestCase {
             view.mouseDown(with: try event(.leftMouseDown, x: 60, y: 100))
             view.mouseDragged(with: try event(.leftMouseDragged, x: 500, y: 200))
             XCTAssertGreaterThan(abs(root.eulerAngles.y - RemoteModelScene.restingAngles.y), 0.5)
-            XCTAssertLessThanOrEqual(abs(root.eulerAngles.y - RemoteModelScene.restingAngles.y), 1.251)
+            let firstTurn = abs(root.eulerAngles.y - RemoteModelScene.restingAngles.y)
+            XCTAssertGreaterThan(firstTurn, 1.25, "Dragging continues beyond the former hard stop")
+            view.mouseDragged(with: try event(.leftMouseDragged, x: 1000, y: 200))
+            XCTAssertGreaterThan(abs(root.eulerAngles.y - RemoteModelScene.restingAngles.y), firstTurn)
             view.mouseUp(with: try event(.leftMouseUp, x: 500, y: 200))
             XCTAssertEqual(root.eulerAngles.y, RemoteModelScene.restingAngles.y, accuracy: 0.001)
             XCTAssertFalse(view.rendersContinuously)

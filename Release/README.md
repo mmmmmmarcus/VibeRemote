@@ -3,7 +3,7 @@
 Sparkle 2.10.1 is pinned in SwiftPM. The app uses its standard download, signature
 verification, installation and relaunch UI. Automatic checks are always enabled and run daily; downloads
 and installation require the user's choice. Check for Updates is also available
-in Settings and the menu bar. Profile submission is disabled.
+in Settings’ More menu and the menu bar. Settings shows an Update toolbar button only while Sparkle has a valid update available; automatic checks use this gentle reminder instead of opening an unsolicited update window. Profile submission is disabled.
 
 `update-config.json` contains only the public verification key and HTTPS feed URL.
 The private signing key is held in the developer's macOS Keychain under the Sparkle
@@ -17,7 +17,7 @@ Keep a secure backup using Sparkle's documented key management process.
 2. Build a Developer ID signed and notarized bundle:
 
    ```sh
-   APP_VERSION=0.3.2 BUILD_NUMBER=7 SIGNING_MODE=release \
+   APP_VERSION=0.3.3 BUILD_NUMBER=9 SIGNING_MODE=release \
    CODESIGN_IDENTITY='Developer ID Application: <your identity>' \
    NOTARY_PROFILE=NM_NOTARY ./create_app_bundle.sh
    ```
@@ -28,8 +28,8 @@ Keep a secure backup using Sparkle's documented key management process.
 4. Review the archive and appcast. For builds containing the GPL audio driver,
    include its corresponding source (see THIRD_PARTY_NOTICES.md); do not publish
    Apple's PacketLogger without a separate redistribution review.
-5. Publish a normal GitHub Release tagged `v0.3.2` with both generated assets:
-   `VibeRemote-0.3.2-7.zip` and `appcast.xml`. The feed URL is the stable
+5. Publish a normal GitHub Release tagged `v0.3.3` with both generated assets:
+   `VibeRemote-0.3.3-9.zip` and `appcast.xml`. The feed URL is the stable
    `releases/latest/download/appcast.xml` redirect. Each archive uses an immutable
    version-tagged URL. Keep every published archive available.
 6. On a separate older signed installation, check, download, install and relaunch.

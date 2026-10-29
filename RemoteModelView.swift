@@ -8,28 +8,31 @@ import SwiftUI
 enum RemoteModelScene {
     // Keep the CAD comfortably inside the viewport at every supported drag angle.
     static let previewHeight: CGFloat = 280
-    static let previewWidth: CGFloat = 144
+    static let previewWidth: CGFloat = 472
     static let cameraHalfHeight: Double = 240
     static func guideY(_ referenceY: CGFloat) -> CGFloat {
         previewHeight / 2 + (referenceY - 199) * previewHeight / CGFloat(cameraHalfHeight * 2)
     }
 
+    // Logarithmic resistance has no hard stop: longer drags always turn farther.
+    static func dragAngle(_ distance: CGFloat) -> CGFloat { 1.2 * asinh(distance / 160) }
+
     static let restingAngles = SCNVector3(0.025, -0.24, 0)
 
     static func make(generation: RemoteGeneration, bundle: Bundle = SettingsAssets.bundle) throws -> SCNScene {
         let scene = SCNScene()
+        let old = generation == .glassTouchSurface
         // A tiny generated studio environment gives metal/glass soft reflections.
         // It is created once per model, with no files, networking or animation loop.
         scene.lightingEnvironment.contents = NSImage(size: NSSize(width: 512, height: 256), flipped: false) { rect in
             NSGradient(colorsAndLocations: (NSColor(white: 0.22, alpha: 1), 0),
-                (NSColor(white: 0.85, alpha: 1), 0.18),
+                (NSColor(white: old ? 0.85 : 0.65, alpha: 1), 0.18),
                 (NSColor(white: 0.28, alpha: 1), 0.38),
                 (NSColor(white: 0.55, alpha: 1), 0.7),
                 (NSColor(white: 0.22, alpha: 1), 1))?.draw(in: rect, angle: 0)
             return true
         }
-        scene.lightingEnvironment.intensity = 0.7
-        let old = generation == .glassTouchSurface
+        scene.lightingEnvironment.intensity = old ? 1.2 : 0.45
         let resource = old ? "SiriRemoteFirstGeneration" : "SiriRemoteAluminum"
         guard let url = bundle.url(forResource: resource, withExtension: "dae", subdirectory: "RemoteModels") else {
             throw ModelError.missingAsset(resource)
@@ -49,8 +52,14 @@ enum RemoteModelScene {
                 let metal = name.contains("Aluminum") || name.contains("Steel") || name.contains("鋼") || name.contains("真鍮") || name == "xdr"
                 let glossy = name.contains("Glossy") || name.contains("光沢") || name.contains("つや出し")
                 material.lightingModel = .physicallyBased
-                material.metalness.contents = metal ? 0.75 : 0.05
+                material.metalness.contents = metal ? 1.0 : 0.0
                 material.roughness.contents = glossy ? 0.22 : (metal ? 0.34 : 0.62)
+                if name == "xdr" {
+                    // Neutral anodized aluminum: colored by studio reflections, not
+                    // a near-white diffuse finish that makes the shell look plastic.
+                    material.diffuse.contents = NSColor(calibratedWhite: 0.55, alpha: 1)
+                    material.roughness.contents = 0.4
+                }
             }
         }
         func glyph(_ symbol: String, x: CGFloat, top: CGFloat, size: CGFloat = 12, z: CGFloat, text: Bool = false) {
@@ -113,7 +122,7 @@ enum RemoteModelScene {
         camera.camera?.usesOrthographicProjection = true
         camera.camera?.orthographicScale = cameraHalfHeight
         camera.camera?.wantsHDR = true
-        camera.camera?.exposureOffset = -0.5
+        camera.camera?.exposureOffset = old ? -0.5 : -0.9
         camera.camera?.zNear = 1
         camera.camera?.zFar = 2000
         camera.position = SCNVector3(0, 0, 800)
@@ -127,9 +136,9 @@ enum RemoteModelScene {
             node.look(at: SCNVector3Zero)
             scene.rootNode.addChildNode(node)
         }
-        light(.ambient, intensity: 450, position: SCNVector3Zero)
-        light(.directional, intensity: 950, position: SCNVector3(-200, 300, 400))
-        light(.directional, intensity: 650, position: SCNVector3(200, 0, 100))
+        light(.ambient, intensity: old ? 120 : 45, position: SCNVector3Zero)
+        light(.directional, intensity: old ? 700 : 280, position: SCNVector3(-200, 300, 400))
+        light(.directional, intensity: old ? 350 : 120, position: SCNVector3(200, 0, 100))
         return scene
     }
 
@@ -139,16 +148,23 @@ enum RemoteModelScene {
 @MainActor
 struct RemoteModelView: NSViewRepresentable {
     let generation: RemoteGeneration
+    var onHover: (String?) -> Void = { _ in }
     func makeNSView(context: Context) -> RemoteModelNSView { RemoteModelNSView() }
-    func updateNSView(_ view: RemoteModelNSView, context: Context) { view.configure(generation: generation) }
+    func updateNSView(_ view: RemoteModelNSView, context: Context) { view.onHover = onHover; view.configure(generation: generation) }
     static func dismantleNSView(_ view: RemoteModelNSView, coordinator: ()) { view.scene = nil }
 }
 
 @MainActor
 final class RemoteModelNSView: SCNView {
     override var isOpaque: Bool { false }
+    var onHover: (String?) -> Void = { _ in }
+    private var hoveredControl: String?
+    private var hoverTracking: NSTrackingArea?
     private var generation: RemoteGeneration?
     private var dragOrigin: NSPoint?
+    private var dragAngles = RemoteModelScene.restingAngles
+    private var highlightedGeometry: SCNGeometry?
+    private var originalMaterials: [SCNMaterial] = []
     private var remote: SCNNode? { scene?.rootNode.childNode(withName: "remote", recursively: false) }
 
     init() {
@@ -167,6 +183,7 @@ final class RemoteModelNSView: SCNView {
     func configure(generation: RemoteGeneration) {
         guard self.generation != generation else { return }
         self.generation = generation
+        publishHover(nil)
         dragOrigin = nil
         do { scene = try RemoteModelScene.make(generation: generation) }
         catch {
@@ -178,16 +195,94 @@ final class RemoteModelNSView: SCNView {
         setAccessibilityLabel(generation.displayName)
         needsDisplay = true
     }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(tracking)
+        hoverTracking = tracking
+    }
+
+    private func publishHover(_ key: String?) {
+        guard hoveredControl != key else { return }
+        hoveredControl = key
+        applyHighlight(key)
+        onHover(key)
+    }
+
+    func applyHighlight(_ key: String?) {
+        highlightedGeometry?.materials = originalMaterials
+        highlightedGeometry = nil
+        originalMaterials = []
+        guard let key, let remote else { needsDisplay = true; return }
+        let name: String
+        switch key {
+        case "volumeUp", "volumeDown": name = "volume"
+        case "select": name = generation == .glassTouchSurface ? "glass-face" : "clickpad-center"
+        case "touch.edit": name = "clickpad-ring"
+        default: name = key
+        }
+        guard let geometry = remote.childNode(withName: name, recursively: true)?.geometry else { return }
+        highlightedGeometry = geometry
+        originalMaterials = geometry.materials
+        // Copy materials so shared CAD finishes on other buttons remain unchanged.
+        geometry.materials = originalMaterials.map { original in
+            let material = original.copy() as! SCNMaterial
+            let base = original.diffuse.contents as? NSColor ?? .darkGray
+            material.diffuse.contents = base.blended(withFraction: 0.65, of: .systemBlue)
+            material.emission.contents = NSColor.systemBlue
+            material.emission.intensity = 0.35
+            return material
+        }
+        needsDisplay = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard dragOrigin == nil, let remote else { publishHover(nil); return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let hit = hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue]).first else {
+            publishHover(nil); return
+        }
+        let local = remote.convertPosition(hit.worldCoordinates, from: nil)
+        publishHover(Self.control(at: local, hitNode: hit.node, remote: remote, generation: generation ?? .unknown))
+    }
+
+    // Test the imported control bounds so CAD glyph solids and ink planes resolve
+    // to their underlying button as well. A hit on the shell is otherwise inert.
+    static func control(at point: SCNVector3, hitNode: SCNNode, remote: SCNNode, generation: RemoteGeneration) -> String? {
+        for key in ["siri", "power", "back", "tv", "playPause", "mute", "volume", "clickpad-center", "clickpad-ring"] {
+            guard let node = remote.childNode(withName: key, recursively: true) else { continue }
+            let p = node.convertPosition(point, from: remote)
+            let (low, high) = node.boundingBox
+            guard p.x >= low.x - 1, p.x <= high.x + 1,
+                  p.y >= low.y - 1, p.y <= high.y + 1,
+                  p.z >= low.z - 1, p.z <= high.z + 2 else { continue }
+            if key == "volume" { return p.y > (low.y + high.y) / 2 ? "volumeUp" : "volumeDown" }
+            if key == "clickpad-center" { return "select" }
+            if key == "clickpad-ring" { return "touch.edit" }
+            return key
+        }
+        if generation == .glassTouchSurface, hitNode.name == "glass-face", point.y > 90 { return "select" }
+        return nil
+    }
+
+    override func mouseExited(with event: NSEvent) { publishHover(nil) }
+
     override func mouseDown(with event: NSEvent) {
-        remote?.removeAllAnimations()
+        publishHover(nil)
+        if let remote {
+            dragAngles = remote.presentation.eulerAngles
+            remote.removeAllAnimations()
+            remote.eulerAngles = dragAngles
+        }
         dragOrigin = convert(event.locationInWindow, from: nil)
     }
     override func mouseDragged(with event: NSEvent) {
         guard let origin = dragOrigin, let remote else { return }
         let point = convert(event.locationInWindow, from: nil)
         remote.eulerAngles = SCNVector3(
-            CGFloat(RemoteModelScene.restingAngles.x) - min(0.35, max(-0.35, (point.y - origin.y) / 300)),
-            CGFloat(RemoteModelScene.restingAngles.y) + min(1.25, max(-1.25, (point.x - origin.x) / 110)), 0)
+            CGFloat(dragAngles.x) - RemoteModelScene.dragAngle(point.y - origin.y),
+            CGFloat(dragAngles.y) + RemoteModelScene.dragAngle(point.x - origin.x), CGFloat(dragAngles.z))
         needsDisplay = true
     }
     override func mouseUp(with event: NSEvent) { restorePose() }
@@ -200,7 +295,7 @@ final class RemoteModelNSView: SCNView {
         }
         restorePose(animated: false)
     }
-    @objc private func cancelDrag() { restorePose(animated: false) }
+    @objc private func cancelDrag() { publishHover(nil); restorePose(animated: false) }
     private func restorePose(animated: Bool = true) {
         dragOrigin = nil
         SCNTransaction.begin()
