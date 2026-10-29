@@ -112,7 +112,7 @@ ditto VibeRemote.app /Applications/VibeRemote.app
 open /Applications/VibeRemote.app
 ```
 
-CI (`.github/workflows/ci.yml`, `macos-15`) runs: `swift build`, `swift test`,
+CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
 the entitlements. Keep all of these green.
 
