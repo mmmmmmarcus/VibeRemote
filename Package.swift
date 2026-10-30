@@ -85,7 +85,7 @@ let package = Package(
                 "SystemVolume.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
-                        .copy("Resources/RemoteModels"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
+                        .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),

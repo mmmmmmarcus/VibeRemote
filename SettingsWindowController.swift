@@ -148,7 +148,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         self.diagnosticsMenu = diagnosticsMenu
         self.showOnboarding = showOnboarding
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 347, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -163,7 +163,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         window.titlebarSeparatorStyle = .none
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("VibeRemote.Settings.NarrowStacked")
+        window.setFrameAutosaveName("VibeRemote.Settings.CompactStacked")
         let hosting = NSHostingController(rootView: RemoteSettingsView(
             model: model,
             setSiriAction: setSiriAction,
@@ -202,11 +202,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 520, height: 580))
+        window.setContentSize(NSSize(width: 347, height: 580))
         // Keep the stacked layout below the transparent toolbar. The full content scrolls
         // on smaller screens, so the update controls always remain reachable.
         window.styleMask.insert(.fullSizeContentView)
-        if !window.setFrameUsingName("VibeRemote.Settings.NarrowStacked") {
+        if !window.setFrameUsingName("VibeRemote.Settings.CompactStacked") {
             window.center()
         }
         updaterObservation = AppUpdater.shared.$updateAvailable.combineLatest(AppUpdater.shared.$canCheck)
@@ -335,11 +335,11 @@ private struct RemoteSettingsView: View {
                 VStack(spacing: 16) {
                     ZStack(alignment: .top) {
                         RemoteModelView(generation: model.snapshot.generation, onHover: { hoveredControl = $0 })
-                            .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
+                            .frame(width: 336, height: RemoteModelScene.previewHeight)
                             .accessibilityLabel(model.snapshot.generation.displayName)
                         HStack(alignment: .top, spacing: 0) {
                             callouts(layout.left, side: .left)
-                            Spacer().frame(width: 144)
+                            Spacer().frame(width: 112)
                             callouts(layout.right, side: .right)
                         }.allowsHitTesting(false)
                     }
@@ -362,19 +362,19 @@ private struct RemoteSettingsView: View {
                         Text("Siri Button")
                         Spacer()
                         SiriActionPopUp(action: model.snapshot.siriAction, onSelect: setSiriAction)
-                            .frame(width: 190, height: 32)
+                            .frame(width: 178, height: 32)
                     }
                     HStack {
                         Text("Auto disconnect")
                         Spacer()
                         IdleTimeoutPopUp(value: model.snapshot.idleTimeout, onSelect: setIdleTimeout)
-                            .frame(width: 190, height: 32)
+                            .frame(width: 178, height: 32)
                     }
 
                 }
                 .font(.system(size: 13))
                 .frame(maxWidth: 472)
-                .padding(24)
+                .padding(20)
                 .frame(maxWidth: .infinity)
             }
         }
@@ -391,15 +391,15 @@ private struct RemoteSettingsView: View {
                     .allowsHitTesting(false)
                     .offset(y: RemoteModelScene.guideY(item.centerY) - 17)
             }
-        }.frame(width: 164, height: RemoteModelScene.previewHeight, alignment: .topLeading)
+        }.frame(width: 112, height: RemoteModelScene.previewHeight, alignment: .topLeading)
     }
 
     private func callout(_ key: String, side: Side) -> some View {
         let title = RemoteSettingsGuide.title(for: key, snapshot: model.snapshot)
-        return HStack(spacing: 8) {
+        return HStack(spacing: 6) {
             if side == .right { connector }
             Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                .frame(width: 128, alignment: side == .left ? .trailing : .leading)
+                .frame(width: 90, alignment: side == .left ? .trailing : .leading)
             if side == .left { connector }
         }
         .frame(height: 34)
@@ -409,7 +409,7 @@ private struct RemoteSettingsView: View {
     }
 
     private var connector: some View {
-        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 28, height: 1)
+        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 16, height: 1)
     }
 }
 

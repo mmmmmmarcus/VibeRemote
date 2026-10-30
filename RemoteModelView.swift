@@ -25,14 +25,16 @@ enum RemoteModelScene {
         // A tiny generated studio environment gives metal/glass soft reflections.
         // It is created once per model, with no files, networking or animation loop.
         scene.lightingEnvironment.contents = NSImage(size: NSSize(width: 512, height: 256), flipped: false) { rect in
-            NSGradient(colorsAndLocations: (NSColor(white: 0.22, alpha: 1), 0),
-                (NSColor(white: old ? 0.85 : 0.65, alpha: 1), 0.18),
-                (NSColor(white: 0.28, alpha: 1), 0.38),
-                (NSColor(white: 0.55, alpha: 1), 0.7),
-                (NSColor(white: 0.22, alpha: 1), 1))?.draw(in: rect, angle: 0)
+            // Broad light/dark studio bands give the curved metal edges a sheen.
+            // A nearly uniform environment makes even fully metallic surfaces flat.
+            NSGradient(colorsAndLocations: (NSColor(white: old ? 0.22 : 0.28, alpha: 1), 0),
+                (NSColor(white: 0.85, alpha: 1), 0.18),
+                (NSColor(white: old ? 0.28 : 0.34, alpha: 1), 0.38),
+                (NSColor(white: old ? 0.55 : 0.70, alpha: 1), 0.7),
+                (NSColor(white: old ? 0.22 : 0.28, alpha: 1), 1))?.draw(in: rect, angle: 0)
             return true
         }
-        scene.lightingEnvironment.intensity = old ? 1.2 : 0.45
+        scene.lightingEnvironment.intensity = old ? 1.2 : 0.65
         let resource = old ? "SiriRemoteFirstGeneration" : "SiriRemoteAluminum"
         guard let url = bundle.url(forResource: resource, withExtension: "dae", subdirectory: "RemoteModels") else {
             throw ModelError.missingAsset(resource)
@@ -55,10 +57,10 @@ enum RemoteModelScene {
                 material.metalness.contents = metal ? 1.0 : 0.0
                 material.roughness.contents = glossy ? 0.22 : (metal ? 0.34 : 0.62)
                 if name == "xdr" {
-                    // Neutral anodized aluminum: colored by studio reflections, not
-                    // a near-white diffuse finish that makes the shell look plastic.
-                    material.diffuse.contents = NSColor(calibratedWhite: 0.55, alpha: 1)
-                    material.roughness.contents = 0.4
+                    // Satin anodized aluminum retains broad reflections and edge
+                    // highlights without the sharp finish of polished chrome.
+                    material.diffuse.contents = NSColor(calibratedWhite: 0.90, alpha: 1)
+                    material.roughness.contents = 0.48
                 }
             }
         }
@@ -122,7 +124,10 @@ enum RemoteModelScene {
         camera.camera?.usesOrthographicProjection = true
         camera.camera?.orthographicScale = cameraHalfHeight
         camera.camera?.wantsHDR = true
-        camera.camera?.exposureOffset = old ? -0.5 : -0.9
+        // Keep the studio lighting stable; eye adaptation otherwise brightens
+        // this isolated model over the first few seconds after opening Settings.
+        camera.camera?.wantsExposureAdaptation = false
+        camera.camera?.exposureOffset = old ? -0.5 : 0.85
         camera.camera?.zNear = 1
         camera.camera?.zFar = 2000
         camera.position = SCNVector3(0, 0, 800)
@@ -136,9 +141,9 @@ enum RemoteModelScene {
             node.look(at: SCNVector3Zero)
             scene.rootNode.addChildNode(node)
         }
-        light(.ambient, intensity: old ? 120 : 45, position: SCNVector3Zero)
-        light(.directional, intensity: old ? 700 : 280, position: SCNVector3(-200, 300, 400))
-        light(.directional, intensity: old ? 350 : 120, position: SCNVector3(200, 0, 100))
+        light(.ambient, intensity: old ? 120 : 80, position: SCNVector3Zero)
+        light(.directional, intensity: old ? 700 : 200, position: SCNVector3(-200, 300, 400))
+        light(.directional, intensity: old ? 350 : 180, position: SCNVector3(200, 0, 100))
         return scene
     }
 

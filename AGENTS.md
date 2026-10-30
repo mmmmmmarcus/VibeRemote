@@ -226,7 +226,7 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected. The 520 x 580 stacked window places the generation-specific remote, hover-only
+disconnected. The 347 x 580 stacked window places the generation-specific remote, hover-only
 button callouts and connection/battery summary above Siri and Auto Disconnect. Both menus use the same native glass capsule style.
 The full content scrolls on smaller screens; keep a separate stacked-layout frame
 autosave key so the former wide window size cannot return. Supporting paragraphs and
@@ -958,8 +958,7 @@ Historical benchmark reports are evidence only, not supported runtime features.
 
 ### Onboarding and updates
 
-The three-step first-run guide introduces controls, connection permissions and Siri
-mapping. Close/Back must never overwrite the saved mapping. Finish saves only an
+The illustrated first-run guide uses a sky-blue oil-painted image panel above text. It starts with connection permissions, highlights one CAD control per page for the current remote generation, and finishes with Siri mapping. Close/Back must never overwrite the saved mapping. Finish saves only an
 assignable action and marks completion. Existing installs with a saved Siri mapping
 or microphone engine migrate quietly; Getting Started in Settings reopens the guide.
 Use the existing manager snapshots and permission callbacks; no duplicate HID/Bluetooth

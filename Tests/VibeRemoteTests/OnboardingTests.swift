@@ -29,6 +29,19 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(defaults.integer(forKey: OnboardingState.completionKey), 1)
     }
 
+    func testButtonWalkthroughMatchesBothRemoteFamilies() {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let pages = OnboardingPage.pages(for: generation)
+            XCTAssertEqual(pages.first, .connection)
+            XCTAssertEqual(pages.last, .siri)
+            for key in ["touch.edit", "select", "back", "tv", "playPause", "volumeUp", "volumeDown"] {
+                XCTAssertEqual(pages.filter { $0 == .button(key) }.count, 1)
+            }
+            XCTAssertEqual(pages.contains(.button("mute")), generation == .aluminumClickpad)
+            XCTAssertEqual(pages.contains(.button("power")), generation == .aluminumClickpad)
+        }
+    }
+
     @MainActor
     func testClosingGuideDoesNotSaveOrCallFinish() throws {
         _ = NSApplication.shared
@@ -50,13 +63,13 @@ final class OnboardingTests: XCTestCase {
             access: OnboardingAccess())
         let hosting = NSHostingController(rootView: OnboardingView(model: model,
             requestBluetooth: {}, requestInput: {}, requestAccessibility: {}, finish: { _ in }))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 520),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentViewController = hosting
         defer { window.close() }
         let frame = try XCTUnwrap(window.contentView?.superview)
-        for step in 0...2 {
+        for step in OnboardingPage.pages(for: model.snapshot.generation).indices {
             model.step = step
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                 window.appearance = NSAppearance(named: appearance)
