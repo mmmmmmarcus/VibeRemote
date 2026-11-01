@@ -14,7 +14,13 @@ public enum VoiceEvent: Equatable {
 public struct SiriRemotePacketParser {
     public init() {}
     private var pendingByHandle: [UInt16: PendingL2CAPPacket] = [:]
-    private var oldVoiceHandles: Set<UInt16> = []
+    private struct OldVoiceSession {
+        let startedAt: TimeInterval
+        var firstSequence: UInt16?
+        var releaseLimit: UInt16?
+        var trimmed = false
+    }
+    private var oldVoiceSessions: [UInt16: OldVoiceSession] = [:]
     private struct NewVoiceSession {
         var sequence: UInt16
         var endedAt: TimeInterval?
@@ -28,6 +34,10 @@ public struct SiriRemotePacketParser {
     /// Frames arrive every 20 ms while the microphone is live; a gap this long means the
     /// 1st-gen remote's voice session is over.
     private static let sniffedVoiceIdleTimeout: TimeInterval = 0.75
+
+    /// Audio the 1st-gen remote recorded up to this long after the physical Siri release is
+    /// still delivered, so a final syllable spoken while letting go is kept.
+    static let oldRemoteReleaseTail: TimeInterval = 0.3
 
     public mutating func events(from line: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> [VoiceEvent] {
         receivedAt = now
@@ -207,19 +217,51 @@ public struct SiriRemotePacketParser {
 
     /// Old remotes use ATT handle 0x0023. Parse complete L2CAP payloads rather than
     /// hardcoding the ACL connection handle or assuming 27-byte Bluetooth fragments.
+    ///
+    /// Frame layout: `1B 23 00 10 <state> <2 bytes> <sequence LE> <length> <Opus…>`. The
+    /// remote records 50 frames/s but its link to a Mac carries ~44, so it queues audio and
+    /// keeps recording after release, then flushes ~2 s of frames. `state` turns 0x10 → 0x00
+    /// on the first frame sent after release, and the sequence counts recorded 20 ms frames
+    /// (dropped ones included). End the session at the frame recorded at release plus
+    /// `oldRemoteReleaseTail`, rather than waiting for the post-release recording to drain.
     private mutating func oldProtocolEvents(from bytes: [UInt8], handle: UInt16) -> [VoiceEvent] {
         if bytes == [0x1B, 0x23, 0x00, 0x00, 0x10] {
-            return oldVoiceHandles.insert(handle).inserted ? [.started] : []
+            if let session = oldVoiceSessions[handle], !session.trimmed { return [] }
+            oldVoiceSessions[handle] = OldVoiceSession(startedAt: receivedAt)
+            return [.started]
         }
         if bytes == [0x1B, 0x23, 0x00, 0x10, 0x00] {
-            return oldVoiceHandles.remove(handle) != nil ? [.ended] : []
+            guard let session = oldVoiceSessions.removeValue(forKey: handle) else { return [] }
+            return session.trimmed ? [] : [.ended]
         }
-        guard oldVoiceHandles.contains(handle), bytes.count > 10,
+        guard var session = oldVoiceSessions[handle], bytes.count > 10,
               bytes.prefix(3).elementsEqual([0x1B, 0x23, 0x00]) else { return [] }
         let length = Int(bytes[9])
         guard length > 0, bytes.count >= 10 + length else { return [] }
         let packet = Array(bytes[10..<(10 + length)])
         guard Self.isPlausibleSiriRemoteOpusPacket(packet) else { return [] }
+
+        let sequence = UInt16(bytes[7]) | UInt16(bytes[8]) << 8
+        let first = session.firstSequence ?? sequence
+        session.firstSequence = first
+        defer { oldVoiceSessions[handle] = session }
+        if bytes[3] == 0x10, bytes[4] == 0x10, session.releaseLimit != nil {
+            // Siri was pressed again during the flush: the dictation session continues.
+            session.releaseLimit = nil
+            if session.trimmed {
+                session.trimmed = false
+                return [.started, .packet(Data(packet))]
+            }
+        }
+        if bytes[3] == 0x10, bytes[4] == 0x00, session.releaseLimit == nil {
+            let recorded = max(0, ((receivedAt - session.startedAt + Self.oldRemoteReleaseTail) / 0.02).rounded())
+            session.releaseLimit = first &+ UInt16(clamping: Int(recorded))
+        }
+        if let limit = session.releaseLimit, Int16(bitPattern: sequence &- limit) > 0 {
+            guard !session.trimmed else { return [] }
+            session.trimmed = true
+            return [.ended]
+        }
         return [.packet(Data(packet))]
     }
 

@@ -49,6 +49,50 @@ final class AudioPacketTests: XCTestCase {
         }
     }
 
+    private func oldFrame(_ sequence: UInt16, released: Bool, packet: [UInt8]) -> [UInt8] {
+        [0x1B, 0x23, 0, 0x10, released ? 0 : 0x10, 0, 0, UInt8(sequence & 255), UInt8(sequence >> 8),
+         UInt8(packet.count)] + packet
+    }
+
+    func testOldRemoteEndsAtTheReleaseInsteadOfDrainingPostReleaseRecording() {
+        var parser = SiriRemotePacketParser()
+        let packet: [UInt8] = [0xB8] + Array(1...40)
+        func feed(_ payload: [UInt8], at time: TimeInterval) -> [VoiceEvent] {
+            records(payload, handle: 0x56).flatMap { parser.events(from: $0, now: time) }
+        }
+        XCTAssertEqual(feed([0x1B, 0x23, 0, 0, 0x10], at: 10), [.started])
+        // Held: frames trail real time because the link carries ~44 of 50 frames/s.
+        for sequence: UInt16 in 0..<40 {
+            XCTAssertEqual(feed(oldFrame(sequence, released: false, packet: packet), at: 10.05 + Double(sequence) * 0.0225),
+                           [.packet(Data(packet))])
+        }
+        // Released 1.0 s after start: frames 0...65 (release + 0.3 s) are still speech.
+        XCTAssertEqual(feed(oldFrame(40, released: true, packet: packet), at: 11.0), [.packet(Data(packet))])
+        for sequence: UInt16 in 41...65 {
+            XCTAssertEqual(feed(oldFrame(sequence, released: true, packet: packet), at: 11 + Double(sequence - 40) * 0.0225),
+                           [.packet(Data(packet))])
+        }
+        XCTAssertEqual(feed(oldFrame(66, released: true, packet: packet), at: 11.6), [.ended])
+        XCTAssertEqual(feed(oldFrame(67, released: true, packet: packet), at: 11.62), [])
+        XCTAssertEqual(feed([0x1B, 0x23, 0, 0x10, 0], at: 12.5), [], "The protocol end must not end it twice")
+        XCTAssertEqual(feed([0x1B, 0x23, 0, 0, 0x10], at: 13), [.started])
+    }
+
+    func testOldRemotePressDuringTheFlushContinuesTheDictationSession() {
+        var parser = SiriRemotePacketParser()
+        let packet: [UInt8] = [0xB8] + Array(1...40)
+        func feed(_ payload: [UInt8], at time: TimeInterval) -> [VoiceEvent] {
+            records(payload, handle: 0x56).flatMap { parser.events(from: $0, now: time) }
+        }
+        XCTAssertEqual(feed([0x1B, 0x23, 0, 0, 0x10], at: 0), [.started])
+        XCTAssertEqual(feed(oldFrame(0, released: false, packet: packet), at: 0.05), [.packet(Data(packet))])
+        XCTAssertEqual(feed(oldFrame(1, released: true, packet: packet), at: 0.1), [.packet(Data(packet))])
+        XCTAssertEqual(feed(oldFrame(30, released: true, packet: packet), at: 0.6), [.ended])
+        XCTAssertEqual(feed(oldFrame(31, released: false, packet: packet), at: 0.7), [.started, .packet(Data(packet))])
+        XCTAssertEqual(feed(oldFrame(60, released: false, packet: packet), at: 1.4), [.packet(Data(packet))])
+        XCTAssertEqual(feed([0x1B, 0x23, 0, 0x10, 0], at: 2), [.ended])
+    }
+
     func testTwoGenerationsCanInterleaveAndOtherHandlesCannotSupplyOldAudio() {
         var parser = SiriRemotePacketParser()
         let oldPacket: [UInt8] = [0xB8] + Array(1...66)

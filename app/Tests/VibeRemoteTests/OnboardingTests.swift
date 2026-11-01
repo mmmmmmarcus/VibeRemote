@@ -29,17 +29,25 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(defaults.integer(forKey: OnboardingState.completionKey), 1)
     }
 
-    func testButtonWalkthroughMatchesBothRemoteFamilies() {
-        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
-            let pages = OnboardingPage.pages(for: generation)
-            XCTAssertEqual(pages.first, .connection)
-            XCTAssertEqual(pages.last, .siri)
-            for key in ["touch.edit", "select", "back", "tv", "playPause", "volumeUp", "volumeDown"] {
-                XCTAssertEqual(pages.filter { $0 == .button(key) }.count, 1)
-            }
-            XCTAssertEqual(pages.contains(.button("mute")), generation == .aluminumClickpad)
-            XCTAssertEqual(pages.contains(.button("power")), generation == .aluminumClickpad)
-        }
+    func testGuideFollowsTheRequestedOrder() {
+        XCTAssertEqual(OnboardingPage.all, [.welcome, .setup, .siri, .deleteWord, .newLine,
+                                            .arrowKeys, .advancedMenu, .cursor])
+    }
+
+    @MainActor
+    func testWindowIsCompactWithOnlyTheCloseButton() throws {
+        _ = NSApplication.shared
+        let controller = OnboardingWindowController(
+            snapshot: RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .rightOpt),
+            access: OnboardingAccess(), actions: OnboardingActions(), finish: { _ in })
+        let window = try XCTUnwrap(controller.window)
+        XCTAssertEqual(window.contentLayoutRect.size.width, 280, accuracy: 1)
+        XCTAssertEqual(window.frame.size.height, 350, accuracy: 1)
+        XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertEqual(window.standardWindowButton(.closeButton)?.isHidden, false)
+        XCTAssertEqual(window.standardWindowButton(.miniaturizeButton)?.isHidden ?? true, true)
+        XCTAssertEqual(window.standardWindowButton(.zoomButton)?.isHidden ?? true, true)
+        controller.close()
     }
 
     @MainActor
@@ -48,11 +56,27 @@ final class OnboardingTests: XCTestCase {
         var finished = false
         let controller = OnboardingWindowController(
             snapshot: RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .rightOpt),
-            access: OnboardingAccess(), requestBluetooth: {}, requestInput: {}, requestAccessibility: {},
+            access: OnboardingAccess(), actions: OnboardingActions(),
             finish: { _ in finished = true })
         XCTAssertEqual(controller.window?.identifier?.rawValue, "VibeRemote.Onboarding")
         controller.close()
         XCTAssertFalse(finished)
+    }
+    @MainActor
+    func testRestartReturnsToFirstPageWithSavedChoice() throws {
+        _ = NSApplication.shared
+        var finished = false
+        let controller = OnboardingWindowController(
+            snapshot: RemoteSettingsSnapshot(connected: true, batteryPercent: nil, siriAction: .rightOpt),
+            access: OnboardingAccess(), actions: OnboardingActions(),
+            finish: { _ in finished = true })
+        controller.model.step = 4
+        controller.model.action = .advancedMenu
+        controller.restart()
+        XCTAssertEqual(controller.model.step, 0)
+        XCTAssertEqual(controller.model.action, .rightOpt)
+        XCTAssertFalse(finished)
+        controller.close()
     }
     @MainActor
     func testGuideLayoutsAcrossStepsAndAppearances() throws {
@@ -62,14 +86,14 @@ final class OnboardingTests: XCTestCase {
             snapshot: RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .rightOpt),
             access: OnboardingAccess())
         let hosting = NSHostingController(rootView: OnboardingView(model: model,
-            requestBluetooth: {}, requestInput: {}, requestAccessibility: {}, finish: { _ in }))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
+            actions: OnboardingActions(), finish: { _ in }))
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: OnboardingWindowController.size),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentViewController = hosting
         defer { window.close() }
         let frame = try XCTUnwrap(window.contentView?.superview)
-        for step in OnboardingPage.pages(for: model.snapshot.generation).indices {
+        for step in OnboardingPage.all.indices {
             model.step = step
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                 window.appearance = NSAppearance(named: appearance)

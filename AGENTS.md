@@ -393,8 +393,17 @@ few seconds).
   never the outgoing player node, because stopping a player is the deadlock below.
 - On start the helper skips PacketLogger's buffered replay (records older than
   launch) so a stale prior session is not re-decoded into the output device.
-- The black-glass remote flushes about 2.1 seconds of audio after physical Siri-button
-  release. Its mapped dictation key must stay held through protocol end and output drain.
+- The black-glass remote's voice lag is a link limit, measured 2026-10-31: it records
+  50 frames/s, but each 104-byte frame needs four 27-byte LE packets and the Mac controller
+  gives it one frame per 22.5 ms connection event (44.4 frames/s). It queues ~1 s, then
+  drops one frame in ~9, and keeps recording ~1 s after release, so ~2 s flushed after
+  release. CoreBluetooth's private `setDesiredConnectionLatency:forPeripheral:` reaches
+  bluetoothd, but level 0 asks 10–30 ms (controller keeps 22.5 ms) and level 1 moves the
+  remote to 112.5 ms; `IOBluetoothHostController` HCI calls return 0 without sending
+  anything. Do not retry these as a fix. The first frame sent after release carries state
+  byte 0x00 instead of 0x10, and sequence numbers count recorded 20 ms frames, so the parser
+  ends the session at the frame recorded at release + 0.3 s and drops the rest. The mapped
+  dictation key stays held through that end and output drain.
   `voice-ended` reports protocol end; `voice-drained` reports output completion, tagged
   with the hold's start time. A 4-second old / 3-second new remote safety deadline prevents
   stuck keys. Stale completions must not release a later Siri hold.
@@ -970,11 +979,25 @@ tap gate. Ordinary Siri presses directly use their configured mapping; keep the
 existing Advanced Menu/caret ownership and microphone tail/drain handling.
 Historical benchmark reports are evidence only, not supported runtime features.
 
+### Dictation trigger (2026-10-31)
+
+Both generations stream microphone audio only while Siri is physically held; no host
+command is known to start it (see Design/Research). A workaround that switched dictation
+to the Mac's own microphone (for tap-to-toggle and other dictation buttons) was built and
+rolled back at the user's request: switching the input source back and forth is not wanted.
+
 ### Onboarding and updates
 
-The illustrated first-run guide uses a sky-blue oil-painted image panel above text. It starts with connection permissions, highlights one CAD control per page for the current remote generation, and finishes with Siri mapping. Close/Back must never overwrite the saved mapping. Finish saves only an
+The first-run guide is a compact 280×350 window (hidden title, close button only) with
+centered text, Liquid Glass Back/Continue buttons and technical-drawing illustrations drawn
+in SwiftUI (`RemoteBlueprint`), never the 3D CAD model. Pages, in order: welcome + feature
+summary, connection + permissions + helper/audio install, Siri dictation mapping, delete word,
+new line, arrow keys, Advanced Menu, cursor demo. Button names and callouts follow the drawn
+remote family (glass: Menu, Play/Pause; aluminum: Back, Mute). Close/Back must never overwrite the saved mapping. Finish saves only an
 assignable action and marks completion. Existing installs with a saved Siri mapping
 or microphone engine migrate quietly; Getting Started in Settings reopens the guide.
+Restart Onboarding in the menu-bar menu (shown even while disconnected) reopens it
+at page 1 with the saved Siri choice; like Close, it never saves or clears completion.
 Use the existing manager snapshots and permission callbacks; no duplicate HID/Bluetooth
 managers. Keep the Dock icon while either Settings or onboarding is open/minimized.
 

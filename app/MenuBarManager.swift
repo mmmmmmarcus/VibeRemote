@@ -462,8 +462,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
 
     private var onboardingAccess: OnboardingAccess {
-        OnboardingAccess(bluetooth: bluetoothAccessState == .allowed,
-                         input: inputAccessIsReady, accessibility: remoteControlState == .ready)
+        let helperState = PrivilegedHelperClient.shared.state
+        return OnboardingAccess(bluetooth: bluetoothAccessState == .allowed,
+                                input: inputAccessIsReady, accessibility: remoteControlState == .ready,
+                                helper: !helperState.needsUserAction,
+                                helperNeedsApproval: helperState == .awaitingApproval,
+                                audio: microphoneBridgeManager.menuStatus().outputDeviceName != nil,
+                                audioInstallable: microphoneBridgeManager.bundledAudioDriverAvailable)
     }
 
     func showOnboardingIfNeeded() {
@@ -476,12 +481,26 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         if onboardingWindowController?.window?.isVisible != true && onboardingWindowController?.window?.isMiniaturized != true {
             onboardingWindowController = OnboardingWindowController(
                 snapshot: settingsSnapshot, access: onboardingAccess,
-                requestBluetooth: { [weak self] in self?.requestBluetoothAccessHandler?() },
-                requestInput: { [weak self] in self?.requestInputAccessHandler?() },
-                requestAccessibility: { [weak self] in self?.requestControlAccessHandler?() },
+                actions: OnboardingActions(
+                    requestBluetooth: { [weak self] in self?.requestBluetoothAccessHandler?() },
+                    requestInput: { [weak self] in self?.requestInputAccessHandler?() },
+                    requestAccessibility: { [weak self] in self?.requestControlAccessHandler?() },
+                    setUpHelper: { [weak self] in
+                        guard let self else { return }
+                        if PrivilegedHelperClient.shared.state == .awaitingApproval { self.openHelperSettings() }
+                        else { self.registerPrivilegedHelper() }
+                    },
+                    installAudio: { [weak self] in self?.installAudioDriver() }),
                 finish: { [weak self] action in self?.setSiriButtonAction(action) })
         }
         onboardingWindowController?.show()
+    }
+
+    @objc func restartOnboarding() {
+        rmDebug("🧭 Onboarding restart requested")
+        showOnboarding()
+        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
+        onboardingWindowController?.restart()
     }
 
     @objc func showSettings() {
@@ -648,6 +667,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        // The guide starts with pairing, so it stays reachable while disconnected too.
+        let onboardingItem = NSMenuItem(title: "Restart Onboarding", action: #selector(restartOnboarding), keyEquivalent: "")
+        onboardingItem.target = self
+        menu.addItem(onboardingItem)
         menu.addItem(AppUpdater.shared.makeMenuItem())
         menu.addItem(.separator())
         updateStatusIcon(microphoneStatus: microphoneStatus)
