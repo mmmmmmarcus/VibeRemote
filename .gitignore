@@ -41,4 +41,4 @@ Thumbs.db
 AudioDriver/
 VibeRemoteHelper
 
-Release/artifacts/
+app/Release/artifacts/

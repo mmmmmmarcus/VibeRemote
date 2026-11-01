@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibeRemote</title>
+  <meta name="description" content="The one app that turns your Siri Remote into the best AI inputer. Dictate, edit and send prompts to Codex, Claude and any text field from your Mac's menu bar.">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:title" content="VibeRemote">
+  <meta property="og:description" content="The one app that turns your remote into the best AI inputer.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/icon-256.png">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="frame">
+
+  <header class="top">
+    <a class="brand" href="#top" aria-label="VibeRemote home">
+      <img src="assets/favicon.png" alt="" width="26" height="26">
+      <span>VibeRemote</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#keymap">Key map</a>
+      <a href="#install">Install</a>
+      <a class="nav-gh" href="https://github.com/mmmmmmarcus/VibeRemote">GitHub</a>
+      <a class="pill pill-sm" href="https://github.com/mmmmmmarcus/VibeRemote/releases/latest">Download</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <!-- Hero -->
+    <section class="hero">
+      <p class="eyebrow mono"><span class="tick"></span>macOS menu-bar app &nbsp;/&nbsp; Siri Remote</p>
+      <h1>The one app that turns your remote into the <em>best AI inputer.</em></h1>
+      <p class="lede">VibeRemote maps every Siri Remote button to the keys AI agents need. Hold Siri to dictate, slide to place the caret, click to send — and steer Codex, Claude or any text field from across the room.</p>
+      <div class="cta">
+        <a class="pill" href="https://github.com/mmmmmmarcus/VibeRemote/releases/latest">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8.5M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>
+          Download for macOS
+        </a>
+        <a class="pill pill-ghost" href="https://github.com/mmmmmmarcus/VibeRemote">
+          <svg viewBox="0 0 16 16" aria-hidden="true" class="gh"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+      <p class="meta mono">macOS 27 &nbsp;·&nbsp; Apple Silicon &nbsp;·&nbsp; Free &amp; open source</p>
+
+      <figure class="canvas canvas-hero">
+        <span class="crop tl"></span><span class="crop tr"></span><span class="crop bl"></span><span class="crop br"></span>
+        <svg class="remote" viewBox="0 0 560 540" role="img" aria-labelledby="fig1-title">
+          <title id="fig1-title">Line drawing of an aluminum Siri Remote with each button labeled by its VibeRemote action</title>
+          <defs>
+            <linearGradient id="alu" x1="0" x2="1">
+              <stop offset="0" stop-color="#D6D6D2"/>
+              <stop offset=".45" stop-color="#F3F3F0"/>
+              <stop offset="1" stop-color="#CBCBC6"/>
+            </linearGradient>
+            <radialGradient id="pad" cx=".45" cy=".4" r=".7">
+              <stop offset="0" stop-color="#2E2E2C"/>
+              <stop offset="1" stop-color="#151514"/>
+            </radialGradient>
+            <filter id="lift" x="-40%" y="-20%" width="180%" height="160%">
+              <feDropShadow dx="0" dy="18" stdDeviation="16" flood-color="#123a5c" flood-opacity=".38"/>
+            </filter>
+          </defs>
+
+          <!-- annotations -->
+          <g class="anno">
+            <text class="corner" x="18" y="28">FIG. 01</text>
+            <text class="corner" x="542" y="28" text-anchor="end">SIRI REMOTE · 2ND/3RD GEN</text>
+            <g class="dim">
+              <path d="M214 40v-10M346 40v-10M214 35h132"/>
+              <text x="280" y="24" text-anchor="middle">35.9 MM</text>
+            </g>
+          </g>
+
+          <!-- remote body -->
+          <g filter="url(#lift)">
+            <rect x="214" y="56" width="132" height="620" rx="36" fill="url(#alu)" stroke="#8d8d88" stroke-width=".8"/>
+          </g>
+          <rect class="siri" x="345" y="168" width="6" height="50" rx="3"/>
+          <rect class="siri-pulse" x="345" y="168" width="6" height="50" rx="3"/>
+          <rect x="271" y="78" width="18" height="4" rx="2" fill="#2a2a28"/>
+          <g class="btn-line">
+            <circle cx="318" cy="92" r="13" fill="#ececea" stroke="#3a3a37" stroke-width="1.1"/>
+            <path d="M314.6 88.6a5 5 0 1 0 6.8 0M318 85.5v5" stroke="#2a2a28"/>
+          </g>
+          <circle cx="280" cy="190" r="56" fill="url(#pad)"/>
+          <circle cx="280" cy="190" r="28" fill="#232321" stroke="#3b3b38" stroke-width=".8"/>
+          <g fill="#e6e6e2"><circle cx="280" cy="143" r="1.8"/><circle cx="280" cy="237" r="1.8"/><circle cx="233" cy="190" r="1.8"/><circle cx="327" cy="190" r="1.8"/></g>
+          <g fill="#1b1b1a">
+            <circle cx="249" cy="285" r="24"/><circle cx="311" cy="285" r="24"/>
+            <circle cx="249" cy="345" r="24"/><circle cx="249" cy="407" r="24"/>
+            <rect x="287" y="321" width="48" height="110" rx="24"/>
+          </g>
+          <g class="glyph">
+            <path d="M253 277l-8 8 8 8"/>
+            <rect x="302" y="279" width="18" height="11" rx="1.5"/><path d="M306 294h10"/>
+            <path d="M240.5 338.5v13l9-6.5zM253.5 338.5v13M257.5 338.5v13"/>
+            <path d="M240 403h4l6-5v18l-6-5h-4zM237 397l24 20"/>
+            <path d="M311 339v12M305 345h12M305 407h12"/>
+          </g>
+
+          <!-- callouts: left -->
+          <g class="co">
+            <path d="M224 190H196"/><circle cx="224" cy="190" r="2.6"/>
+            <text x="188" y="185" text-anchor="end"><tspan class="co-k">03 · CLICKPAD</tspan><tspan x="188" dy="16" class="co-v">Arrows · slide for caret</tspan></text>
+          </g>
+          <g class="co">
+            <path d="M225 285H196"/><circle cx="225" cy="285" r="2.6"/>
+            <text x="188" y="280" text-anchor="end"><tspan class="co-k">04 · BACK</tspan><tspan x="188" dy="16" class="co-v">Delete word</tspan></text>
+          </g>
+          <g class="co">
+            <path d="M225 345H196"/><circle cx="225" cy="345" r="2.6"/>
+            <text x="188" y="340" text-anchor="end"><tspan class="co-k">06 · PLAY/PAUSE</tspan><tspan x="188" dy="16" class="co-v">Skill picker</tspan></text>
+          </g>
+          <g class="co">
+            <path d="M225 407H196"/><circle cx="225" cy="407" r="2.6"/>
+            <text x="188" y="402" text-anchor="end"><tspan class="co-k">08 · MUTE</tspan><tspan x="188" dy="16" class="co-v">Advanced Menu</tspan></text>
+          </g>
+          <!-- callouts: right -->
+          <g class="co">
+            <path d="M331 92H366"/><circle cx="331" cy="92" r="2.6"/>
+            <text x="374" y="87"><tspan class="co-k">01 · POWER</tspan><tspan x="374" dy="16" class="co-v">Send</tspan></text>
+          </g>
+          <g class="co co-accent">
+            <path d="M351 193H366"/><circle cx="351" cy="193" r="2.6"/>
+            <text x="374" y="188"><tspan class="co-k">02 · SIRI</tspan><tspan x="374" dy="16" class="co-v">Hold to dictate</tspan></text>
+          </g>
+          <g class="co">
+            <path d="M335 285H366"/><circle cx="335" cy="285" r="2.6"/>
+            <text x="374" y="280"><tspan class="co-k">05 · TV</tspan><tspan x="374" dy="16" class="co-v">New line</tspan></text>
+          </g>
+          <g class="co">
+            <path d="M335 376H366"/><circle cx="335" cy="376" r="2.6"/>
+            <text x="374" y="371"><tspan class="co-k">07 · VOLUME ±</tspan><tspan x="374" dy="16" class="co-v">Lists · indent</tspan></text>
+          </g>
+        </svg>
+      </figure>
+      <figcaption class="caption mono">Fig. 01 — Default mapping on the aluminum remote. The black-glass remote gets its own profile.</figcaption>
+    </section>
+
+    <!-- Spec sheet -->
+    <section class="sec" aria-labelledby="spec-title">
+      <div class="sec-head mono"><span>§ 01</span><i></i><span id="spec-title">Spec sheet</span></div>
+      <dl class="spec">
+        <div><dt class="mono">Type</dt><dd>Menu-bar utility</dd></div>
+        <div><dt class="mono">Platform</dt><dd>macOS 27 · Apple Silicon</dd></div>
+        <div><dt class="mono">Hardware</dt><dd>Siri Remote — 1st gen black glass, 2nd &amp; 3rd gen aluminum</dd></div>
+        <div><dt class="mono">Works with</dt><dd>Codex, Claude, and any text field on your Mac</dd></div>
+        <div><dt class="mono">License</dt><dd>Free · MIT, source on GitHub</dd></div>
+      </dl>
+    </section>
+
+    <!-- Features -->
+    <section class="sec" id="features" aria-labelledby="features-title">
+      <div class="sec-head mono"><span>§ 02</span><i></i><span>Features</span></div>
+      <h2 id="features-title">Built for talking <br>to agents.</h2>
+      <ol class="features">
+        <li>
+          <span class="idx mono">01</span>
+          <h3>Your remote becomes a microphone</h3>
+          <p>Hold Siri and speak. VibeRemote decodes the remote’s audio into its own <b>VibeRemote</b> input device, so your dictation app hears it — and keeps your dictation key held until the last word lands.</p>
+        </li>
+        <li>
+          <span class="idx mono">02</span>
+          <h3>Buttons that speak agent</h3>
+          <p>Back deletes a word, TV adds a new line, Power sends, Play/Pause opens the skill picker — <code>$</code> in Codex, <code>/</code> in Claude. The keys you actually use with agents, one press away.</p>
+        </li>
+        <li>
+          <span class="idx mono">03</span>
+          <h3>A caret under your thumb</h3>
+          <p>Slide across the touch surface and a small caret follows through your prompt, snapping row by row. Click to place it, or let it settle on its own. No mouse, no reaching.</p>
+        </li>
+        <li>
+          <span class="idx mono">04</span>
+          <h3>Lists without the menus</h3>
+          <p>Volume Up starts a bullet list or indents an item; Volume Down steps back out. It drives the editor’s own commands, so formatting and undo stay intact.</p>
+        </li>
+        <li>
+          <span class="idx mono">05</span>
+          <h3>Advanced Menu at the caret</h3>
+          <p>A glass palette opens right where you are typing: stop the current task, clear the input, undo, redo, or send with <code>⌘↩</code>. Tap to keep it open, hold to peek.</p>
+        </li>
+        <li>
+          <span class="idx mono">06</span>
+          <h3>Every Siri Remote</h3>
+          <p>Black glass or aluminum, detected automatically with a profile for each. Pair both at once — every remote keeps its own mapping.</p>
+        </li>
+        <li>
+          <span class="idx mono">07</span>
+          <h3>Quiet in the menu bar</h3>
+          <p>Connection and battery at a glance. Auto Disconnect lets the remote sleep after 5, 15 or 30 idle minutes, and Settings shows your exact remote in 3D, built from CAD.</p>
+        </li>
+        <li>
+          <span class="idx mono">08</span>
+          <h3>Set up once, then forget it</h3>
+          <p>An illustrated guide walks through permissions and your Siri shortcut. Approve the helper once and the microphone starts without password prompts. Signed updates arrive automatically.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- Painted interlude: Advanced Menu -->
+    <section class="canvas canvas-band" aria-labelledby="lean-title">
+      <span class="crop tl"></span><span class="crop tr"></span><span class="crop bl"></span><span class="crop br"></span>
+      <p class="band-label mono">Fig. 02 — Advanced Menu</p>
+      <h2 id="lean-title" class="band-title">Lean back.<br>Keep the conversation going.</h2>
+      <div class="editor" aria-hidden="true">
+        <p class="editor-text">Rename the parser module<span class="caret"><span class="glass">
+          <span class="g-btn" title=""><svg viewBox="0 0 20 20"><path d="M7.5 5h8a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-8L3 10zM10 8l4 4M14 8l-4 4"/></svg></span>
+          <span class="g-btn"><svg viewBox="0 0 20 20"><path d="M12 4 8 16"/></svg></span>
+          <span class="g-btn"><svg viewBox="0 0 20 20"><rect x="6" y="6" width="8" height="8" rx="1.2" class="fill"/></svg></span>
+          <span class="g-btn"><svg viewBox="0 0 20 20"><path d="M15 9.5H7.5a3.5 3.5 0 0 0 0 7H10M12 6l3 3.5-3 3.5"/></svg></span>
+          <span class="g-btn g-close"><svg viewBox="0 0 20 20"><path d="M6.5 6.5l7 7M13.5 6.5l-7 7"/></svg></span>
+          <span class="g-btn"><svg viewBox="0 0 20 20"><path d="M5 9.5h7.5a3.5 3.5 0 0 1 0 7H10M8 6 5 9.5 8 13"/></svg></span>
+        </span></span></p>
+        <p class="editor-hint mono"><span>Prompt</span><span>⌘↩ send</span></p>
+      </div>
+      <ul class="band-legend mono">
+        <li>Clear input</li><li>Skill</li><li>Stop task</li><li>Redo</li><li>Close</li><li>Undo</li>
+      </ul>
+    </section>
+
+    <!-- Key map -->
+    <section class="sec" id="keymap" aria-labelledby="keymap-title">
+      <div class="sec-head mono"><span>§ 03</span><i></i><span>Key map</span></div>
+      <h2 id="keymap-title">Every button <br>has a job.</h2>
+      <div class="keymap">
+        <input type="radio" name="gen" id="gen-alu" checked>
+        <label for="gen-alu" class="mono">Aluminum · 2nd/3rd gen</label>
+        <input type="radio" name="gen" id="gen-glass">
+        <label for="gen-glass" class="mono">Black glass · 1st gen</label>
+
+        <table class="km km-alu">
+          <tbody>
+            <tr><th>Siri</th><td>Hold to dictate — your shortcut stays held while you talk</td><td><kbd>Space</kbd></td></tr>
+            <tr><th>Clickpad ring</th><td>Arrow keys, repeating while held</td><td><kbd>←↑→↓</kbd></td></tr>
+            <tr><th>Clickpad slide</th><td>Move a text caret; click the center to place it</td><td><kbd>caret</kbd></td></tr>
+            <tr><th>Back</th><td>Delete the previous word; hold to keep going</td><td><kbd>⌥⌫</kbd></td></tr>
+            <tr><th>TV</th><td>New line without sending</td><td><kbd>⇧↩</kbd></td></tr>
+            <tr><th>Play/Pause</th><td>Skill picker for the focused app</td><td><kbd>$</kbd> <kbd>/</kbd></td></tr>
+            <tr><th>Power</th><td>Send</td><td><kbd>↩</kbd></td></tr>
+            <tr><th>Mute</th><td>Open Advanced Menu</td><td><kbd>menu</kbd></td></tr>
+            <tr><th>Volume +</th><td>Start a bullet list, or indent</td><td><kbd>⇥</kbd></td></tr>
+            <tr><th>Volume −</th><td>Outdent, or end the list</td><td><kbd>⇧⇥</kbd></td></tr>
+          </tbody>
+        </table>
+        <table class="km km-glass">
+          <tbody>
+            <tr><th>Siri</th><td>Hold to dictate — your shortcut stays held while you talk</td><td><kbd>Space</kbd></td></tr>
+            <tr><th>Surface edges</th><td>Arrow keys; a quick swipe sends one arrow</td><td><kbd>←↑→↓</kbd></td></tr>
+            <tr><th>Surface slide</th><td>Move a text caret; press to place it</td><td><kbd>caret</kbd></td></tr>
+            <tr><th>Surface press</th><td>Enter</td><td><kbd>↩</kbd></td></tr>
+            <tr><th>Menu</th><td>Delete the previous word; hold to keep going</td><td><kbd>⌥⌫</kbd></td></tr>
+            <tr><th>TV</th><td>New line; hold for modifier shortcuts</td><td><kbd>⇧↩</kbd></td></tr>
+            <tr><th>Play/Pause</th><td>Open Advanced Menu</td><td><kbd>menu</kbd></td></tr>
+            <tr><th>Volume +</th><td>Start a bullet list, or indent</td><td><kbd>⇥</kbd></td></tr>
+            <tr><th>Volume −</th><td>Outdent, or end the list</td><td><kbd>⇧⇥</kbd></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note mono">Siri is the one button you choose: Space, Right ⌘ or Right ⌥ for your dictation app.</p>
+    </section>
+
+    <!-- Install -->
+    <section class="sec" id="install" aria-labelledby="install-title">
+      <div class="sec-head mono"><span>§ 04</span><i></i><span>Install</span></div>
+      <h2 id="install-title">Four steps <br>to the couch.</h2>
+      <ol class="steps">
+        <li>
+          <span class="idx mono">01</span>
+          <div><h3>Download</h3><p>Get the latest release from GitHub, unzip it and move <b>VibeRemote.app</b> to <code>/Applications</code>.</p></div>
+        </li>
+        <li>
+          <span class="idx mono">02</span>
+          <div><h3>Pair your remote</h3><p>Open System Settings › Bluetooth, then hold Back (or Menu) and Volume Up near your Mac until the remote appears.</p></div>
+        </li>
+        <li>
+          <span class="idx mono">03</span>
+          <div><h3>Follow the guide</h3><p>Allow Bluetooth, Input Monitoring and Accessibility, tour the buttons, and pick your Siri shortcut.</p></div>
+        </li>
+        <li>
+          <span class="idx mono">04</span>
+          <div><h3>Turn on the microphone</h3><p>Approve the VibeRemote helper in Login Items &amp; Extensions. Voice capture uses Apple’s PacketLogger, part of Additional Tools for Xcode.</p></div>
+        </li>
+      </ol>
+      <p class="note mono">Experimental software built on Bluetooth and HID behavior that can change between macOS releases.</p>
+    </section>
+
+    <!-- Closing -->
+    <section class="canvas canvas-end" aria-labelledby="end-title">
+      <span class="crop tl"></span><span class="crop tr"></span><span class="crop bl"></span><span class="crop br"></span>
+      <img src="assets/icon-256.png" alt="" width="88" height="88" class="end-icon">
+      <h2 id="end-title">Pick up the remote.</h2>
+      <p>Free, open source, and made for the way you already talk to agents.</p>
+      <div class="cta cta-center">
+        <a class="pill" href="https://github.com/mmmmmmarcus/VibeRemote/releases/latest">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8.5M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>
+          Download for macOS
+        </a>
+        <a class="pill pill-ghost pill-on-paint" href="https://github.com/mmmmmmarcus/VibeRemote">View on GitHub</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot mono">
+    <div class="foot-row">
+      <span>VibeRemote</span>
+      <span class="foot-links">
+        <a href="https://github.com/mmmmmmarcus/VibeRemote">GitHub</a>
+        <a href="https://github.com/mmmmmmarcus/VibeRemote/releases">Releases</a>
+        <a href="https://github.com/mmmmmmarcus/VibeRemote/blob/main/LICENSE">MIT License</a>
+        <a href="https://github.com/mmmmmmarcus/VibeRemote/blob/main/app/THIRD_PARTY_NOTICES.md">Notices</a>
+      </span>
+    </div>
+    <p>Not affiliated with Apple. Siri and Apple TV are trademarks of Apple Inc.</p>
+  </footer>
+
+</div>
+</body>
+</html>

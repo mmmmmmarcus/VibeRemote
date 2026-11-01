@@ -60,10 +60,9 @@ let package = Package(
                 "HelperProtocol",
                 "AudioDriver",
                 "build_audio_driver.sh",
-                "AGENTS.md", "Design", "Release",
+                "Design", "Release",
                 "Tests",
                 "README.md",
-                "LICENSE",
                 "THIRD_PARTY_NOTICES.md",
             ],
             sources: [

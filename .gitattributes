@@ -2,5 +2,5 @@
 * text=auto
 
 # Preserve the supplied CAD originals byte-for-byte for provenance checks.
-Design/RemoteModels/*.step -text -diff
-Resources/RemoteModels/*.dae -diff linguist-generated=true
+app/Design/RemoteModels/*.step -text -diff
+app/Resources/RemoteModels/*.dae -diff linguist-generated=true

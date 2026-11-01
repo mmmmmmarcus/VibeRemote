@@ -24,7 +24,21 @@ deployment target, and generated app bundle minimum system version aligned at 27
 
 ## Repository layout
 
-| Path | Role |
+The repository has two top-level folders:
+
+- `app/` — the macOS product: SwiftPM package, scripts, resources, tests, design/research
+  material, release tooling and the product `README.md`. **Every path in this file is
+  relative to `app/` unless it says otherwise**, and every build/test command runs from
+  `app/` (the scripts resolve paths from their own location, so `app/build.sh` also works).
+- `website/` — the static official site (`index.html`, `styles.css`, `assets/`). No build
+  step, no JavaScript framework. Its paint texture and icons are derived from
+  `app/Resources/OnboardingSky.png` and `app/VibeRemoteAppIcon.png`; regenerate them with
+  `sips` (see `website/README.md`) instead of committing the multi-megabyte originals twice.
+
+Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the overview
+`README.md` stay at the repository root. CI sets `working-directory: app`.
+
+| Path (under `app/`) | Role |
 |------|------|
 | `main.swift` | App entry point (`NSApplicationMain`-style bootstrap). |
 | `SiriRemoteApp.swift` | `AppDelegate`: wires managers, permissions, lifecycle. |
@@ -112,7 +126,7 @@ ditto VibeRemote.app /Applications/VibeRemote.app
 open /Applications/VibeRemote.app
 ```
 
-CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27) runs: `swift build`, `swift test`,
+CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27, inside `app/`) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
 the entitlements. Keep all of these green.
 
