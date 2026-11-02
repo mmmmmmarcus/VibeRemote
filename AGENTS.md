@@ -975,9 +975,48 @@ after release, without replacing active center-click confirmation with Enter.
 
 The command assistant and computer-use integration have been removed at the user's
 request: no command panel, backend settings, MCP proxy, Jev worker, preview or Siri
-tap gate. Ordinary Siri presses directly use their configured mapping; keep the
+tap gate. (A new agent-desktop based agent replaced it on 2026-11-01; see below.) Ordinary Siri presses directly use their configured mapping; keep the
 existing Advanced Menu/caret ownership and microphone tail/drain handling.
 Historical benchmark reports are evidence only, not supported runtime features.
+
+### Computer-use agent (2026-11-01)
+
+Rebuilt from scratch at the user's request on top of
+[agent-desktop](https://github.com/vercel-labs/agent-desktop) (vendored v1.0.2 in
+`Vendor/AgentDesktop/`, bundled to `Contents/Helpers/AgentDesktop/` and re-signed); none of
+the removed command-assistant code was reused. `ComputerUseAgent.swift` holds settings,
+prompts, stream parsers and `AgentRun`; `AgentPanel.swift` holds the panel and its model.
+- Trigger: `AgentButtonGate` (TV held ≥ 0.5 s). Aluminum TV (plain Shift+Enter) fires on
+  release so a hold can become the agent; 1st-gen TV stays a modifier, and a chorded hold
+  never opens it. The menu-bar item does the same without a remote.
+- Input: the user's own dictation app types into the focused panel (user's choice over
+  built-in speech). Remote Select is consumed by the panel only while it is key.
+  The panel must use `NSApp.activate(ignoringOtherApps: true)`: a remote press is no user
+  event in this app, so cooperative `activate()` was refused and Typeless pasted into the
+  previous app while typing after a click worked (2026-11-01). The log line
+  "Agent panel shown … active= key=" records whether activation took.
+- Backends (user's choice): Claude Code CLI (`--tools Bash --allowedTools
+  Bash(agent-desktop:*)`, stream-json), Codex CLI (`exec --json`, must be
+  `danger-full-access`: its seatbelt returns EPERM for agent-desktop), OpenRouter
+  (in-process loop, one `agent_desktop` tool taking an argv array, skills embedded in the
+  system prompt, key in Keychain). CLIs are found via the login shell PATH plus common
+  folders, because a Finder launch has launchd's PATH.
+- Speed: `AgentBriefing` puts the desktop and macOS guides plus a fresh
+  `snapshot --app <front app> --skeleton -i --compact` (dropped above 24k chars, ~0.7 s)
+  into every backend's prompt, so no turn is spent on `skills get` or the first snapshot;
+  the rules also ask for `batch` when steps need no observation in between.
+  Every CLI run passes low reasoning effort (`--effort low`, `-c model_reasoning_effort="low"`;
+  the user's Codex config was "high"). OpenRouter gets no reasoning parameter, because
+  asking for effort turns thinking on for models that default to off.
+- Models: the panel's Model row is per backend (`agentClaudeModel`, `agentCodexModel`,
+  `agentOpenRouterModel`; empty = the CLI's own default). Claude Code offers the aliases
+  fable/opus/sonnet/haiku; Codex lists `visibility: "list"` models from
+  `~/.codex/models_cache.json` (re-read when the panel opens); OpenRouter is free text with
+  a suggestions menu. Codex's "Fast" service tier was left off because it costs more usage.
+- Children inherit VibeRemote's TCC responsibility, so agent-desktop uses its
+  Accessibility grant. Claude Code on this Mac reported "not logged in" from the sandboxed
+  dev shell (2026-11-01); the panel surfaces that error. The user ran it end to end from the
+  remote with Codex on 2026-11-01.
 
 ### Dictation trigger (2026-10-31)
 

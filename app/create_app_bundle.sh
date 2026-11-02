@@ -159,6 +159,21 @@ elif [ "${INCLUDE_AUDIO_DRIVER:-1}" = "1" ]; then
     echo "Note: $audio_driver not found; run ./build_audio_driver.sh to bundle it."
 fi
 
+# The computer-use agent drives the Mac through agent-desktop (vendored, Apache-2.0).
+# Child processes inherit VibeRemote's Accessibility grant, so it needs none of its own.
+agent_desktop_source="Vendor/AgentDesktop"
+agent_desktop_bundle="${APP_BUNDLE}/Contents/Helpers/AgentDesktop"
+if [ "${INCLUDE_AGENT_DESKTOP:-1}" = "1" ]; then
+    if [ ! -x "$agent_desktop_source/agent-desktop" ] || [ ! -x "$agent_desktop_source/agent-desktop-macos-helper" ]; then
+        echo "Error: vendored agent-desktop binaries are missing from $agent_desktop_source."
+        exit 1
+    fi
+    mkdir -p "$agent_desktop_bundle"
+    cp "$agent_desktop_source/agent-desktop" "$agent_desktop_source/agent-desktop-macos-helper" "$agent_desktop_bundle/"
+    chmod 755 "$agent_desktop_bundle/agent-desktop" "$agent_desktop_bundle/agent-desktop-macos-helper"
+    echo "Bundled agent-desktop: $(cat "$agent_desktop_source/README.md" | grep -m1 -o 'v[0-9][0-9.]*' || echo unknown)"
+fi
+
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -217,6 +232,15 @@ if [ -f "$helper" ]; then
 fi
 
 # Nested code must be signed before the enclosing app, or the outer signature is invalid.
+for agent_tool in "$agent_desktop_bundle/agent-desktop-macos-helper" "$agent_desktop_bundle/agent-desktop"; do
+    if [ -f "$agent_tool" ]; then
+        if [ "$signing_identity" != "-" ]; then
+            codesign --force --options runtime "${timestamp_args[@]}" --sign "$signing_identity" "$agent_tool"
+        else
+            codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$agent_tool"
+        fi
+    fi
+done
 bundled_driver="${APP_BUNDLE}/Contents/Resources/VibeRemoteAudio.driver"
 if [ -d "$bundled_driver" ]; then
     codesign --force "${timestamp_args[@]}" --sign "$signing_identity" "$bundled_driver"

@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mediaKeyInterceptor: MediaKeyInterceptor?
     private var consumedRemoteMediaButtons: Set<String> = []
     private let advancedMenu = AdvancedMenuController()
+    private let agentPanel = AgentPanelController()
     private var microphoneHealthTimer: Timer?
     private var bridgeHealthTimer: Timer?
     private var bridgeWakeObserver: NSObjectProtocol?
@@ -123,6 +124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarManager.setStatusRefreshHandler { [weak self] in
             self?.refreshPermissionStates()
         }
+        menuBarManager.setAgentPanelHandler { [weak self] in self?.agentPanel.toggle() }
+        remoteInputHandler?.onAgentRequested = { [weak self] in
+            self?.caretController.cancel()
+            self?.advancedMenu.dismiss()
+            self?.agentPanel.remoteLongPress()
+        }
         menuBarManager.setRemoteIdleTimeoutHandler { [weak self] timeout in
             self?.remoteInputHandler?.updateRemoteIdleTimeout(timeout)
         }
@@ -142,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         remoteInputHandler?.onAdvancedButton = { [weak self] button, pressed, device, generation in
             guard let self else { return false }
+            if self.agentPanel.handleRemoteButton(button, pressed: pressed) { return true }
             if button == "select", pressed { self.advancedMenu.dismiss() }
             if self.caretController.button(button, pressed: pressed, device: device, generation: generation) { return true }
             if self.advancedMenu.handle(button: button, pressed: pressed, device: device, generation: generation) { return true }

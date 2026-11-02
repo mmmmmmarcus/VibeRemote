@@ -85,6 +85,9 @@ final class RemoteInputHandler {
     /// Which remote family is currently attached. Drives the button profile and the
     /// microphone path; `.unknown` until at least one interface is open.
     var onAdvancedButton: ((String, Bool, String, RemoteGeneration) -> Bool)?
+    /// Long-press TV (`AgentButtonGate`) asks for the computer-use agent panel.
+    var onAgentRequested: (() -> Void)?
+    private var agentButtonGate = AgentButtonGate()
     /// Observe the native HID edge before menu/AX/bridge work can re-enter the event loop.
     var onHIDMediaButton: ((String, Bool, UInt64, UInt64) -> Void)?
     var usesPassiveButtonCapture: ((RemoteGeneration) -> Bool)?
@@ -917,6 +920,24 @@ final class RemoteInputHandler {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
         rmDebug("🎛 Button \(buttonName) \(isPressed ? "down" : "up") source=\(sourceGeneration.shortName) action=\(action.rawValue)")
+        if buttonName == AgentButtonGate.button, let onAgentRequested {
+            let now = ProcessInfo.processInfo.systemUptime
+            if isPressed {
+                if agentButtonGate.press(at: now, defersTap: action == .shiftEnter) { return }
+            } else {
+                switch agentButtonGate.release(at: now, chorded: modifierChordFired.contains(buttonName)) {
+                case .passThrough:
+                    break
+                case .tap:
+                    executeAction(action, button: buttonName, pressed: true, generation: sourceGeneration)
+                case .openAgent(let passThrough):
+                    if passThrough { executeAction(action, button: buttonName, pressed: false, generation: sourceGeneration) }
+                    rmDebug("🤖 TV long-press: agent requested")
+                    onAgentRequested()
+                    return
+                }
+            }
+        }
         executeAction(
             action,
             button: buttonName,
@@ -1336,6 +1357,7 @@ final class RemoteInputHandler {
         modifierChordFired.removeAll()
         modifierPressStart.removeAll()
         modifierTapActions.removeAll()
+        agentButtonGate.reset()
     }
 
     private func performListAction(_ direction: ListEditingDirection) {

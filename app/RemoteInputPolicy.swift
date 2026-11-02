@@ -64,3 +64,41 @@ struct RemoteMediaEventCorrelation {
         return hold.sender
     }
 }
+
+/// Long-pressing TV opens the computer-use agent; a tap keeps TV's own action. A plain
+/// Shift+Enter tap is deferred to release so the hold can become the agent instead. The
+/// 1st-gen TV doubles as a modifier, so its press passes through and a chorded hold never
+/// opens the agent.
+struct AgentButtonGate {
+    static let button = "tv"
+    static let holdDuration: TimeInterval = 0.5
+
+    enum Release: Equatable {
+        /// Run the button's normal release handling.
+        case passThrough
+        /// The deferred press was a tap: run the press and release now.
+        case tap
+        /// Open the agent; `passThrough` also runs the normal release first.
+        case openAgent(passThrough: Bool)
+    }
+
+    private var pressedAt: TimeInterval?
+    private var deferred = false
+
+    /// Returns true when the press must not run the button's action yet.
+    mutating func press(at time: TimeInterval, defersTap: Bool) -> Bool {
+        pressedAt = time
+        deferred = defersTap
+        return defersTap
+    }
+
+    mutating func release(at time: TimeInterval, chorded: Bool) -> Release {
+        guard let start = pressedAt else { return .passThrough }
+        pressedAt = nil
+        let held = time - start >= Self.holdDuration
+        if deferred { return held ? .openAgent(passThrough: false) : .tap }
+        return held && !chorded ? .openAgent(passThrough: true) : .passThrough
+    }
+
+    mutating func reset() { pressedAt = nil; deferred = false }
+}

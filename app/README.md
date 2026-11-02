@@ -46,6 +46,9 @@ paired at the same time and each keeps its own mapping.
 - Suppression of duplicate HID/media-key delivery without globally unloading
   macOS's remote-control daemon.
 - Optional microphone bridge with diagnostics.
+- Computer-use agent: hold TV (half a second) to open the agent panel, hold Siri to
+  dictate a task into it with your usual dictation app, and press Select to run it.
+  See [Computer-use agent](#computer-use-agent).
 
 ## Requirements
 
@@ -275,6 +278,29 @@ uses Xcode's `actool` to compile its layers and appearances into `Assets.car` an
 compatibility `.icns`, then merges the generated icon metadata into `Info.plist`.
 Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
 `Contents/Developer` directory independently of the Swift build toolchain.
+
+## Computer-use agent
+
+Hold TV for half a second (a tap still sends Shift+Enter) or choose **Computer Use Agent**
+in the menu bar. A floating panel takes focus; hold Siri and your dictation app types the
+task into it. Select (or Return) runs it, Hold TV stops a running task, and holding TV
+again closes the panel. While the task runs, focus returns to the app you were in.
+
+The planner operates the Mac through [agent-desktop](https://github.com/vercel-labs/agent-desktop),
+bundled in the app, which acts on native accessibility trees without moving the pointer.
+Pick the planner in the panel:
+
+- **Claude Code** runs `claude -p` with only Bash, and only `agent-desktop` commands
+  pre-approved. Sign in to the `claude` CLI first.
+- **Codex** runs `codex exec`. Codex's sandbox blocks agent-desktop, so it runs with
+  full access and no approval prompts; it is told, not forced, to use only agent-desktop.
+- **OpenRouter** calls the chosen model directly (default `anthropic/claude-sonnet-5.5`)
+  with a single `agent_desktop` tool; VibeRemote runs each command. The API key is stored
+  in the login keychain.
+
+The planners are told not to send, post, buy, delete or change settings unless the task
+asks for that exact action. Each run stops after ten minutes. agent-desktop uses
+VibeRemote's Accessibility permission; screenshots additionally need Screen Recording.
 
 ## Advanced Menu
 

@@ -72,3 +72,15 @@ Automatic updates use [Sparkle 2.10.1](https://github.com/sparkle-project/Sparkl
 licensed under the MIT License. The complete license and third-party notices are
 preserved inside the embedded Sparkle framework. SwiftPM verifies the pinned
 binary artifact checksum; the packaged framework contains arm64 code only.
+
+## agent-desktop (computer-use agent)
+
+`Contents/Helpers/AgentDesktop/` contains unmodified release binaries of agent-desktop,
+published by Vercel Labs and licensed under the **Apache License 2.0**.
+
+- Upstream source: https://github.com/vercel-labs/agent-desktop
+- Version and checksums: [`Vendor/AgentDesktop/README.md`](Vendor/AgentDesktop/README.md)
+- License: [`Vendor/AgentDesktop/LICENSE`](Vendor/AgentDesktop/LICENSE)
+
+The binaries are re-signed with VibeRemote's signing identity; their contents are not
+changed.

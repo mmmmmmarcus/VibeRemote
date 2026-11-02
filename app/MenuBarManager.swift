@@ -154,7 +154,8 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
 // - Volume Up/Down  → bullet-list control in AI prompt editors (new/indent, outdent/remove)
 // - Back / Menu     → word-wise Backspace (Option+Delete; the system tokenizer segments
 //                     Chinese, so 我爱北京天安门 deletes 天安门, then 北京, …)
-// - TV              → Shift+Enter (newline; the convention most agent apps use)
+// - TV              → Shift+Enter (newline; the convention most agent apps use);
+//                     held 0.5 s it opens the computer-use agent panel instead
 // - Play/Pause      → toggle the Codex / Claude desktop client to the front
 // - Power           → Enter
 // - Mute            → tap opens the focused app's skill picker ($ in Codex, / otherwise);
@@ -237,6 +238,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private var requestInputAccessHandler: (() -> Void)?
     private var requestControlAccessHandler: (() -> Void)?
     private var statusRefreshHandler: (() -> Void)?
+    private var agentPanelHandler: (() -> Void)?
     private var remoteIdleTimeoutHandler: ((RemoteIdleTimeout) -> Void)?
     private var remoteIdleTimeout = RemoteIdleTimeout.load()
     private var remoteBatteryPercent: Int?
@@ -664,6 +666,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
+        // Also reachable by holding TV; the menu item works without a remote.
+        let agentItem = NSMenuItem(title: "Computer Use Agent", action: #selector(toggleAgentPanel), keyEquivalent: "")
+        agentItem.target = self
+        menu.addItem(agentItem)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -1068,6 +1074,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     func setStatusRefreshHandler(_ handler: @escaping () -> Void) {
         statusRefreshHandler = handler
+    }
+
+    func setAgentPanelHandler(_ handler: @escaping () -> Void) {
+        agentPanelHandler = handler
+    }
+
+    @objc func toggleAgentPanel() {
+        rmDebug("🤖 Agent panel requested from the menu")
+        agentPanelHandler?()
     }
 
     func setRemoteIdleTimeoutHandler(
