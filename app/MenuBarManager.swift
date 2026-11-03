@@ -965,8 +965,20 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             item.state = (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") == value ? .on : .off
             outputMenu.addItem(item)
         }
+        outputMenu.addItem(.separator())
+        let defaultInput = NSMenuItem(title: "Set as System Default Input", action: #selector(toggleDefaultInput(_:)), keyEquivalent: "")
+        defaultInput.target = self
+        defaultInput.state = MicrophoneBridgeManager.selectsDefaultInput() ? .on : .off
+        defaultInput.toolTip = "When off, other apps keep your microphone; choose VibeRemote in the app that should hear the remote."
+        outputMenu.addItem(defaultInput)
         addActionItem("Install / Update Audio Driver…", action: #selector(installAudioDriver), to: outputMenu)
         return outputMenu
+    }
+
+    @objc private func toggleDefaultInput(_ sender: NSMenuItem) {
+        let enabled = sender.state != .on
+        sender.state = enabled ? .on : .off
+        microphoneBridgeManager.setSelectsDefaultInput(enabled)
     }
 
     @objc private func selectAudioOutput(_ sender: NSMenuItem) {

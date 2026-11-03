@@ -150,6 +150,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private enum DefaultsKey {
         static let remoteAddress = "microphoneRemoteAddress"
         static let packetLoggerPath = "microphonePacketLoggerPath"
+        static let selectsDefaultInput = "microphoneBridgeSelectsDefaultInput"
     }
 
     private struct SupervisorIdentity {
@@ -450,6 +451,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             packetLoggerDisconnected: packetLoggerIsDisconnected,
             outputDeviceName: outputDeviceName,
             defaultInputDeviceName: defaultInputName,
+            selectsDefaultInput: Self.selectsDefaultInput(),
             remoteLineCount: remoteLines.count,
             oldVoiceStartCount: recentOldVoiceStartCount,
             oldAudioFrameCount: recentOldAudioFrameCount,
@@ -984,6 +986,25 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
+    /// Applies the default-input preference to a running bridge without restarting capture.
+    func setSelectsDefaultInput(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: DefaultsKey.selectsDefaultInput)
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            guard enabled else {
+                // Hand back the input saved while the option was on. If that device is gone,
+                // drop the snapshot rather than switching to it whenever it reappears.
+                self.restoreDefaultInputDevice()
+                self.discardSavedDefaultInput()
+                return
+            }
+            guard self.bridgeReady,
+                  let outputDeviceName = self.preferredOutputDeviceName(),
+                  self.captureDefaultInputDevice() else { return }
+            _ = self.setDefaultInputDevice(named: outputDeviceName)
+        }
+    }
+
     private var preservingInputForRestart = false // workQueue-confined
 
     /// Restart only our capture processes without temporarily switching to the
@@ -1025,7 +1046,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let since = self.healthySince, Date().timeIntervalSince(since) >= 60 {
                 self.retrySchedule.reset()
             }
-            if let outputDeviceName = self.preferredOutputDeviceName(),
+            if Self.selectsDefaultInput(),
+               let outputDeviceName = self.preferredOutputDeviceName(),
                self.defaultInputDeviceName() != outputDeviceName {
                 _ = self.setDefaultInputDevice(named: outputDeviceName)
             }
@@ -2015,6 +2037,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         packetLoggerDisconnected: Bool,
         outputDeviceName: String?,
         defaultInputDeviceName: String?,
+        selectsDefaultInput: Bool,
         remoteLineCount: Int,
         oldVoiceStartCount: Int,
         oldAudioFrameCount: Int,
@@ -2026,7 +2049,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         var issues: [String] = []
         if outputDeviceName == nil {
             issues.append("The VibeRemote audio device is missing.")
-        } else if defaultInputDeviceName != outputDeviceName {
+        } else if selectsDefaultInput, defaultInputDeviceName != outputDeviceName {
             issues.append("System default input is \(defaultInputDeviceName ?? "unknown"), not \(outputDeviceName ?? "VibeRemote").")
         }
         if !helperAlive {
@@ -2078,6 +2101,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     /// BlackHole/Soundflower setup keeps working.
     static let supportedOutputDeviceNames = ["VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"]
 
+    /// Whether the bridge makes its device the system default input (on unless turned off).
+    /// Off leaves the user's input alone, so apps that follow the default — e.g. Zoom's "Same
+    /// as System" — keep their microphone; apps that should hear the remote select the device.
+    static func selectsDefaultInput(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: DefaultsKey.selectsDefaultInput) as? Bool ?? true
+    }
+
     static let audioDriverBundleName = "VibeRemoteAudio.driver"
     static let halPlugInDirectory = "/Library/Audio/Plug-Ins/HAL"
 
@@ -2112,6 +2142,8 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // A freshly installed virtual device can come up attenuated (observed at 0.47),
         // which buries remote speech under the noise floor and looks like "no audio".
         raiseInputVolumeIfNeeded(deviceID, name: expectedName)
+        // Apps select the device themselves when the default is left alone; that is success.
+        guard Self.selectsDefaultInput() else { return true }
         return setDefaultInputDevice(deviceID)
     }
 
@@ -2173,6 +2205,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func captureDefaultInputDevice() -> Bool {
+        // Nothing will be replaced, so nothing is saved: restoring a snapshot later would
+        // undo whatever input the user picked in the meantime.
+        guard Self.selectsDefaultInput() else { return true }
         loadPreviousInputDeviceIfNeeded()
         if previousDefaultInputDeviceID != nil {
             return true
@@ -2202,16 +2237,20 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         guard !preservingInputForRestart else { return }
         loadPreviousInputDeviceIfNeeded()
         guard let deviceID = previousDefaultInputDeviceID else {
-            removePrivateItem(at: previousInputDeviceFilePath)
+            discardSavedDefaultInput()
             return
         }
         if setDefaultInputDevice(deviceID) {
             appendAppLog("Microphone bridge restored previous input device: \(deviceName(deviceID) ?? String(deviceID))")
-            previousDefaultInputDeviceID = nil
-            removePrivateItem(at: previousInputDeviceFilePath)
+            discardSavedDefaultInput()
         } else {
             appendAppLog("Microphone bridge could not restore previous input device id=\(deviceID)")
         }
+    }
+
+    private func discardSavedDefaultInput() {
+        previousDefaultInputDeviceID = nil
+        removePrivateItem(at: previousInputDeviceFilePath)
     }
 
     private func defaultInputDeviceID() -> AudioDeviceID? {
