@@ -145,6 +145,11 @@ runs only the capture supervisor as root. The voice decoder remains in the user
 session. The Direct HID engine is retained but does not deliver audio on the tested
 macOS configuration. Audio is emitted only while the physical Siri button is held.
 
+While the bridge runs, the VibeRemote device is the system default input. To keep your
+own microphone as the default (for example so Zoom's "Same as System" keeps working),
+turn off Settings › More › Audio Output › Set as System Default Input and select the
+VibeRemote device in the app that should hear the remote.
+
 Some black-glass remotes also expose a dedicated audio collection (observed with
 product 0x026D / hardware revision 0A00), which VibeRemote prefers. Only older remotes
 without that collection use report sniffing on interfaces large enough to hold a

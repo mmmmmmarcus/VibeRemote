@@ -550,6 +550,12 @@ never see the word BlackHole.
   buries speech under the noise floor and looks exactly like "the bridge runs but there is
   no input level". `raiseInputVolumeIfNeeded` forces unity on every bridge start — do not
   remove it.
+- By default the bridge makes the device the system default input and re-selects it on
+  every health check. Settings › More › Audio Output › "Set as System Default Input"
+  (`microphoneBridgeSelectsDefaultInput`, default on) can turn that off: the bridge then
+  neither saves nor selects the default, apps choose the device explicitly, and turning it
+  off restores the input saved while it was on once (or drops it if that device is gone).
+  The volume fix above still runs.
 - `installAudioDriver()` installs it into `/Library/Audio/Plug-Ins/HAL` and restarts
   coreaudiod, preferring the privileged helper and falling back to one admin prompt.
 

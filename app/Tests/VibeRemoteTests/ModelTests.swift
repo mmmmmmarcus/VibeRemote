@@ -759,6 +759,15 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(RemoteIdleTimeout.load(from: defaults), .fiveMinutes)
     }
 
+    func testBridgeSelectsDefaultInputUnlessTurnedOff() throws {
+        let suite = "VibeRemoteTests.DefaultInput.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(MicrophoneBridgeManager.selectsDefaultInput(in: defaults))
+        defaults.set(false, forKey: "microphoneBridgeSelectsDefaultInput")
+        XCTAssertFalse(MicrophoneBridgeManager.selectsDefaultInput(in: defaults))
+    }
+
     func testRemoteIdleTrackerResetsAndEmitsOnce() {
         var tracker = RemoteIdleTracker()
         tracker.synchronize(deviceKeys: ["old-a", "new-b"], now: 100)
