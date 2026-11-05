@@ -223,13 +223,12 @@ Opening Settings switches the app's activation policy to `.regular` so its Dock 
 appears. Closing the window restores `.accessory`; minimizing keeps the Dock icon so
 the user can restore the window. Keep `LSUIElement` for menu-bar-only launch.
 
-Settings uses a system window backdrop with an edge-to-edge transparent title bar.
-The Siri action pop-up remains a native `NSPopUpButton` inside an interactive
-`NSGlassEffectView` capsule, hosted by `NSGlassEffectContainerView`. Keep the hosting content transparent;
-do not restore an opaque white fill or stack an extra button bezel over the glass.
-System materials own light/dark, contrast and Reduce Transparency behavior.
-The trailing ellipsis uses `NSMenuToolbarItem` and a native menu for Reset. Keep
-the menu available when defaults are active; disable only its Reset item.
+Settings follows Spotter's Settings layout (System Settings style, rebuilt 2026-11-04 at the
+user's request): a fixed 860 x 550 window, transparent title bar with hidden title and no
+toolbar, a 208-point sidebar (`.sidebar` material, 1 pt separator, icon-tile rows, grouped
+headers Remote / Features / VibeRemote) and grouped-`Form` panes with a bold title whose
+first section header is stripped (`SettingsPane`, `SettingsRow` in `SettingsPanes.swift`).
+Keep metrics in `SettingsMetrics` aligned with Spotter's `Theme` rather than inventing new ones.
 
 The first menu row is the complete device summary. While connected, it shows `Connected`
 and the remote generation on the left, plus a green circular battery gauge with the numeric
@@ -240,14 +239,19 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected. The 347 x 580 stacked window places the generation-specific remote, hover-only
-button callouts and connection/battery summary above Siri and Auto Disconnect. Both menus use the same native glass capsule style.
-The full content scrolls on smaller screens; keep a separate stacked-layout frame
-autosave key so the former wide window size cannot return. Supporting paragraphs and
-rotation hints are removed; basic instructions live in the first-run guide. No mode selector or pointer/scroll sliders.
-Manual Check for Updates lives in More. The toolbar shows Update immediately left of More only while Sparkle has a valid update session; no version or Updates section appears in the content. Automatic checks are always enabled at updater startup, including for previously opted-out installs; do not expose an opt-out checkbox.
-The More toolbar retains Reset, Audio Output and Diagnostics; Reset restores Siri and
-Auto Disconnect. Window state comes from
+disconnected (frame autosave `VibeRemote.Settings.Sidebar`). Panes: **Remote** (the CAD
+remote with hover-only callouts, connection/battery, Siri Button pop-up, Auto Disconnect,
+Restore Defaults for exactly those two), **Buttons** (read-only list of each control's
+function, top-down, with the family's printed names), **Agent** (backend, per-backend model,
+OpenRouter key; same defaults/Keychain as the agent panel, which reloads them on open),
+**Microphone** (bridge start/restart, helper, Audio Output, driver install), **Diagnostics**
+(fields from the async `MicrophoneBridgeDiagnostics`, Copy Diagnostics, app log) and
+**About** (version, Check for Updates, Getting Started, links). Software Update lives in
+About; the sidebar's About row shows a dot only while Sparkle has a valid update session.
+Automatic checks are always enabled at updater startup, including for previously opted-out
+installs; do not expose an opt-out checkbox. No mode selector or pointer/scroll sliders.
+The Siri pop-up stays an `NSPopUpButton` (per-item tooltips, rebuilt only when the choice
+changes). Window state comes from
 `MenuBarManager` and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
@@ -825,11 +829,12 @@ names. RemoteSettingsLayout selects the physical generation. Center = caret posi
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
-configuration lives in Settings; Audio Output and Diagnostics are in its More menu.
+configuration lives in Settings; Audio Output is in its Microphone pane and diagnostics in
+its Diagnostics pane.
 Keep live status, Settings and Quit, plus actionable permission/setup
 errors when applicable. Advanced Menu is opened from the remote only; do not expose
-another entry in the status menu or Settings' application menu. The retained
-Diagnostics submenu still refreshes through its delegate, including while disconnected.
+another entry in the status menu or Settings' application menu. `MenuBarManager.publishDiagnostics`
+feeds both panes on every menu rebuild and diagnostics refresh, including while disconnected.
 
 
 ### Text caret positioning

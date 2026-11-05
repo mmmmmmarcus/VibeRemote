@@ -961,14 +961,22 @@ final class ModelTests: XCTestCase {
             .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
         XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), ["siri"])
 
-        let more = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "VibeRemote.MoreSettings" } as? NSMenuToolbarItem)
-        let reset = try XCTUnwrap(more.menu.items.first { $0.identifier?.rawValue == "VibeRemote.ResetSettings" })
-        XCTAssertTrue(reset.isEnabled)
-        NSApp.sendAction(try XCTUnwrap(reset.action), to: reset.target, from: reset)
-        XCTAssertEqual(resets, 1)
+        // System Settings layout: fixed Spotter-sized window, no toolbar, Remote pane first.
+        XCTAssertNil(window.toolbar)
+        XCTAssertEqual(window.contentView?.frame.size, SettingsWindowController.size)
+        XCTAssertEqual(controller.model.tab, .remote)
+        XCTAssertFalse(controller.model.snapshot.isAtDefaults)
+        XCTAssertEqual(resets, 0)
         controller.update(RemoteSettingsSnapshot(connected: false, batteryPercent: nil, siriAction: .spaceKey))
-        XCTAssertFalse(reset.isEnabled)
-        XCTAssertTrue(more.isEnabled, "The menu must remain accessible when Reset is unavailable")
+        XCTAssertTrue(controller.model.snapshot.isAtDefaults)
+        controller.update(diagnostics: SettingsDiagnostics(helper: "Approved", bridgeRunning: true))
+        XCTAssertEqual(controller.model.diagnostics.helper, "Approved")
+        for tab in SettingsTab.allCases {
+            controller.model.tab = tab
+            frame.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        controller.model.tab = .remote
 
         // Optional offscreen render for visual comparison. It never orders a window
         // onto the user's desktop or starts any HID/audio services.
@@ -1077,6 +1085,18 @@ final class ModelTests: XCTestCase {
     }
 
 
+
+    func testButtonsPaneListsEachControlTopDownWithItsPrintedName() {
+        let glass = RemoteSettingsGuide.buttons(for: .glassTouchSurface)
+        XCTAssertEqual(glass.first, "select")
+        XCTAssertEqual(Set(glass), ["select", "back", "tv", "siri", "playPause", "volumeUp", "volumeDown"])
+        XCTAssertEqual(RemoteSettingsGuide.buttonName(for: "back", generation: .glassTouchSurface), "Menu")
+        let aluminum = RemoteSettingsGuide.buttons(for: .aluminumClickpad)
+        XCTAssertEqual(aluminum.first, "power")
+        XCTAssertTrue(aluminum.contains("mute"))
+        XCTAssertEqual(RemoteSettingsGuide.buttonName(for: "back", generation: .aluminumClickpad), "Back")
+        XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.featureTabs + SettingsTab.appTabs, SettingsTab.allCases)
+    }
 
     func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {

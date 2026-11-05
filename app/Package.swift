@@ -71,7 +71,7 @@ let package = Package(
                 "BluetoothAccessManager.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
-                "SettingsWindowController.swift", "RemoteModelView.swift",
+                "SettingsWindowController.swift", "SettingsPanes.swift", "RemoteModelView.swift",
                 "MicrophoneBridgeManager.swift",
                 "PrivilegedHelperClient.swift",
                 "RemoteBatteryReader.swift",

@@ -35,6 +35,10 @@ final class ComputerUseAgent: ObservableObject {
     func prepare(context: AgentContext) {
         guard !isRunning else { return }
         self.context = context
+        // Settings' Agent pane writes the same defaults and Keychain item.
+        let saved = AgentSettings.load()
+        if saved != settings { settings = saved }
+        hasOpenRouterKey = AgentKeychain.openRouterKey() != nil
         codexModels = AgentModelCatalog.codex()
         if phase != .composing { startOver() }
         focusRequest += 1

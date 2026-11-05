@@ -3,7 +3,7 @@
 Sparkle 2.10.1 is pinned in SwiftPM. The app uses its standard download, signature
 verification, installation and relaunch UI. Automatic checks are always enabled and run daily; downloads
 and installation require the user's choice. Check for Updates is also available
-in Settings’ More menu and the menu bar. Settings shows an Update toolbar button only while Sparkle has a valid update available; automatic checks use this gentle reminder instead of opening an unsolicited update window. Profile submission is disabled.
+in Settings’ About pane and the menu bar. Settings' sidebar marks About only while Sparkle has a valid update available; automatic checks use this gentle reminder instead of opening an unsolicited update window. Profile submission is disabled.
 
 `update-config.json` contains only the public verification key and HTTPS feed URL.
 The private signing key is held in the developer's macOS Keychain under the Sparkle

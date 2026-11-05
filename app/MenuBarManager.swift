@@ -217,7 +217,6 @@ enum RemoteControlState: Equatable, Sendable {
 final class MenuBarManager: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let menu: NSMenu
-    private var diagnosticsMenu = NSMenu()
     private var settingsWindowController: SettingsWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
@@ -257,7 +256,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         super.init()
 
         menu.delegate = self
-        diagnosticsMenu.delegate = self
         setupMenuBar()
     }
 
@@ -510,7 +508,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         statusRefreshHandler?()
         refreshRemoteBattery()
         if settingsWindowController == nil {
-            renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
             settingsWindowController = SettingsWindowController(
                 snapshot: settingsSnapshot,
                 setSiriAction: { [weak self] action in self?.setSiriButtonAction(action) },
@@ -519,12 +516,20 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                     self?.setSiriButtonAction(Self.siriButtonDefaultAction)
                 },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
-                audioSettingsMenu: makeAudioOutputMenu(),
-                diagnosticsMenu: diagnosticsMenu,
-                showOnboarding: { [weak self] in self?.showOnboarding() }
+                actions: SettingsActions(
+                    setAudioOutput: { [weak self] raw in self?.setAudioOutput(raw) },
+                    installAudioDriver: { [weak self] in self?.installAudioDriver() },
+                    restartBridge: { [weak self] in self?.startMicrophoneBridge() },
+                    copyDiagnostics: { [weak self] in self?.copyDiagnostics() },
+                    openAppLog: { [weak self] in self?.openAppLog() },
+                    refreshDiagnostics: { [weak self] in self?.requestDiagnostics(force: true) },
+                    showOnboarding: { [weak self] in self?.showOnboarding() },
+                    openAgentPanel: { [weak self] in self?.agentPanelHandler?() }
+                )
             )
         }
         settingsWindowController?.update(settingsSnapshot)
+        publishDiagnostics(cachedDiagnostics)
         onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
         settingsWindowController?.show()
     }
@@ -659,6 +664,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
         settingsWindowController?.update(settingsSnapshot)
+        publishDiagnostics(cachedDiagnostics)
         onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
@@ -816,83 +822,33 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return submenu
     }
 
-    /// The Bridge line's submenu: detailed diagnostics plus bridge/diagnostic actions.
-    /// The at-a-glance status (Bluetooth / Battery / Bridge) lives in the top-level menu.
-    /// Detail lines lazy-load once the async diagnostics snapshot arrives; Copy Diagnostics
-    /// still exports the full detailed report for debugging.
-    private func renderBridgeDetailMenu(diagnostics: MicrophoneBridgeDiagnostics?) {
-        let submenu = diagnosticsMenu
-        submenu.removeAllItems()
+    /// Settings' Microphone and Diagnostics panes. The at-a-glance status (Bluetooth /
+    /// Battery / Bridge) lives in the top-level menu; detail fields fill in once the async
+    /// diagnostics snapshot arrives, and Copy Diagnostics exports the full report.
+    private func publishDiagnostics(_ diagnostics: MicrophoneBridgeDiagnostics?) {
+        guard let settingsWindowController else { return }
         let microphoneStatus = microphoneBridgeManager.menuStatus()
-
-        if let error = microphoneStatus.lastError {
-            addInfoItem("Needs Attention: \(truncate(error, max: 72))", to: submenu)
-            submenu.addItem(NSMenuItem.separator())
-        }
-
-        let helperDescription: String
+        var state = SettingsDiagnostics()
+        state.attention = microphoneStatus.lastError
         switch PrivilegedHelperClient.shared.state {
-        case .ready: helperDescription = "Approved"
-        case .awaitingApproval: helperDescription = "Waiting for approval"
-        case .notRegistered: helperDescription = "Not set up"
-        case .unsupported: helperDescription = "Unavailable (needs macOS 13+)"
+        case .ready: state.helper = "Approved"
+        case .awaitingApproval: state.helper = "Waiting for approval"
+        case .notRegistered: state.helper = "Not set up"
+        case .unsupported: state.helper = "Unavailable (needs macOS 13+)"
         }
-        addInfoItem("Helper: \(helperDescription)", to: submenu)
-
+        state.bridgeRunning = microphoneStatus.running
+        state.canInstallDriver = microphoneStatus.outputDeviceName != "VibeRemote"
+            && microphoneBridgeManager.bundledAudioDriverAvailable
         if let diagnostics {
-            addInfoItem("Remote: \(diagnostics.remoteAddress ?? "Not detected")", to: submenu)
-            addInfoItem("Output Device: \(diagnostics.outputDeviceName ?? "Missing")", to: submenu)
-            addInfoItem("Default Input: \(diagnostics.defaultInputDeviceName ?? "Unknown")", to: submenu)
-            addInfoItem(
-                "Voice Sessions: \(diagnostics.helperVoiceStartedCount) started, \(diagnostics.helperVoiceEndedCount) ended",
-                to: submenu
-            )
-            if !diagnostics.blockingIssues.isEmpty {
-                submenu.addItem(NSMenuItem.separator())
-                addInfoItem("Blocking Issues:", to: submenu)
-                for issue in diagnostics.blockingIssues.prefix(4) {
-                    addInfoItem("- \(truncate(issue, max: 82))", to: submenu)
-                }
-            }
-        } else {
-            addInfoItem("Loading Diagnostics...", to: submenu)
+            state.report = SettingsDiagnostics.Report(
+                remoteAddress: diagnostics.remoteAddress,
+                outputDevice: diagnostics.outputDeviceName,
+                defaultInput: diagnostics.defaultInputDeviceName,
+                voiceSessions: "\(diagnostics.helperVoiceStartedCount) started, \(diagnostics.helperVoiceEndedCount) ended",
+                blockingIssues: Array(diagnostics.blockingIssues.prefix(4)),
+                appLogAvailable: diagnostics.appLogAge != "missing")
         }
-
-        submenu.addItem(NSMenuItem.separator())
-
-        let bridgeActionTitle = microphoneStatus.running ? "Restart Bridge" : "Start Bridge"
-        let bridgeActionItem = NSMenuItem(title: bridgeActionTitle, action: #selector(startMicrophoneBridge), keyEquivalent: "")
-        bridgeActionItem.target = self
-        submenu.addItem(bridgeActionItem)
-
-        if microphoneStatus.outputDeviceName != "VibeRemote", microphoneBridgeManager.bundledAudioDriverAvailable {
-            let installItem = NSMenuItem(
-                title: "Install Audio Device...",
-                action: #selector(installAudioDriver),
-                keyEquivalent: ""
-            )
-            installItem.target = self
-            submenu.addItem(installItem)
-        }
-
-        let copyItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
-        copyItem.target = self
-        submenu.addItem(copyItem)
-
-        let appLogItem = NSMenuItem(title: "Open App Log", action: #selector(openAppLog), keyEquivalent: "")
-        appLogItem.target = self
-        appLogItem.isEnabled = diagnostics.map { $0.appLogAge != "missing" } ?? true
-        submenu.addItem(appLogItem)
-
-        let refreshItem = NSMenuItem(title: "Refresh Status", action: #selector(refreshMenu), keyEquivalent: "")
-        refreshItem.target = self
-        submenu.addItem(refreshItem)
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        guard menu === diagnosticsMenu else { return }
-        renderBridgeDetailMenu(diagnostics: cachedDiagnostics)
-        requestDiagnostics(force: false)
+        settingsWindowController.update(diagnostics: state)
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -924,7 +880,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 guard let self else { return }
                 self.cachedDiagnostics = diagnostics
                 self.diagnosticsRefreshInFlight = false
-                self.renderBridgeDetailMenu(diagnostics: diagnostics)
+                self.publishDiagnostics(diagnostics)
                 let callbacks = self.pendingDiagnosticsCallbacks
                 self.pendingDiagnosticsCallbacks.removeAll()
                 callbacks.forEach { $0(diagnostics) }
@@ -957,24 +913,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     }
 
 
-    private func makeAudioOutputMenu() -> NSMenu {
-        let outputMenu = NSMenu()
-        for (value, title) in [("shared", "Direct HAL (Experimental)"), ("compatibility", "Compatibility")] {
-            let item = NSMenuItem(title: title, action: #selector(selectAudioOutput(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = value
-            item.state = (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") == value ? .on : .off
-            outputMenu.addItem(item)
-        }
-        addActionItem("Install / Update Audio Driver…", action: #selector(installAudioDriver), to: outputMenu)
-        return outputMenu
-    }
-
-    @objc private func selectAudioOutput(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String else { return }
+    private func setAudioOutput(_ raw: String) {
+        guard raw != (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") else { return }
         UserDefaults.standard.set(raw, forKey: "audioOutputBackend")
-        for item in sender.menu?.items ?? [] where item.representedObject is String {
-            item.state = item.representedObject as? String == raw ? .on : .off
-        }
         microphoneBridgeManager.restartAsync()
         rebuildMenu()
     }
