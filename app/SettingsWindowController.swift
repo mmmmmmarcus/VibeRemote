@@ -154,7 +154,6 @@ struct SettingsDiagnostics: Equatable {
 /// Everything a pane can ask the app to do. The menu manager owns the work; Settings
 /// only forwards the user's choice.
 struct SettingsActions {
-    var setAudioOutput: (String) -> Void = { _ in }
     var installAudioDriver: () -> Void = {}
     var restartBridge: () -> Void = {}
     var copyDiagnostics: () -> Void = {}
@@ -167,18 +166,19 @@ struct SettingsActions {
 enum SettingsTab: String, CaseIterable, Identifiable {
     /// `agent` keeps its raw value so saved accessibility identifiers and any stored
     /// selection survive the rename of its visible title to "Interface Control".
-    case remote, agent, diagnostics, about
+    case remote, cursor, agent, diagnostics, about
     var id: String { rawValue }
 
     /// The remote itself and what it drives. Buttons and Microphone used to be panes of
     /// their own; both now live on the Remote pane, so no single-row group is left behind.
-    static let remoteTabs: [SettingsTab] = [.remote, .agent]
+    static let remoteTabs: [SettingsTab] = [.remote, .cursor, .agent]
     /// About the app rather than the remote, so they close the sidebar in their own group.
     static let appTabs: [SettingsTab] = [.diagnostics, .about]
 
     var title: String {
         switch self {
         case .remote: return "Remote"
+        case .cursor: return "Text Cursor"
         case .agent: return "Interface Control"
         case .diagnostics: return "Diagnostics"
         case .about: return "About"
@@ -188,6 +188,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .remote: return "appletvremote.gen4"
+        case .cursor: return "character.cursor.ibeam"
         case .agent: return "cursorarrow.motionlines"
         case .diagnostics: return "stethoscope"
         case .about: return "info.circle"
@@ -207,12 +208,10 @@ extension RemoteSettingsSnapshot {
 final class RemoteSettingsModel: ObservableObject {
     @Published var snapshot: RemoteSettingsSnapshot
     @Published var diagnostics = SettingsDiagnostics()
-    @Published var audioOutput: String
     @Published var tab: SettingsTab = .remote
 
     init(snapshot: RemoteSettingsSnapshot) {
         self.snapshot = snapshot
-        audioOutput = UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared"
     }
 }
 
@@ -287,8 +286,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func update(_ snapshot: RemoteSettingsSnapshot) {
         if model.snapshot != snapshot { model.snapshot = snapshot }
-        let output = UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared"
-        if model.audioOutput != output { model.audioOutput = output }
     }
 
     func update(diagnostics: SettingsDiagnostics) {

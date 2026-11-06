@@ -75,6 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.menuBarManager.updateRemoteGeneration(generation)
             self?.microphoneBridgeManager.updateRemoteGeneration(generation)
         }
+        remoteInputHandler?.onRemoteNameChanged = { [weak self] name in
+            self?.menuBarManager.updateRemoteName(name)
+        }
         remoteInputHandler?.onRemoteIdleDisconnectRequested = { [weak self] deviceKey in
             self?.disconnectIdleRemote(deviceKey: deviceKey)
         }

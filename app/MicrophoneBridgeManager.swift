@@ -1731,10 +1731,12 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return nil
     }
 
+    /// The shared-memory HAL is the only route the user can choose; there is no longer a
+    /// Compatibility setting. The capability check below stays, because an old driver or
+    /// helper genuinely cannot carry the shared ring: those installs fall back to the
+    /// AVAudioEngine route on their own rather than losing voice entirely.
     /// The daemon derives the file owner from the authenticated XPC connection.
-    /// A stale helper/driver keeps the existing AVAudioEngine route working.
     private func sharedAudioArguments() -> String {
-        guard UserDefaults.standard.string(forKey: "audioOutputBackend") != "compatibility" else { return "" }
         let info = NSDictionary(contentsOfFile: "/Library/Audio/Plug-Ins/HAL/VibeRemoteAudio.driver/Contents/Info.plist")
         guard (info?["VibeRemoteSharedAudioVersion"] as? Int) == 1,
               PrivilegedHelperClient.shared.state == .ready,

@@ -35,27 +35,42 @@ enum ListEditingCommand: Equatable {
     }
 }
 
-/// The Codex adapter uses the editor's native commands, preserving text, formatting,
-/// selection and undo. Other editors require their own verified command contract.
+/// Drives whatever editor is focused through its own native list commands, preserving text,
+/// formatting, selection and undo. Nothing here is app-specific: the structure is read from
+/// generic AX roles and list attributes, so an editor that exposes neither falls through to
+/// the bounded ladder in `fallbackCommand` rather than doing nothing at all.
 /// AX reads stay bounded and never write text, move focus, or use the clipboard.
 @MainActor
 final class ListEditingController {
-    static let codexBundleID = "com.openai.codex"
     private var deadline: TimeInterval = 0
     private var fallbackEditor: AXUIElement?
     private var fallbackDepth = 0
 
+    /// The editor roles these commands may be sent to. Indent is Tab, which moves focus
+    /// instead of indenting anywhere that is not a text editor, so a focused button, list
+    /// or web area is left alone.
+    nonisolated static func acceptsListCommands(role: String?) -> Bool {
+        guard let role else { return false }
+        return [kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole].contains(role)
+    }
+
     func command(_ direction: ListEditingDirection) -> ListEditingCommand? {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              app.bundleIdentifier == Self.codexBundleID else {
-            rmDebug("📝 List action skipped: unsupported editor; use manual hold")
-            return nil
-        }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         deadline = ProcessInfo.processInfo.systemUptime + 0.25
         let application = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.04)
-        guard let focus = element(attribute(application, kAXFocusedUIElementAttribute)),
-              let observation = context(focus, application: application),
+        guard let focus = element(attribute(application, kAXFocusedUIElementAttribute)) else {
+            rmDebug("📝 List action skipped: no focused element")
+            return nil
+        }
+        let role = attribute(focus, kAXRoleAttribute) as? String
+        guard Self.acceptsListCommands(role: role) else {
+            // The role is the one thing worth naming here: it is what tells an editor this
+            // cannot drive from an app that simply has no text focused.
+            rmDebug("📝 List action skipped: role \(role ?? "unknown") takes no list command")
+            return nil
+        }
+        guard let observation = context(focus, application: application),
               NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
               let currentFocus = element(attribute(application, kAXFocusedUIElementAttribute)),
               CFEqual(focus, currentFocus),
@@ -78,11 +93,11 @@ final class ListEditingController {
         return command
     }
 
-    /// Current Codex builds expose the editor text and selection but may flatten its
-    /// ProseMirror paragraph/list descendants into one AX text area. In that case a tap
-    /// must remain useful: the first + invokes the native list command, subsequent + taps
-    /// in that same focused editor indent, and - walks back out. A real AX observation
-    /// always wins and resynchronizes this fallback.
+    /// Many editors expose their text and selection but flatten paragraph/list descendants
+    /// into one AX text area — current Codex builds do this to ProseMirror, and Electron
+    /// apps generally. In that case a tap must remain useful: the first + invokes the native
+    /// list command, subsequent + taps in that same focused editor indent, and - walks back
+    /// out. A real AX observation always wins and resynchronizes this fallback.
     private func fallbackCommand(
         _ direction: ListEditingDirection,
         context: ListEditingContext,
@@ -99,6 +114,7 @@ final class ListEditingController {
             fallbackEditor = focus
             return direction == .increase ? .indent : .outdent
         case .code:
+            // Tab is indentation inside a code block; the list commands do not belong there.
             return nil
         case .unknown:
             switch direction {
@@ -111,8 +127,9 @@ final class ListEditingController {
                 fallbackDepth = 0
                 return .createList
             case .decrease:
-                // Shift+Tab is Codex's native outdent/remove-list command. It is the
-                // requested short-press fallback even for a list created by keyboard.
+                // Shift+Tab is the native outdent/remove-list command in every editor this
+                // reaches. It is the requested short-press fallback even for a list created
+                // by keyboard.
                 if sameEditor, fallbackDepth > 0 {
                     fallbackDepth -= 1
                 } else {

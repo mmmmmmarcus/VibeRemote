@@ -142,9 +142,9 @@ enum ButtonAction: String, CaseIterable, Sendable {
         case .slashOrModifier:
             return "Skill Picker: $ in ChatGPT / Codex, / in Claude; Hold: Modifier"
         case .bulletIndent:
-            return "Codex: create a list or indent the current item"
+            return "Create a bullet list, or indent the current item"
         case .bulletOutdent:
-            return "Codex: outdent or remove the current list item"
+            return "Outdent, or remove the current list item"
         default: return rawValue
         }
     }
@@ -241,6 +241,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     var touchStatus = "Waiting for a remote touch surface"
     private var remoteConnected = false
     private var remoteGeneration: RemoteGeneration = .unknown
+    /// The remote's own Bluetooth name, shown under the connection state. nil falls back to
+    /// the hardware family, which is all we know before any interface opens.
+    private var remoteName: String?
     private var bluetoothAccessState: BluetoothAccessState = .notDetermined
     private var remoteInputState: RemoteInputState = .permissionRequired
     private var remoteControlState: RemoteControlState = .permissionRequired
@@ -528,7 +531,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
                 actions: SettingsActions(
-                    setAudioOutput: { [weak self] raw in self?.setAudioOutput(raw) },
                     installAudioDriver: { [weak self] in self?.installAudioDriver() },
                     restartBridge: { [weak self] in self?.startMicrophoneBridge() },
                     copyDiagnostics: { [weak self] in self?.copyDiagnostics() },
@@ -614,11 +616,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     /// The first menu row is the complete remote summary. It replaces the former three text
     /// rows for Bluetooth, model and battery so the same state is never repeated below it.
+    /// Half the padding this row used to carry, at the user's request (2026-11-06). The row
+    /// height is measured from the labels rather than hardcoded, so the space above and below
+    /// stays equal to this whatever the text metrics do.
+    private static let statusRowPadding: CGFloat = 6.5
+    private static let batteryGaugeDiameter: CGFloat = 34
+
     private func makeDeviceStatusItem(microphoneStatus: MicrophoneBridgeStatus) -> NSMenuItem {
         let item = NSMenuItem()
-        let rowHeight: CGFloat = remoteConnected ? 62 : 42
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight))
-        container.autoresizingMask = [.width]
+        let padding = Self.statusRowPadding
 
         let statusTitle: String
         if !remoteConnected {
@@ -630,35 +636,53 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         title.translatesAutoresizingMaskIntoConstraints = false
         title.font = .systemFont(ofSize: 14, weight: .semibold)
         title.textColor = .labelColor
+
+        var generation: NSTextField?
+        var battery: RemoteBatteryRingView?
+        let rowHeight: CGFloat
+        if remoteConnected {
+            let fallbackText: String
+            switch remoteGeneration {
+            case .glassTouchSurface: fallbackText = "1st Generation"
+            case .aluminumClickpad: fallbackText = "2nd / 3rd Generation"
+            case .unknown: fallbackText = "Generation Unknown"
+            }
+            let subtitle = NSTextField(labelWithString: remoteName ?? fallbackText)
+            subtitle.translatesAutoresizingMaskIntoConstraints = false
+            subtitle.font = .systemFont(ofSize: 11.5)
+            subtitle.textColor = .secondaryLabelColor
+
+            let gauge = RemoteBatteryRingView(percent: remoteBatteryPercent)
+            gauge.translatesAutoresizingMaskIntoConstraints = false
+            generation = subtitle
+            battery = gauge
+            // The gauge is centered, so it needs the same breathing room as the text stack.
+            rowHeight = max(
+                padding * 2 + ceil(title.fittingSize.height) + 2 + ceil(subtitle.fittingSize.height),
+                padding * 2 + Self.batteryGaugeDiameter
+            )
+        } else {
+            rowHeight = padding * 2 + ceil(title.fittingSize.height)
+        }
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight))
+        container.autoresizingMask = [.width]
         container.addSubview(title)
 
-        if remoteConnected {
-            let generationText: String
-            switch remoteGeneration {
-            case .glassTouchSurface: generationText = "1st Generation"
-            case .aluminumClickpad: generationText = "2nd / 3rd Generation"
-            case .unknown: generationText = "Generation Unknown"
-            }
-            let generation = NSTextField(labelWithString: generationText)
-            generation.translatesAutoresizingMaskIntoConstraints = false
-            generation.font = .systemFont(ofSize: 11.5)
-            generation.textColor = .secondaryLabelColor
-
-            let battery = RemoteBatteryRingView(percent: remoteBatteryPercent)
-            battery.translatesAutoresizingMaskIntoConstraints = false
+        if let generation, let battery {
             container.addSubview(generation)
             container.addSubview(battery)
 
             NSLayoutConstraint.activate([
                 title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-                title.topAnchor.constraint(equalTo: container.topAnchor, constant: 13),
+                title.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
                 generation.leadingAnchor.constraint(equalTo: title.leadingAnchor),
                 generation.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
                 generation.trailingAnchor.constraint(lessThanOrEqualTo: battery.leadingAnchor, constant: -12),
                 battery.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
                 battery.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                battery.widthAnchor.constraint(equalToConstant: 34),
-                battery.heightAnchor.constraint(equalToConstant: 34),
+                battery.widthAnchor.constraint(equalToConstant: Self.batteryGaugeDiameter),
+                battery.heightAnchor.constraint(equalToConstant: Self.batteryGaugeDiameter),
             ])
         } else {
             NSLayoutConstraint.activate([
@@ -683,18 +707,18 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(AppUpdater.shared.makeMenuItem())
         // Also reachable by holding TV; the menu item works without a remote.
         let agentItem = NSMenuItem(title: "Computer Use Agent", action: #selector(toggleAgentPanel), keyEquivalent: "")
         agentItem.target = self
         menu.addItem(agentItem)
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
         // The guide starts with pairing, so it stays reachable while disconnected too.
         let onboardingItem = NSMenuItem(title: "Restart Onboarding", action: #selector(restartOnboarding), keyEquivalent: "")
         onboardingItem.target = self
         menu.addItem(onboardingItem)
-        menu.addItem(AppUpdater.shared.makeMenuItem())
         menu.addItem(.separator())
         updateStatusIcon(microphoneStatus: microphoneStatus)
 
@@ -924,13 +948,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     }
 
 
-    private func setAudioOutput(_ raw: String) {
-        guard raw != (UserDefaults.standard.string(forKey: "audioOutputBackend") ?? "shared") else { return }
-        UserDefaults.standard.set(raw, forKey: "audioOutputBackend")
-        microphoneBridgeManager.restartAsync()
-        rebuildMenu()
-    }
-
     @objc private func startMicrophoneBridge() {
         cachedDiagnostics = nil
         if bluetoothAccessState != .allowed {
@@ -1124,6 +1141,12 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     func updateRemoteGeneration(_ generation: RemoteGeneration) {
         guard remoteGeneration != generation else { return }
         remoteGeneration = generation
+        rebuildMenu()
+    }
+
+    func updateRemoteName(_ name: String?) {
+        guard remoteName != name else { return }
+        remoteName = name
         rebuildMenu()
     }
 

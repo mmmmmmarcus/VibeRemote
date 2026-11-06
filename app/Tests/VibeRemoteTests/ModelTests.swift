@@ -1099,6 +1099,11 @@ final class ModelTests: XCTestCase {
         // groups must still account for every tab.
         XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.appTabs, SettingsTab.allCases)
         XCTAssertEqual(SettingsTab.agent.title, "Interface Control")
+        // Settings is also the manual, so the one gesture that is not a button is a pane
+        // of its own, grouped with the remote rather than with the app's own settings.
+        XCTAssertEqual(SettingsTab.cursor.title, "Text Cursor")
+        XCTAssertTrue(SettingsTab.remoteTabs.contains(.cursor))
+        XCTAssertFalse(SettingsTab.appTabs.contains(.cursor))
     }
 
     func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {
@@ -1499,11 +1504,12 @@ final class ModelTests: XCTestCase {
         usage: Int = 0x01,
         maxInput: Int = 2,
         maxFeature: Int = 1,
-        hardwareRevision: String? = nil
+        hardwareRevision: String? = nil,
+        productName: String? = "Siri Remote"
     ) -> RemoteInterfaceDescriptor {
         RemoteInterfaceDescriptor(
             deviceKey: deviceKey,
-            productName: "Siri Remote",
+            productName: productName,
             productID: 0x026D,
             transport: transport,
             usagePage: usagePage,
@@ -1552,6 +1558,69 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(RemoteInputHandler.shouldSniffAudio(
             descriptor: old, generation: .glassTouchSurface, hasDedicatedAudioCollection: true
         ))
+    }
+
+    func testListCommandsReachAnyFocusedEditor() {
+        // The volume keys used to do nothing unless Codex was frontmost. The structure is
+        // read from generic AX roles, so the only gate left is "is a text editor focused" —
+        // Tab would move focus rather than indent anywhere else.
+        XCTAssertTrue(ListEditingController.acceptsListCommands(role: kAXTextAreaRole))
+        XCTAssertTrue(ListEditingController.acceptsListCommands(role: kAXTextFieldRole))
+        XCTAssertTrue(ListEditingController.acceptsListCommands(role: kAXComboBoxRole))
+        XCTAssertFalse(ListEditingController.acceptsListCommands(role: "AXWebArea"))
+        XCTAssertFalse(ListEditingController.acceptsListCommands(role: kAXButtonRole))
+        XCTAssertFalse(ListEditingController.acceptsListCommands(role: nil))
+
+        // The plan itself never depended on the app: a paragraph starts a list, a list item
+        // indents and outdents, and a code block takes neither.
+        func context(_ structure: ListEditingContext.Structure) -> ListEditingContext {
+            ListEditingContext(structure: structure, selectionLength: 0,
+                               spansParagraphs: false, composing: false)
+        }
+        XCTAssertEqual(ListEditingCommand.plan(.increase, context: context(.paragraph)), .createList)
+        XCTAssertEqual(ListEditingCommand.plan(.increase, context: context(.list)), .indent)
+        XCTAssertEqual(ListEditingCommand.plan(.decrease, context: context(.list)), .outdent)
+        XCTAssertNil(ListEditingCommand.plan(.decrease, context: context(.paragraph)))
+        XCTAssertNil(ListEditingCommand.plan(.increase, context: context(.code)))
+        XCTAssertEqual(ListEditingCommand.createList.key.code, kVK_ANSI_8)
+        XCTAssertEqual(ListEditingCommand.indent.key.flags, [])
+        XCTAssertEqual(ListEditingCommand.outdent.key.flags, .maskShift)
+    }
+
+    func testPrimaryRemoteNameFollowsTheRemoteTheMenuDescribes() {
+        // The menu row names the remote whose generation it reports, so the name must come
+        // from the same physical device `primary` picks — never from a charging-only remote
+        // or from the other family paired beside it.
+        let renamed = interface(
+            usagePage: 0x0C, usage: 0x04, maxInput: 209, maxFeature: 209,
+            productName: "Living Room Remote"
+        )
+        let sameRemote = interface(maxInput: 2, maxFeature: 209, productName: "Living Room Remote")
+        XCTAssertEqual(
+            RemoteGeneration.primaryName(interfaces: [renamed, sameRemote]),
+            "Living Room Remote"
+        )
+
+        let cabled = interface(
+            deviceKey: "DJ7YK3PPJ90M", transport: "USB", usagePage: 0xFF00, usage: 0x0B,
+            maxInput: 1, maxFeature: 39, productName: "Charging Remote"
+        )
+        XCTAssertEqual(
+            RemoteGeneration.primaryName(interfaces: [cabled, renamed, sameRemote]),
+            "Living Room Remote"
+        )
+
+        // Nothing usable to show falls back to the hardware family at the call site.
+        XCTAssertNil(RemoteGeneration.primaryName(interfaces: [cabled]))
+        XCTAssertNil(RemoteGeneration.primaryName(interfaces: []))
+        XCTAssertNil(RemoteGeneration.primaryName(interfaces: [
+            interface(maxInput: 209, maxFeature: 209, productName: "   ")
+        ]))
+        // One remote whose interfaces disagree has no single name.
+        XCTAssertNil(RemoteGeneration.primaryName(interfaces: [
+            renamed,
+            interface(maxInput: 2, maxFeature: 209, productName: "Siri Remote"),
+        ]))
     }
 
     func testRemoteAttachedOverLightningIsNeverTheActiveRemote() {

@@ -224,27 +224,36 @@ appears. Closing the window restores `.accessory`; minimizing keeps the Dock ico
 the user can restore the window. Keep `LSUIElement` for menu-bar-only launch.
 
 Settings follows Spotter's Settings layout (System Settings style, rebuilt 2026-11-04 at the
-user's request): a fixed 860 x 550 window, transparent title bar with hidden title and no
-toolbar, a 208-point sidebar (`.sidebar` material, 1 pt separator, icon-tile rows, grouped
+user's request): a fixed 720 x 550 window, transparent title bar with hidden title and no
+toolbar, a 190-point sidebar (`.sidebar` material, 1 pt separator, icon-tile rows, grouped
 headers Remote / Features / VibeRemote) and grouped-`Form` panes with a bold title whose
 first section header is stripped (`SettingsPane`, `SettingsRow` in `SettingsPanes.swift`).
 Keep metrics in `SettingsMetrics` aligned with Spotter's `Theme` rather than inventing new ones.
 
 The first menu row is the complete device summary. While connected, it shows `Connected`
-and the remote generation on the left, plus a green circular battery gauge with the numeric
-percentage centered on the right. While the remote is connected and its always-on bridge is
+and the remote's own Bluetooth name on the left, plus a green circular battery gauge with the
+numeric percentage centered on the right. The name comes from `RemoteGeneration.primaryName`,
+which reads the HID product string of the same physical remote `primary` picks — that string
+is the Bluetooth name, including a user rename, and needs no IOBluetooth call. A charging-only
+remote, a remote whose interfaces disagree, and a blank product string all leave it nil, which
+falls back to the hardware family. While the remote is connected and its always-on bridge is
 still coming up, replace `Connected` with `Starting`; the menu-bar remote glyph uses a refresh
 badge during the same interval. While disconnected, the row shows only `Disconnected`. There
 is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth, generation,
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected (frame autosave `VibeRemote.Settings.Sidebar`). Panes: **Remote** (the CAD
+disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes: **Remote** (the CAD
 remote with hover-only callouts, connection/battery, Siri Button pop-up, Auto Disconnect,
-Restore Defaults for exactly those two), **Buttons** (read-only list of each control's
-function, top-down, with the family's printed names), **Agent** (backend, per-backend model,
-OpenRouter key; same defaults/Keychain as the agent panel, which reloads them on open),
-**Microphone** (bridge start/restart, helper, Audio Output, driver install), **Diagnostics**
+Restore Defaults for exactly those two, then a read-only **Buttons** section listing each
+control's function, top-down, with the family's printed names, and a **Microphone** section
+with bridge start/restart, helper, output device and driver install), **Text Cursor**
+(Settings is also the manual, so the one gesture that is no button gets its own pane:
+the onboarding `CursorDemo` loop, then start/move/confirm/cancel steps that name the
+family's own parts — touch surface versus clickpad, and no Power key on the 1st-gen
+remote), **Interface Control**
+(backend, per-backend model, OpenRouter key; same defaults/Keychain as the agent panel,
+which reloads them on open), **Diagnostics**
 (fields from the async `MicrophoneBridgeDiagnostics`, Copy Diagnostics, app log) and
 **About** (version, Check for Updates, Getting Started, links). Software Update lives in
 About; the sidebar's About row shows a dot only while Sparkle has a valid update session.
@@ -278,14 +287,18 @@ tap/long-press are therefore synthesized in `RemoteInputHandler`:
 - Volume keys share one smart-list path across both remote generations. On button-down,
   they schedule one action after a short delay; do not dispatch Cmd+Shift+8 synchronously
   from the volume release callback because Codex drops it. `ListEditingController` reads
-  the focused Codex editor's value, selection, caret hierarchy and attributed list markers.
+  the focused editor's value, selection, caret hierarchy and attributed list markers.
   Volume-up creates a list from a paragraph or indents a list item; volume-down outdents a
-  list item (the editor removes the list at its outer edge). It invokes Codex's native
+  list item (the editor removes the list at its outer edge). It invokes the editor's native
   Cmd+Shift+8 / Tab / Shift+Tab commands so text, formatting, selection and undo remain
-  editor-owned. It never rewrites the AX value or keeps remembered list state. Composing
-  text, multi-paragraph selections, code blocks, unsupported apps, timeouts and ambiguous
-  AX results use a bounded per-focused-editor fallback because current Codex builds flatten
-  ProseMirror structure: the first volume-up creates a list, subsequent volume-up taps
+  editor-owned. It never rewrites the AX value or keeps remembered list state. This is not
+  Codex-only: the structure comes from generic AX roles and list attributes, and the single
+  remaining gate is `acceptsListCommands`, which requires a focused AXTextArea/AXTextField/
+  AXComboBox because Tab moves focus rather than indenting anywhere else. The Codex bundle-id
+  gate was removed on 2026-11-06 — do not reintroduce an app allowlist. Composing
+  text, multi-paragraph selections, code blocks, unsupported editors, timeouts and ambiguous
+  AX results use a bounded per-focused-editor fallback because many editors (Codex's
+  ProseMirror, Electron apps generally) flatten that structure: the first volume-up creates a list, subsequent volume-up taps
   indent it, and volume-down walks out/removes it. This fallback exists to keep short press
   functional. A tap and a hold both fire exactly once; long press must never be required
   for normal list use.
@@ -702,8 +715,11 @@ changes to pinned BlackHole source. Rebuild the driver after changing C source; 
 and install it separately from Swift. `scripts/test_shared_audio.c` exercises the
 production ring across forked processes without root. Keep render allocation/file
 operations/locks out of the IO callback, preserve generation-tagged acknowledgements,
-and use the same-cycle cache for multiple input clients. An old driver/helper, missing
-mapping or explicit Compatibility selection retains the previous AVAudioEngine route.
+and use the same-cycle cache for multiple input clients. The shared-memory HAL is the only
+route; the Settings Output picker and its `audioOutputBackend` default were removed on
+2026-11-06 and nothing reads that key. An old driver/helper or a missing mapping still
+retains the previous AVAudioEngine route automatically, because those installs cannot
+carry the shared ring — keep that capability check and its fallback.
 No source or binary from CouchVox is bundled.
 
 ### Siri release regression (2026-09-20)
@@ -828,11 +844,15 @@ Settings callouts show function text only, never a second line repeating physica
 names. RemoteSettingsLayout selects the physical generation. Center = caret positioning;
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
+Sidebar groups are Remote (Remote, Text Cursor, Interface Control) and VibeRemote
+(Diagnostics, About); `remoteTabs + appTabs` must stay equal to `allCases`.
+
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
-configuration lives in Settings; Audio Output is in its Microphone pane and diagnostics in
-its Diagnostics pane.
+configuration lives in Settings; the audio driver install lives in the Remote pane's
+Microphone section and diagnostics in the Diagnostics pane.
 Keep live status, Settings and Quit, plus actionable permission/setup
-errors when applicable. Advanced Menu is opened from the remote only; do not expose
+errors when applicable. Row order below the status summary is Settings…, Check for Updates,
+Computer Use Agent, Restart Onboarding, then a separator and Quit. Advanced Menu is opened from the remote only; do not expose
 another entry in the status menu or Settings' application menu. `MenuBarManager.publishDiagnostics`
 feeds both panes on every menu rebuild and diagnostics refresh, including while disconnected.
 

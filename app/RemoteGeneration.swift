@@ -269,8 +269,28 @@ extension RemoteGeneration {
     /// the normal state while testing, with one remote paired over Bluetooth and another
     /// plugged in to charge. A wireless remote always wins; a cabled one is never usable.
     static func primary(interfaces: [RemoteInterfaceDescriptor]) -> RemoteGeneration {
-        let groups = Dictionary(grouping: interfaces, by: { $0.deviceKey })
-        let ranked = groups
+        ranked(interfaces: interfaces).first?.generation ?? .unknown
+    }
+
+    /// The name macOS publishes for the same physical remote `primary` picks. HID's product
+    /// string comes from the Bluetooth name — it is the string PacketLogger device labels are
+    /// matched against — so this is what the user sees in Bluetooth settings, including a
+    /// rename. A remote whose interfaces disagree, or report nothing, has no name to show.
+    static func primaryName(interfaces: [RemoteInterfaceDescriptor]) -> String? {
+        guard let device = ranked(interfaces: interfaces).first else { return nil }
+        let names = Set(device.interfaces.compactMap { interface -> String? in
+            let name = (interface.productName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        })
+        return names.count == 1 ? names.first : nil
+    }
+
+    /// Attached remotes, best first: wireless over charging-only, then the richest interface
+    /// set, then a stable tiebreak so the menu does not flip between two equal remotes.
+    private static func ranked(
+        interfaces: [RemoteInterfaceDescriptor]
+    ) -> [(key: String, interfaces: [RemoteInterfaceDescriptor], generation: RemoteGeneration)] {
+        Dictionary(grouping: interfaces, by: { $0.deviceKey })
             .map { (key: $0.key, interfaces: $0.value, generation: classify(interfaces: $0.value)) }
             .filter { $0.generation != .unknown }
             .sorted { left, right in
@@ -282,6 +302,5 @@ extension RemoteGeneration {
                 }
                 return left.key < right.key
             }
-        return ranked.first?.generation ?? .unknown
     }
 }

@@ -60,6 +60,7 @@ struct SettingsRootView: View {
                     RemotePane(model: model, setSiriAction: setSiriAction,
                                restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
                                actions: actions)
+                case .cursor: TextCursorPane(generation: model.snapshot.generation)
                 case .agent: AgentPane(openPanel: actions.openAgentPanel)
                 case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
                 case .about: AboutPane(updater: updater, showOnboarding: actions.showOnboarding)
@@ -288,7 +289,6 @@ private struct RemotePane: View {
             }
             Section("Buttons") { buttonGuide }
             Section("Microphone") { microphoneStatus }
-            Section("Audio Output") { audioOutput }
         }
         // The microphone rows read the same async snapshot the Diagnostics pane does.
         .onAppear(perform: actions.refreshDiagnostics)
@@ -319,27 +319,13 @@ private struct RemotePane: View {
         SettingsRow(title: "Helper", value: diagnostics.helper)
         SettingsRow(title: "Output Device",
                     value: diagnostics.report.map { $0.outputDevice ?? "Missing" } ?? "Checking…")
-    }
-
-    @ViewBuilder private var audioOutput: some View {
-        SettingsRow(title: "Output") {
-            Picker("", selection: Binding(get: { model.audioOutput }, set: { value in
-                model.audioOutput = value
-                actions.setAudioOutput(value)
-            })) {
-                Text("Direct HAL (Experimental)").tag("shared")
-                Text("Compatibility").tag("compatibility")
-            }
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityIdentifier("settings.audioOutput")
-        }
         SettingsRow(title: "Audio Driver") {
-            Button(model.diagnostics.canInstallDriver ? "Install…" : "Reinstall…",
+            Button(diagnostics.canInstallDriver ? "Install…" : "Reinstall…",
                    action: actions.installAudioDriver)
                 .controlSize(.small)
         }
     }
+
 }
 
 /// The CAD remote with hover-only function callouts, then connection and battery.
@@ -548,6 +534,74 @@ private struct AgentPane: View {
         guard !keyDraft.isEmpty else { return }
         store.saveOpenRouterKey(keyDraft)
         keyDraft = ""
+    }
+}
+
+// MARK: - Text cursor
+
+/// Settings doubles as the manual, so the one gesture that is not a button gets a pane of
+/// its own. The looping demo is the same one the first-run guide draws; it is the whole
+/// point of the pane, and it pauses itself under Reduce Motion.
+private struct TextCursorPane: View {
+    let generation: RemoteGeneration
+
+    /// The 1st-gen remote has no Power key, and its flat glass is a touch surface rather
+    /// than a clickpad, so every instruction below names the part the user is holding.
+    private var glass: Bool { generation == .glassTouchSurface }
+    private var surface: String { glass ? "touch surface" : "clickpad" }
+
+    var body: some View {
+        SettingsPane(title: "Text Cursor") {
+            Section {
+                CursorDemo(generation: generation)
+                    .frame(height: 96)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, SettingsMetrics.md)
+                    .accessibilityHidden(true)
+            }
+            Section {
+                step("hand.point.up.left", "Start",
+                     "Rest a finger on the \(surface) and slide. A marker appears at the text cursor straight away, and takes over once you have moved far enough for it to be deliberate.")
+                step("arrow.left.and.right", "Move",
+                     "Slide sideways to move along the line, up or down to change line. Lift and start again as often as you like — the marker stays where you left it.")
+                step("checkmark.circle", "Confirm",
+                     glass ? "Click the touch surface, or stop moving for three seconds."
+                           : "Click the center of the clickpad, or stop moving for three seconds.")
+                step("xmark.circle", "Cancel",
+                     glass ? "Press Siri, or Return on the keyboard. Nothing is changed."
+                           : "Press Siri or Power, or Return on the keyboard. Nothing is changed.")
+            } header: {
+                Text("How to Use")
+            } footer: {
+                Text("The marker only appears where the text cursor's position can be read through accessibility, which rules out some apps. Nothing is ever typed, deleted or copied: only the insertion point moves.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func step(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: SettingsMetrics.lg) {
+            RoundedRectangle(cornerRadius: SettingsMetrics.tileRadius, style: .continuous)
+                .fill(SettingsMetrics.controlSurface)
+                .overlay {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: SettingsMetrics.rowIcon, height: SettingsMetrics.rowIcon)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SettingsMetrics.xs / 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

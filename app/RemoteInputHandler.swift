@@ -94,6 +94,9 @@ final class RemoteInputHandler {
     private(set) var generation: RemoteGeneration = .unknown
 
     var onGenerationChanged: ((RemoteGeneration) -> Void)?
+    /// The Bluetooth name of the remote the menu describes, or nil when it cannot be read.
+    var onRemoteNameChanged: ((String?) -> Void)?
+    private var lastReportedName: String?
 
     // Prevent double-processing with MediaKeyInterceptor. Both producers run on the main loop.
     static var lastProcessedButton: String?
@@ -250,6 +253,15 @@ final class RemoteInputHandler {
         // reports.
         deviceGenerations = RemoteGeneration.classifyAll(interfaces: descriptors)
         generation = RemoteGeneration.primary(interfaces: descriptors)
+        // The name belongs to the same physical remote as `generation`, but it can change
+        // without it: interfaces arrive one at a time, and swapping between two remotes of
+        // the same family never moves the generation. Report it before the guard below.
+        let name = RemoteGeneration.primaryName(interfaces: descriptors)
+        if name != lastReportedName {
+            lastReportedName = name
+            rmDebug("🎛 Remote name: \(name ?? "unavailable")")
+            onRemoteNameChanged?(name)
+        }
         guard generation != lastReportedGeneration else { return }
         lastReportedGeneration = generation
         if descriptors.isEmpty {
