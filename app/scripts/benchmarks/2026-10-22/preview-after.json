@@ -1,0 +1,22 @@
+{
+  "kind": "synthetic_serial_driver_fixture",
+  "fake_capture_delay_ms": 60,
+  "fake_cursor_delay_ms": 20,
+  "steps": "four alternating AX-only reads and background clicks; 450ms between calls",
+  "direct_reply_ms": [
+    2.44,
+    0.42,
+    0.45,
+    0.38,
+    0.34,
+    1.82,
+    1.51,
+    1.39
+  ],
+  "mean_reply_ms": 1.09,
+  "preview_capture_calls": 5,
+  "preview_cursor_calls": 5,
+  "extra_preview_rpc": 10,
+  "end_session_removed_preview": true,
+  "accuracy_claim": "Protocol delivery and preview lifecycle only; not a real UI or model task"
+}

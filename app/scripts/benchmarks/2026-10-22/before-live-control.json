@@ -1,0 +1,32 @@
+{
+  "duration_seconds": 30.062,
+  "processes": {
+    "audio_driver": {
+      "pid": 652,
+      "cpu_percent_one_core": 0.2,
+      "rss_mib": 5.86
+    },
+    "voice": {
+      "pid": 7258,
+      "cpu_percent_one_core": 1.464,
+      "rss_mib": 9.88
+    },
+    "capture": {
+      "pid": 7315,
+      "cpu_percent_one_core": 2.495,
+      "rss_mib": 21.11
+    },
+    "helper": {
+      "pid": 22039,
+      "cpu_percent_one_core": 0.0,
+      "rss_mib": 3.19
+    },
+    "app": {
+      "pid": 25275,
+      "cpu_percent_one_core": 2.062,
+      "rss_mib": 25.45
+    }
+  },
+  "capture_bytes_per_second": 16502.8,
+  "notes": "Live short sample, no forced idle and no hardware interaction. RSS excludes compressed memory; not a leak assessment."
+}
