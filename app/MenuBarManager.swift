@@ -35,6 +35,16 @@ final class RemoteBatteryRingView: NSView {
 
     override var intrinsicContentSize: NSSize { NSSize(width: 34, height: 34) }
 
+    /// The charge arc, in this unflipped view's y-up user space, where angles grow
+    /// counterclockwise from the positive x-axis. Empty reads as the top of the ring and
+    /// the arc grows clockwise from there, which is why the end angle *decreases* and the
+    /// stroke passes `clockwise: true`.
+    nonisolated static func progressArc(percent: Int) -> (start: CGFloat, end: CGFloat) {
+        let fraction = CGFloat(min(100, max(0, percent))) / 100
+        let top = CGFloat.pi / 2
+        return (top, top - .pi * 2 * fraction)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -55,13 +65,14 @@ final class RemoteBatteryRingView: NSView {
         context.strokePath()
 
         if let percent, percent > 0 {
+            let sweep = RemoteBatteryRingView.progressArc(percent: percent)
             context.setStrokeColor(NSColor.systemGreen.cgColor)
             context.addArc(
                 center: center,
                 radius: radius,
-                startAngle: -.pi / 2,
-                endAngle: -.pi / 2 + (.pi * 2 * CGFloat(percent) / 100),
-                clockwise: false
+                startAngle: sweep.start,
+                endAngle: sweep.end,
+                clockwise: true
             )
             context.strokePath()
         }

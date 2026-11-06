@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// Settings metrics and colors, matching Spotter's Settings window so both apps read as one
-/// family: a 208-point sidebar of icon-tile rows and native grouped-Form panes.
+/// family: a 190-point sidebar of icon-tile rows and native grouped-Form panes.
 enum SettingsMetrics {
-    static let sidebarWidth: CGFloat = 208
+    static let sidebarWidth: CGFloat = 190
     static let rowIcon: CGFloat = 20
     static let xs: CGFloat = 4
     static let sm: CGFloat = 6
@@ -58,10 +58,9 @@ struct SettingsRootView: View {
                 switch model.tab {
                 case .remote:
                     RemotePane(model: model, setSiriAction: setSiriAction,
-                               restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout)
-                case .buttons: ButtonsPane(snapshot: model.snapshot)
+                               restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
+                               actions: actions)
                 case .agent: AgentPane(openPanel: actions.openAgentPanel)
-                case .microphone: MicrophonePane(model: model, actions: actions)
                 case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
                 case .about: AboutPane(updater: updater, showOnboarding: actions.showOnboarding)
                 }
@@ -77,8 +76,6 @@ struct SettingsRootView: View {
             VStack(alignment: .leading, spacing: SettingsMetrics.xs / 2) {
                 header("Remote")
                 rows(SettingsTab.remoteTabs)
-                header("Features").padding(.top, SettingsMetrics.md)
-                rows(SettingsTab.featureTabs)
                 header("VibeRemote").padding(.top, SettingsMetrics.md)
                 rows(SettingsTab.appTabs)
             }
@@ -254,11 +251,15 @@ struct SettingsListActions<Content: View>: View {
 
 // MARK: - Remote
 
+/// Everything about the paired remote on one pane: the CAD hero, the two editable
+/// controls, the full button guide, and the microphone bridge's status. Buttons and
+/// Microphone were separate panes until this layout folded them in as sections.
 private struct RemotePane: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
     let restoreDefaults: () -> Void
     let setIdleTimeout: (RemoteIdleTimeout) -> Void
+    let actions: SettingsActions
 
     var body: some View {
         SettingsPane(title: "Remote") {
@@ -285,6 +286,58 @@ private struct RemotePane: View {
                         .accessibilityIdentifier("settings.restoreDefaults")
                 }
             }
+            Section("Buttons") { buttonGuide }
+            Section("Microphone") { microphoneStatus }
+            Section("Audio Output") { audioOutput }
+        }
+        // The microphone rows read the same async snapshot the Diagnostics pane does.
+        .onAppear(perform: actions.refreshDiagnostics)
+    }
+
+    /// Read-only: every button but Siri has a fixed function, and Siri is edited above.
+    @ViewBuilder private var buttonGuide: some View {
+        ForEach(RemoteSettingsGuide.buttons(for: model.snapshot.generation), id: \.self) { key in
+            SettingsRow(
+                title: RemoteSettingsGuide.buttonName(for: key, generation: model.snapshot.generation),
+                value: RemoteSettingsGuide.title(for: key, snapshot: model.snapshot)
+                    .replacingOccurrences(of: "\n", with: " · "),
+                subtitle: key == "tv" ? "Hold: Interface Control" : nil
+            )
+        }
+    }
+
+    @ViewBuilder private var microphoneStatus: some View {
+        let diagnostics = model.diagnostics
+        SettingsRow(title: "Voice Bridge", subtitle: diagnostics.attention,
+                    statusDot: diagnostics.bridgeRunning ? .green : .orange) {
+            HStack(spacing: SettingsMetrics.md) {
+                Text(diagnostics.bridgeRunning ? "Running" : "Stopped").foregroundStyle(.secondary)
+                Button(diagnostics.bridgeRunning ? "Restart" : "Start", action: actions.restartBridge)
+                    .controlSize(.small)
+            }
+        }
+        SettingsRow(title: "Helper", value: diagnostics.helper)
+        SettingsRow(title: "Output Device",
+                    value: diagnostics.report.map { $0.outputDevice ?? "Missing" } ?? "Checking…")
+    }
+
+    @ViewBuilder private var audioOutput: some View {
+        SettingsRow(title: "Output") {
+            Picker("", selection: Binding(get: { model.audioOutput }, set: { value in
+                model.audioOutput = value
+                actions.setAudioOutput(value)
+            })) {
+                Text("Direct HAL (Experimental)").tag("shared")
+                Text("Compatibility").tag("compatibility")
+            }
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityIdentifier("settings.audioOutput")
+        }
+        SettingsRow(title: "Audio Driver") {
+            Button(model.diagnostics.canInstallDriver ? "Install…" : "Reinstall…",
+                   action: actions.installAudioDriver)
+                .controlSize(.small)
         }
     }
 }
@@ -299,11 +352,11 @@ private struct RemoteHero: View {
         VStack(spacing: 14) {
             ZStack(alignment: .top) {
                 RemoteModelView(generation: snapshot.generation, onHover: { hoveredControl = $0 })
-                    .frame(width: 336, height: RemoteModelScene.previewHeight)
+                    .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
                     .accessibilityLabel(snapshot.generation.displayName)
                 HStack(alignment: .top, spacing: 0) {
                     callouts(layout.left, side: .left)
-                    Spacer().frame(width: 112)
+                    Spacer().frame(width: RemoteModelScene.previewBodyGutter)
                     callouts(layout.right, side: .right)
                 }
                 .allowsHitTesting(false)
@@ -341,7 +394,8 @@ private struct RemoteHero: View {
                     .offset(y: RemoteModelScene.guideY(item.centerY) - 17)
             }
         }
-        .frame(width: 112, height: RemoteModelScene.previewHeight, alignment: .topLeading)
+        .frame(width: RemoteModelScene.calloutColumnWidth, height: RemoteModelScene.previewHeight,
+               alignment: .topLeading)
     }
 
     private func callout(_ key: String, side: Side) -> some View {
@@ -349,7 +403,8 @@ private struct RemoteHero: View {
         return HStack(spacing: 6) {
             if side == .right { connector }
             Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                .frame(width: 90, alignment: side == .left ? .trailing : .leading)
+                .frame(width: RemoteModelScene.calloutColumnWidth - 22,
+                       alignment: side == .left ? .trailing : .leading)
             if side == .left { connector }
         }
         .frame(height: 34)
@@ -398,31 +453,10 @@ private struct SettingsBatteryGauge: View {
     }
 }
 
-// MARK: - Buttons
+// MARK: - Interface Control
 
-private struct ButtonsPane: View {
-    let snapshot: RemoteSettingsSnapshot
-
-    var body: some View {
-        SettingsPane(title: "Buttons") {
-            Section {
-                ForEach(RemoteSettingsGuide.buttons(for: snapshot.generation), id: \.self) { key in
-                    SettingsRow(
-                        title: RemoteSettingsGuide.buttonName(for: key, generation: snapshot.generation),
-                        value: RemoteSettingsGuide.title(for: key, snapshot: snapshot)
-                            .replacingOccurrences(of: "\n", with: " · "),
-                        subtitle: key == "tv" ? "Hold: Computer Use Agent" : nil
-                    )
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Agent
-
-/// The agent's choices, read from and written to the same defaults and Keychain item as the
-/// agent panel, which reloads them each time it opens.
+/// Interface Control's choices, read from and written to the same defaults and Keychain
+/// item as the agent panel, which reloads them each time it opens.
 @MainActor
 private final class AgentSettingsStore: ObservableObject {
     @Published var settings = AgentSettings.load() { didSet { if settings != oldValue { settings.save() } } }
@@ -441,7 +475,7 @@ private struct AgentPane: View {
     @State private var keyDraft = ""
 
     var body: some View {
-        SettingsPane(title: "Agent") {
+        SettingsPane(title: "Interface Control") {
             Section {
                 SettingsRow(title: "Backend") {
                     Picker("", selection: $store.settings.backend) {
@@ -514,50 +548,6 @@ private struct AgentPane: View {
         guard !keyDraft.isEmpty else { return }
         store.saveOpenRouterKey(keyDraft)
         keyDraft = ""
-    }
-}
-
-// MARK: - Microphone
-
-private struct MicrophonePane: View {
-    @ObservedObject var model: RemoteSettingsModel
-    let actions: SettingsActions
-
-    var body: some View {
-        let diagnostics = model.diagnostics
-        SettingsPane(title: "Microphone") {
-            Section {
-                SettingsRow(title: "Voice Bridge", subtitle: diagnostics.attention,
-                            statusDot: diagnostics.bridgeRunning ? .green : .orange) {
-                    HStack(spacing: SettingsMetrics.md) {
-                        Text(diagnostics.bridgeRunning ? "Running" : "Stopped").foregroundStyle(.secondary)
-                        Button(diagnostics.bridgeRunning ? "Restart" : "Start", action: actions.restartBridge)
-                            .controlSize(.small)
-                    }
-                }
-                SettingsRow(title: "Helper", value: diagnostics.helper)
-                SettingsRow(title: "Output Device", value: diagnostics.report.map { $0.outputDevice ?? "Missing" } ?? "Checking…")
-            }
-            Section("Audio Output") {
-                SettingsRow(title: "Output") {
-                    Picker("", selection: Binding(get: { model.audioOutput }, set: { value in
-                        model.audioOutput = value
-                        actions.setAudioOutput(value)
-                    })) {
-                        Text("Direct HAL (Experimental)").tag("shared")
-                        Text("Compatibility").tag("compatibility")
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityIdentifier("settings.audioOutput")
-                }
-                SettingsRow(title: "Audio Driver") {
-                    Button(diagnostics.canInstallDriver ? "Install…" : "Reinstall…", action: actions.installAudioDriver)
-                        .controlSize(.small)
-                }
-            }
-        }
-        .onAppear(perform: actions.refreshDiagnostics)
     }
 }
 

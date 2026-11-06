@@ -165,20 +165,21 @@ struct SettingsActions {
 }
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case remote, buttons, agent, microphone, diagnostics, about
+    /// `agent` keeps its raw value so saved accessibility identifiers and any stored
+    /// selection survive the rename of its visible title to "Interface Control".
+    case remote, agent, diagnostics, about
     var id: String { rawValue }
 
-    static let remoteTabs: [SettingsTab] = [.remote, .buttons]
-    static let featureTabs: [SettingsTab] = [.agent, .microphone]
+    /// The remote itself and what it drives. Buttons and Microphone used to be panes of
+    /// their own; both now live on the Remote pane, so no single-row group is left behind.
+    static let remoteTabs: [SettingsTab] = [.remote, .agent]
     /// About the app rather than the remote, so they close the sidebar in their own group.
     static let appTabs: [SettingsTab] = [.diagnostics, .about]
 
     var title: String {
         switch self {
         case .remote: return "Remote"
-        case .buttons: return "Buttons"
-        case .agent: return "Agent"
-        case .microphone: return "Microphone"
+        case .agent: return "Interface Control"
         case .diagnostics: return "Diagnostics"
         case .about: return "About"
         }
@@ -187,9 +188,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .remote: return "appletvremote.gen4"
-        case .buttons: return "button.programmable"
         case .agent: return "cursorarrow.motionlines"
-        case .microphone: return "mic"
         case .diagnostics: return "stethoscope"
         case .about: return "info.circle"
         }
@@ -218,12 +217,14 @@ final class RemoteSettingsModel: ObservableObject {
 }
 
 /// Retained after closing: repeated menu clicks bring the same window forward. The
-/// layout follows Spotter's Settings (and System Settings): a fixed 860 x 550 window with
-/// a transparent title bar, a 208-point sidebar and grouped-Form panes.
+/// layout follows Spotter's Settings (and System Settings): a fixed 720 x 550 window with
+/// a transparent title bar, a 190-point sidebar and grouped-Form panes.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    static let size = NSSize(width: 860, height: 550)
-    private static let frameName = "VibeRemote.Settings.Sidebar"
+    static let size = NSSize(width: 720, height: 550)
+    /// A new key per width: `setFrameUsingName` restores the saved frame after
+    /// `setContentSize`, so reusing the old name would bring the wider window back.
+    private static let frameName = "VibeRemote.Settings.Compact"
     let model: RemoteSettingsModel
 
     init(

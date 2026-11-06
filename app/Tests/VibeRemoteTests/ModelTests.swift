@@ -1095,7 +1095,10 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(aluminum.first, "power")
         XCTAssertTrue(aluminum.contains("mute"))
         XCTAssertEqual(RemoteSettingsGuide.buttonName(for: "back", generation: .aluminumClickpad), "Back")
-        XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.featureTabs + SettingsTab.appTabs, SettingsTab.allCases)
+        // Buttons and Microphone are sections of the Remote pane, so the sidebar's two
+        // groups must still account for every tab.
+        XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.appTabs, SettingsTab.allCases)
+        XCTAssertEqual(SettingsTab.agent.title, "Interface Control")
     }
 
     func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {
@@ -1121,6 +1124,20 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(snapshot.connectionText, "CONNECTED — BATTERY UNKNOWN")
         snapshot.batteryPercent = 0
         XCTAssertEqual(snapshot.connectionText, "CONNECTED 0%")
+    }
+
+    func testBatteryRingFillsClockwiseFromTheTop() {
+        // The ring is drawn in an unflipped, y-up view, so the top of the circle is +pi/2
+        // and a clockwise sweep decreases the angle. Quarter charge must therefore land on
+        // the positive x-axis (3 o'clock), not on the negative one.
+        let top = CGFloat.pi / 2
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: 25).start, top, accuracy: 1e-9)
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: 25).end, 0, accuracy: 1e-9)
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: 50).end, -top, accuracy: 1e-9)
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: 100).end, top - .pi * 2, accuracy: 1e-9)
+        // Out-of-range readings clamp instead of winding past a full turn.
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: 140).end, top - .pi * 2, accuracy: 1e-9)
+        XCTAssertEqual(RemoteBatteryRingView.progressArc(percent: -5).end, top, accuracy: 1e-9)
     }
 
     func testSettingsShipTheRemoteArtwork() throws {

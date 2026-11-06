@@ -7,8 +7,18 @@ import SwiftUI
 @MainActor
 enum RemoteModelScene {
     // Keep the CAD comfortably inside the viewport at every supported drag angle.
-    static let previewHeight: CGFloat = 280
-    static let previewWidth: CGFloat = 472
+    // The camera's orthographic scale is fixed in world units, so the CAD renders at a
+    // size proportional to `previewHeight`: changing it alone rescales the whole preview,
+    // and `guideY` keeps the callouts on their buttons.
+    static let previewHeight: CGFloat = 160
+    /// A callout column beside the CAD, wide enough for two lines of guide text. Text
+    /// does not scale with the preview, so this stays fixed.
+    static let calloutColumnWidth: CGFloat = 112
+    /// The gutter the CAD renders into, between the two callout columns. It scales with
+    /// the preview so the callouts keep the same clearance from the remote at any size.
+    static var previewBodyGutter: CGFloat { previewHeight * 0.4 }
+    /// The preview's full width: the CAD's gutter plus a callout column on each side.
+    static var previewWidth: CGFloat { calloutColumnWidth * 2 + previewBodyGutter }
     static let cameraHalfHeight: Double = 240
     static func guideY(_ referenceY: CGFloat) -> CGFloat {
         previewHeight / 2 + (referenceY - 199) * previewHeight / CGFloat(cameraHalfHeight * 2)
