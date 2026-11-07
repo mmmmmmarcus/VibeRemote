@@ -1102,6 +1102,16 @@ final class ModelTests: XCTestCase {
         // Settings is also the manual, so the one gesture that is not a button is a pane
         // of its own, grouped with the remote rather than with the app's own settings.
         XCTAssertEqual(SettingsTab.cursor.title, "Text Cursor")
+        // Interface Control's demo runs on one loop: the instruction types out, the agent
+        // acts, the result rests. Each phase has to land inside the loop, in order.
+        XCTAssertEqual(AgentDemo.phase(0.05, from: 0.12, to: 0.40), 0, accuracy: 1e-9)
+        XCTAssertEqual(AgentDemo.phase(0.26, from: 0.12, to: 0.40), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(AgentDemo.phase(0.90, from: 0.12, to: 0.40), 1, accuracy: 1e-9)
+        XCTAssertEqual(AgentDemo.phase(0.53, from: 0.44, to: 0.62), 0.5, accuracy: 1e-9)
+        for date in stride(from: 0.0, to: 12.0, by: 0.37) {
+            let progress = AgentDemo.progress(at: Date(timeIntervalSinceReferenceDate: date))
+            XCTAssertTrue((0..<1).contains(progress), "loop left 0..<1 at \(date)")
+        }
         XCTAssertTrue(SettingsTab.remoteTabs.contains(.cursor))
         XCTAssertFalse(SettingsTab.appTabs.contains(.cursor))
     }

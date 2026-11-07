@@ -252,7 +252,10 @@ with bridge start/restart, helper, output device and driver install), **Text Cur
 the onboarding `CursorDemo` loop, then start/move/confirm/cancel steps that name the
 family's own parts — touch surface versus clickpad, and no Power key on the 1st-gen
 remote), **Interface Control**
-(backend, per-backend model, OpenRouter key; same defaults/Keychain as the agent panel,
+(an `AgentDemo` illustration in System Settings' shape — abstract input on the left, what
+it produces on the right: the TV hold on the blueprint remote, then the instruction typing
+into the agent panel and the pointer pressing a control in the front window — then backend,
+per-backend model, OpenRouter key; same defaults/Keychain as the agent panel,
 which reloads them on open), **Diagnostics**
 (fields from the async `MicrophoneBridgeDiagnostics`, Copy Diagnostics, app log) and
 **About** (version, Check for Updates, Getting Started, links). Software Update lives in

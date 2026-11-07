@@ -61,7 +61,8 @@ struct SettingsRootView: View {
                                restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
                                actions: actions)
                 case .cursor: TextCursorPane(generation: model.snapshot.generation)
-                case .agent: AgentPane(openPanel: actions.openAgentPanel)
+                case .agent: AgentPane(generation: model.snapshot.generation,
+                                       openPanel: actions.openAgentPanel)
                 case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
                 case .about: AboutPane(updater: updater, showOnboarding: actions.showOnboarding)
                 }
@@ -455,13 +456,145 @@ private final class AgentSettingsStore: ObservableObject {
     }
 }
 
+/// System Settings shows a gesture as the abstract input on the left and what it produces
+/// on the right; Interface Control is harder to picture than a button, so it gets the same
+/// treatment. The remote is the technical drawing the first-run guide uses, which keeps this
+/// pane and Text Cursor in one visual family.
+struct AgentDemo: View {
+    let generation: RemoteGeneration
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let instruction = "Open the deploy log"
+
+    var body: some View {
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            // Reduce Motion freezes the loop where the story is already told: typed out,
+            // acted on, result showing.
+            let progress = reduceMotion ? 0.75 : Self.progress(at: timeline.date)
+            HStack(spacing: SettingsMetrics.md) {
+                RemoteBlueprint(generation: generation, highlight: .newLine,
+                                symbol: "cursorarrow.motionlines", showsGrid: false)
+                    .frame(width: 116)
+                Canvas { context, size in Self.drawScreen(in: context, size: size, progress: progress) }
+                    .frame(width: 196)
+            }
+            .frame(maxWidth: .infinity)
+            .background { Canvas { context, size in BlueprintGrid.draw(in: context, size: size) } }
+        }
+    }
+
+    /// One pass of the loop: hold, dictate, the agent acts, the result rests long enough
+    /// to read, then it starts over.
+    static func progress(at date: Date) -> Double {
+        let period = 5.6
+        return date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+    }
+
+    /// Phase ramps, each 0...1 across its own slice of the loop.
+    static func phase(_ progress: Double, from: Double, to: Double) -> Double {
+        min(max((progress - from) / (to - from), 0), 1)
+    }
+
+    private static func drawScreen(in context: GraphicsContext, size: CGSize, progress: Double) {
+        let ink = Color.primary.opacity(0.45)
+        let faint = Color.primary.opacity(0.18)
+        let accent = Color.accentColor
+        let typed = phase(progress, from: 0.12, to: 0.40)
+        let travel = phase(progress, from: 0.44, to: 0.62)
+        let acted = phase(progress, from: 0.62, to: 0.68)
+
+        // The Mac, drawn as a plain screen outline so nothing competes with the action.
+        let screen = CGRect(x: 0.5, y: 6.5, width: size.width - 1, height: size.height - 13)
+        context.stroke(Path(roundedRect: screen, cornerRadius: 6), with: .color(ink), lineWidth: 0.9)
+        var menuBar = Path()
+        menuBar.move(to: CGPoint(x: screen.minX, y: screen.minY + 9))
+        menuBar.addLine(to: CGPoint(x: screen.maxX, y: screen.minY + 9))
+        context.stroke(menuBar, with: .color(faint), lineWidth: 0.7)
+        for index in 0..<3 {
+            let dot = CGRect(x: screen.minX + 6 + CGFloat(index) * 5, y: screen.minY + 3, width: 2.4, height: 2.4)
+            context.fill(Path(ellipseIn: dot), with: .color(faint))
+        }
+
+        // The front window the agent works in.
+        let window = CGRect(x: screen.minX + 12, y: screen.minY + 17, width: screen.width - 24, height: 40)
+        context.stroke(Path(roundedRect: window, cornerRadius: 4), with: .color(ink), lineWidth: 0.8)
+        var divider = Path()
+        divider.move(to: CGPoint(x: window.minX, y: window.minY + 9))
+        divider.addLine(to: CGPoint(x: window.maxX, y: window.minY + 9))
+        context.stroke(divider, with: .color(faint), lineWidth: 0.7)
+        for (index, width) in [0.62, 0.44].enumerated() {
+            var line = Path()
+            let y = window.minY + 17 + CGFloat(index) * 6
+            line.move(to: CGPoint(x: window.minX + 7, y: y))
+            line.addLine(to: CGPoint(x: window.minX + 7 + window.width * width, y: y))
+            context.stroke(line, with: .color(faint), lineWidth: 1.4)
+        }
+
+        // What the instruction asks for: a control that the agent presses.
+        let target = CGRect(x: window.maxX - 44, y: window.maxY - 13, width: 34, height: 9)
+        let targetShape = Path(roundedRect: target, cornerRadius: 2.5)
+        if acted > 0 {
+            context.fill(targetShape, with: .color(accent.opacity(0.18 + 0.82 * acted)))
+        }
+        context.stroke(targetShape, with: .color(acted > 0 ? accent : ink), lineWidth: 0.8)
+
+        // The agent panel, with the instruction typing into it.
+        let panel = CGRect(x: screen.minX + 12, y: screen.maxY - 20, width: screen.width - 24, height: 15)
+        let panelShape = Path(roundedRect: panel, cornerRadius: 4)
+        context.fill(panelShape, with: .color(accent.opacity(0.10)))
+        context.stroke(panelShape, with: .color(accent.opacity(0.75)), lineWidth: 0.9)
+        let font = NSFont.monospacedSystemFont(ofSize: 7, weight: .regular)
+        let advance = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let shown = Int((typed * Double(instruction.count)).rounded())
+        let text = String(instruction.prefix(shown))
+        let textOrigin = CGPoint(x: panel.minX + 6, y: panel.midY)
+        if !text.isEmpty {
+            context.draw(Text(text).font(Font(font)).foregroundStyle(.primary),
+                         at: textOrigin, anchor: .leading)
+        }
+        if typed < 1 {
+            let caret = CGRect(x: textOrigin.x + CGFloat(shown) * advance, y: panel.midY - 4, width: 1.2, height: 8)
+            context.fill(Path(caret), with: .color(accent))
+        }
+
+        // The pointer only exists while it is doing something: it leaves the panel, lands
+        // on the control, and disappears with the result. It starts from the panel's trailing
+        // end so it never crosses the instruction it is carrying out.
+        guard travel > 0, progress < 0.86 else { return }
+        let start = CGPoint(x: panel.maxX - 12, y: panel.minY - 2)
+        let end = CGPoint(x: target.midX - 3, y: target.midY)
+        let eased = 0.5 - cos(travel * .pi) / 2
+        let tip = CGPoint(x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased)
+        var arrow = Path()
+        arrow.move(to: tip)
+        arrow.addLine(to: CGPoint(x: tip.x + 1.2, y: tip.y + 8.4))
+        arrow.addLine(to: CGPoint(x: tip.x + 3.4, y: tip.y + 5.6))
+        arrow.addLine(to: CGPoint(x: tip.x + 6.4, y: tip.y + 5.4))
+        arrow.closeSubpath()
+        context.fill(arrow, with: .color(Color(nsColor: .windowBackgroundColor)))
+        context.stroke(arrow, with: .color(.primary), lineWidth: 0.9)
+    }
+}
+
 private struct AgentPane: View {
+    let generation: RemoteGeneration
     let openPanel: () -> Void
     @StateObject private var store = AgentSettingsStore()
     @State private var keyDraft = ""
 
     var body: some View {
         SettingsPane(title: "Interface Control") {
+            Section {
+                AgentDemo(generation: generation)
+                    .frame(height: 104)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, SettingsMetrics.md)
+                    .accessibilityHidden(true)
+            } footer: {
+                Text("Hold TV for half a second — or pick Computer Use Agent in the menu bar — then say what you want done. The agent works in whatever app is in front, through the backend below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section {
                 SettingsRow(title: "Backend") {
                     Picker("", selection: $store.settings.backend) {
