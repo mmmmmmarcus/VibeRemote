@@ -109,7 +109,8 @@ func restoreAccessoryPolicy(closing window: NSWindow?) {
     let otherWindow = NSApp.windows.contains {
         $0 !== window && ($0.isVisible || $0.isMiniaturized) && setupIDs.contains($0.identifier?.rawValue ?? "")
     }
-    if !otherWindow { NSApp.setActivationPolicy(.accessory) }
+    // Computer Use's callout points at the Dock icon and its tile shows the agent working.
+    if !otherWindow && !DockPresence.computerUseHoldsDock { NSApp.setActivationPolicy(.accessory) }
 }
 
 /// One guide for both remote families; only the drawing and the button names differ.

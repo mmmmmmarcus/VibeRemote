@@ -24,6 +24,15 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
     var siriAction: ButtonAction
     var generation: RemoteGeneration = .unknown
     var idleTimeout: RemoteIdleTimeout = .defaultValue
+    /// The remote's Bluetooth name, shown under the Status section's Bluetooth row.
+    var remoteName: String? = nil
+    /// The user's per-button choices for `generation`, keyed by `RemoteButtonMapping.overrideKey`.
+    var buttonOverrides: [String: ButtonAction] = [:]
+
+    func action(for button: String) -> ButtonAction {
+        RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriAction,
+                                   overrides: buttonOverrides)
+    }
 
     var connectionText: String {
         guard connected else { return "DISCONNECTED" }
@@ -63,6 +72,28 @@ struct RemoteSettingsLayout {
     }
 }
 
+/// Settings shows every control's function as a pill beside the remote at once, so pills on
+/// one side must not overlap: each sits on its button's row unless that is closer than `pitch`
+/// to the one above, then moves down just enough; a column that runs past the bottom shifts
+/// back up. Pure so the spacing is testable. `centers` are in top-down preview points.
+enum RemotePillLayout {
+    static func centers(_ centers: [CGFloat], pitch: CGFloat, height: CGFloat) -> [CGFloat] {
+        let order = centers.indices.sorted { centers[$0] < centers[$1] }
+        var placed = [CGFloat](repeating: 0, count: centers.count)
+        var previous = -CGFloat.infinity
+        for index in order {
+            placed[index] = max(centers[index], previous + pitch, pitch / 2)
+            previous = placed[index]
+        }
+        var next = CGFloat.infinity
+        for index in order.reversed() {
+            placed[index] = min(placed[index], next - pitch, height - pitch / 2)
+            next = placed[index]
+        }
+        return placed
+    }
+}
+
 /// The guide describes fixed functions, not physical button names.
 enum RemoteSettingsGuide {
     static func title(for key: String, snapshot: RemoteSettingsSnapshot) -> String {
@@ -74,11 +105,21 @@ enum RemoteSettingsGuide {
                 ? "Enter / Confirm caret\nSwipe: Arrow key"
                 : "Confirm caret"
         }
-        let action = RemoteButtonMapping.action(button: key, generation: snapshot.generation, siriAction: snapshot.siriAction)
+        let action = snapshot.action(for: key)
         return action == .none ? "Not assigned" : action.settingsTitle
     }
 
-    /// The guide's controls from the top of the remote down, for the Buttons list.
+    /// The choices a Settings pill offers, with the current one; nil for fixed-role controls
+    /// (Advanced Menu opener, caret confirmation, the clickpad ring).
+    static func pillOptions(for key: String, snapshot: RemoteSettingsSnapshot) -> (choices: [ButtonAction], current: ButtonAction)? {
+        if key == "siri" {
+            return (ButtonAction.allCases.filter(\.isAssignableToSiriButton), snapshot.siriAction)
+        }
+        guard let choices = RemoteButtonMapping.choices(button: key, generation: snapshot.generation) else { return nil }
+        return (choices, snapshot.action(for: key))
+    }
+
+    /// The guide's controls from the top of the remote down.
     static func buttons(for generation: RemoteGeneration) -> [String] {
         let layout = RemoteSettingsLayout(generation: generation)
         return (layout.left + layout.right).sorted { $0.centerY < $1.centerY }.map(\.key)
@@ -127,6 +168,10 @@ extension ButtonAction {
         case .agentClientOrSlash: return "Client / Skill"
         case .advancedMenu: return "Advanced Menu"
         case .skillPicker: return "Skill"
+        case .commandEnter: return "Command + Enter"
+        case .undo: return "Undo"
+        case .redo: return "Redo"
+        case .vibeDictation: return "Dictation"
         case .none: return "None"
         }
     }
@@ -144,17 +189,66 @@ struct SettingsDiagnostics: Equatable {
         var appLogAvailable: Bool
     }
 
+    /// A setup step the user still has to finish. Settings shows the Helper and Audio Driver
+    /// rows only while one of these exists, plus the red Fix pill that opens its guide.
+    enum SetupIssue: Equatable, Identifiable {
+        case helperNotSetUp
+        case helperAwaitingApproval
+        /// No supported virtual device exists; `installable` is false when this build
+        /// bundles no driver (a fresh clone that never ran build_audio_driver.sh).
+        case audioDriverMissing(installable: Bool)
+
+        var id: String {
+            switch self {
+            case .helperNotSetUp, .helperAwaitingApproval: return "helper"
+            case .audioDriverMissing: return "audioDriver"
+            }
+        }
+
+        var isHelper: Bool { id == "helper" }
+    }
+
     var attention: String?
     var helper = "Checking…"
     var bridgeRunning = false
-    var canInstallDriver = false
+    var setupIssues: [SetupIssue] = []
     var report: Report?
+
+    /// The same health rules as the status menu's setup banners and onboarding: the helper
+    /// needs action until it is approved, and the driver counts as present as soon as any
+    /// supported output device (VibeRemote, BlackHole, Soundflower) exists. `.unsupported`
+    /// cannot happen on the macOS 27 deployment target and has nothing to fix, so it is no issue.
+    static func setupIssues(helper: PrivilegedHelperState, outputDeviceName: String?,
+                            driverInstallable: Bool) -> [SetupIssue] {
+        var issues: [SetupIssue] = []
+        switch helper {
+        case .notRegistered: issues.append(.helperNotSetUp)
+        case .awaitingApproval: issues.append(.helperAwaitingApproval)
+        case .ready, .unsupported: break
+        }
+        if outputDeviceName == nil { issues.append(.audioDriverMissing(installable: driverInstallable)) }
+        return issues
+    }
+
+    /// The pill names the single thing to fix, or the whole setup when both need work.
+    var setupPillTitle: String? {
+        switch (setupIssues.contains(where: \.isHelper), setupIssues.contains(where: { !$0.isHelper })) {
+        case (true, true): return "Fix Setup"
+        case (true, false): return "Fix Helper"
+        case (false, true): return "Fix Audio Driver"
+        case (false, false): return nil
+        }
+    }
 }
 
 /// Everything a pane can ask the app to do. The menu manager owns the work; Settings
 /// only forwards the user's choice.
 struct SettingsActions {
     var installAudioDriver: () -> Void = {}
+    /// Registers the helper, or opens Login Items when it is already waiting for approval.
+    var setUpHelper: () -> Void = {}
+    /// A pill's choice for a non-Siri button on the remote family Settings shows.
+    var setButtonAction: (String, ButtonAction) -> Void = { _, _ in }
     var restartBridge: () -> Void = {}
     var copyDiagnostics: () -> Void = {}
     var openAppLog: () -> Void = {}
@@ -165,13 +259,13 @@ struct SettingsActions {
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     /// `agent` keeps its raw value so saved accessibility identifiers and any stored
-    /// selection survive the rename of its visible title to "Interface Control".
-    case remote, cursor, agent, diagnostics, about
+    /// selection survive the renames of its visible title (now "Computer Use").
+    case remote, cursor, dictation, agent, diagnostics, about
     var id: String { rawValue }
 
     /// The remote itself and what it drives. Buttons and Microphone used to be panes of
     /// their own; both now live on the Remote pane, so no single-row group is left behind.
-    static let remoteTabs: [SettingsTab] = [.remote, .cursor, .agent]
+    static let remoteTabs: [SettingsTab] = [.remote, .cursor, .dictation, .agent]
     /// About the app rather than the remote, so they close the sidebar in their own group.
     static let appTabs: [SettingsTab] = [.diagnostics, .about]
 
@@ -179,7 +273,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .remote: return "Remote"
         case .cursor: return "Text Cursor"
-        case .agent: return "Interface Control"
+        case .dictation: return "Dictation"
+        case .agent: return "Computer Use"
         case .diagnostics: return "Diagnostics"
         case .about: return "About"
         }
@@ -189,6 +284,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .remote: return "appletvremote.gen4"
         case .cursor: return "character.cursor.ibeam"
+        case .dictation: return "waveform"
         case .agent: return "cursorarrow.motionlines"
         case .diagnostics: return "stethoscope"
         case .about: return "info.circle"
@@ -200,7 +296,7 @@ extension RemoteSettingsSnapshot {
     /// Restore Defaults covers exactly the two choices Settings can change on the remote.
     var isAtDefaults: Bool {
         let defaultAction = remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction ?? .spaceKey
-        return siriAction == defaultAction && idleTimeout == .defaultValue
+        return siriAction == defaultAction && idleTimeout == .defaultValue && buttonOverrides.isEmpty
     }
 }
 
@@ -234,6 +330,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         actions: SettingsActions = SettingsActions()
     ) {
         model = RemoteSettingsModel(snapshot: snapshot)
+        refreshDiagnostics = actions.refreshDiagnostics
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.size),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -268,6 +365,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { nil }
 
+    /// Helper approval happens in System Settings, outside this window; re-reading the status
+    /// when the user comes back clears the Fix pill without waiting for the next menu rebuild.
+    private let refreshDiagnostics: () -> Void
+
+    func windowDidBecomeKey(_ notification: Notification) { refreshDiagnostics() }
+
     func show(tab: SettingsTab? = nil) {
         if let tab { model.tab = tab }
         NSApp.setActivationPolicy(.regular)
@@ -294,7 +397,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 /// NSPopUpButton supplies keyboard navigation, VoiceOver and the system appearance.
-/// Only the Siri button exposes an editable action menu.
+/// Onboarding's Siri page uses it; Settings edits Siri through its pill instead.
 @MainActor
 struct SiriActionPopUp: NSViewRepresentable {
     let action: ButtonAction

@@ -109,6 +109,11 @@ final class RemoteInputHandler {
     private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags, text: String?)] = [:]
     private var pendingVoiceTailReleaseTimers: [String: Timer] = [:]
     private var voiceEndedObserver: NSObjectProtocol?
+    /// VibeRemote Dictation, keyed like `heldKeys`: begin on Siri down, end once the voice
+    /// tail drains (the same moment a mapped dictation key is released).
+    var onDictationBegin: (() -> Void)?
+    var onDictationEnd: (() -> Void)?
+    private var dictationButtons: Set<String> = []
     private var siriHoldStartedAt = Date.distantPast
     private var drainedHoldStartedAt = Date.distantPast
     private let listEditingController = ListEditingController()
@@ -935,7 +940,9 @@ final class RemoteInputHandler {
         if buttonName == AgentButtonGate.button, let onAgentRequested {
             let now = ProcessInfo.processInfo.systemUptime
             if isPressed {
-                if agentButtonGate.press(at: now, defersTap: action == .shiftEnter) { return }
+                // Any instant action can wait for release, so a remapped TV still opens
+                // Computer Use on a hold without also firing its tap.
+                if agentButtonGate.press(at: now, defersTap: action.isInstant && action != .none) { return }
             } else {
                 switch agentButtonGate.release(at: now, chorded: modifierChordFired.contains(buttonName)) {
                 case .passThrough:
@@ -1052,7 +1059,7 @@ final class RemoteInputHandler {
             return
         }
 
-        if action.requiresHold {
+        if action.holdsDictation {
             beginHoldAction(action, button: button, generation: generation)
             return
         }
@@ -1082,6 +1089,12 @@ final class RemoteInputHandler {
             beginRepeating(button: button) { [weak self] in self?.sendKey(kVK_RightArrow) }
         case .escKey:
             sendKey(kVK_Escape)
+        case .commandEnter:
+            sendKey(kVK_Return, flags: .maskCommand)
+        case .undo:
+            sendKey(kVK_ANSI_Z, flags: .maskCommand)
+        case .redo:
+            sendKey(kVK_ANSI_Z, flags: [.maskCommand, .maskShift])
         case .ctrlC:
             sendKey(kVK_ANSI_C, flags: .maskControl)
         case .launchAgentClient:
@@ -1113,7 +1126,7 @@ final class RemoteInputHandler {
                 tap: { [weak self] in self?.toggleAgentClient() },
                 longPress: { [weak self] in self?.sendSkillPickerTrigger() }
             )
-        case .spaceKey, .rightCmd, .rightOpt:
+        case .spaceKey, .rightCmd, .rightOpt, .vibeDictation:
             break // handled above
         }
     }
@@ -1142,7 +1155,7 @@ final class RemoteInputHandler {
     ) -> TimeInterval? {
         guard button == "siri",
               generation != .unknown,
-              action.requiresHold else { return nil }
+              action.holdsDictation else { return nil }
         return generation == .glassTouchSurface ? 4 : 3
     }
 
@@ -1424,6 +1437,10 @@ final class RemoteInputHandler {
     /// Press a virtual key and retain its exact specification until this HID button is released.
     private func beginHoldAction(_ action: ButtonAction, button: String, generation: RemoteGeneration) {
         if button == "siri" { siriHoldStartedAt = Date(); drainedHoldStartedAt = .distantPast }
+        if action == .vibeDictation {
+            beginDictationHold(button: button, generation: generation)
+            return
+        }
         let spec: (keyCode: Int, flags: CGEventFlags)
         switch action {
         case .spaceKey: spec = (kVK_Space, [])
@@ -1451,6 +1468,21 @@ final class RemoteInputHandler {
         rmDebug("⌨️ Held key down: code=\(spec.keyCode) source=\(button)")
     }
 
+    /// Mirrors the held-key path below: the first-generation tail continues the same
+    /// recording, while any other new press first ends (and transcribes) the previous one.
+    private func beginDictationHold(button: String, generation: RemoteGeneration) {
+        if let timer = pendingVoiceTailReleaseTimers.removeValue(forKey: button) {
+            timer.invalidate()
+            if generation == .glassTouchSurface, dictationButtons.contains(button) {
+                rmDebug("🎙 Continued dictation recording during first-generation voice tail")
+                return
+            }
+        }
+        releaseHeldKey(for: button)
+        dictationButtons.insert(button)
+        onDictationBegin?()
+    }
+
     private func scheduleVoiceTailRelease(for button: String, timeout: TimeInterval) {
         rmDebug("🎙 Physical Siri release; waiting for protocol end and output drain")
         if drainedHoldStartedAt >= siriHoldStartedAt { releaseHeldKey(for: button); return }
@@ -1472,6 +1504,10 @@ final class RemoteInputHandler {
 
     private func releaseHeldKey(for button: String) {
         pendingVoiceTailReleaseTimers.removeValue(forKey: button)?.invalidate()
+        if dictationButtons.remove(button) != nil {
+            rmDebug("🎙 Dictation hold ended: source=\(button)")
+            onDictationEnd?()
+        }
         guard let held = heldKeys.removeValue(forKey: button) else { return }
         postKey(keyCode: held.keyCode, flags: [], keyDown: false)
         rmDebug("⌨️ Held key up: code=\(held.keyCode) source=\(button)")
@@ -1485,6 +1521,10 @@ final class RemoteInputHandler {
             postKey(keyCode: held.keyCode, flags: [], keyDown: false)
         }
         heldKeys.removeAll()
+        if !dictationButtons.isEmpty {
+            dictationButtons.removeAll()
+            onDictationEnd?()
+        }
         buttonState.removeAll()
     }
 

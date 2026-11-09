@@ -175,4 +175,65 @@ final class ComputerUseAgentTests: XCTestCase {
         XCTAssertTrue(agent.steps.isEmpty)
         XCTAssertEqual(agent.context.appName, "Safari")
     }
+
+    func testDockCalloutPointsAtTheIconOnEveryDockEdge() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let size = CGSize(width: 360, height: 140)
+        typealias P = DockCalloutPlacement
+
+        // Bottom Dock: the arrow tip sits just above the icon, centered on it.
+        let bottomIcon = CGRect(x: 900, y: 4, width: 64, height: 64)
+        let bottom = P.place(size: size, icon: bottomIcon, screen: screen,
+                             visible: CGRect(x: 0, y: 76, width: 1512, height: 873))
+        XCTAssertEqual(bottom.edge, .bottom)
+        XCTAssertEqual(bottom.origin.y, bottomIcon.maxY + P.gap)
+        XCTAssertEqual(bottom.origin.x + bottom.arrowOffset, bottomIcon.midX)
+
+        // An icon near the screen edge clamps the callout but keeps the arrow on the icon.
+        let cornerIcon = CGRect(x: 1440, y: 4, width: 64, height: 64)
+        let corner = P.place(size: size, icon: cornerIcon, screen: screen, visible: screen)
+        XCTAssertEqual(corner.origin.x, screen.maxX - P.margin - size.width)
+        XCTAssertEqual(corner.origin.x + corner.arrowOffset, cornerIcon.midX)
+        // Past the rounded corner the arrow stops at the straight edge instead.
+        let farIcon = CGRect(x: 1484, y: 0, width: 20, height: 24)
+        let far = P.place(size: size, icon: farIcon, screen: screen, visible: screen)
+        XCTAssertEqual(far.arrowOffset, size.width - P.cornerRadius - P.arrowWidth / 2)
+
+        // Side Docks put the callout beside the icon and measure the arrow from the bottom.
+        let leftIcon = CGRect(x: 4, y: 400, width: 64, height: 64)
+        let left = P.place(size: size, icon: leftIcon, screen: screen, visible: screen)
+        XCTAssertEqual(left.edge, .left)
+        XCTAssertEqual(left.origin.x, leftIcon.maxX + P.gap)
+        XCTAssertEqual(left.origin.y + left.arrowOffset, leftIcon.midY)
+        let rightIcon = CGRect(x: 1444, y: 400, width: 64, height: 64)
+        let right = P.place(size: size, icon: rightIcon, screen: screen, visible: screen)
+        XCTAssertEqual(right.edge, .right)
+        XCTAssertEqual(right.origin.x + size.width, rightIcon.minX - P.gap)
+
+        // A one-line bar beside a side Dock keeps its arrow centered between the corners.
+        let bar = CGSize(width: 360, height: 48)
+        XCTAssertEqual(P.place(size: bar, icon: leftIcon, screen: screen, visible: screen).arrowOffset, 24)
+
+        // No located icon: no arrow, floating above the bottom of the visible frame.
+        let none = P.place(size: size, icon: nil, screen: screen, visible: screen)
+        XCTAssertNil(none.edge)
+        XCTAssertEqual(none.origin.x, screen.midX - size.width / 2)
+    }
+
+    func testDockIconFrameConvertsFromAccessibilityToAppKitCoordinates() {
+        let ax = CGRect(x: 900, y: 914, width: 64, height: 64)
+        XCTAssertEqual(DockIconLocator.appKitRect(fromAX: ax, primaryScreenHeight: 982),
+                       CGRect(x: 900, y: 4, width: 64, height: 64))
+    }
+
+    @MainActor
+    func testPhaseChangesAreReportedOnceForTheDockTile() {
+        let agent = ComputerUseAgent(settings: AgentSettings(), hasOpenRouterKey: false)
+        var phases: [ComputerUseAgent.Phase] = []
+        agent.onPhaseChange = { phases.append($0) }
+        agent.handle(.finished("Done"))
+        agent.handle(.finished("Done"))
+        agent.startOver()
+        XCTAssertEqual(phases, [.finished("Done"), .composing])
+    }
 }

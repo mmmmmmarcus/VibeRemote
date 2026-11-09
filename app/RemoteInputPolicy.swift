@@ -9,7 +9,18 @@ enum RemoteButtonMapping {
     static func usesPassiveCapture(generation: RemoteGeneration, packetLogger: Bool, mediaTap: Bool) -> Bool {
         packetLogger && mediaTap && generation != .glassTouchSurface
     }
-    static func action(button: String, generation: RemoteGeneration, siriAction: ButtonAction) -> ButtonAction {
+    /// `overrides` are the user's per-button choices for this generation from Settings' pills,
+    /// keyed by `overrideKey`. A stored choice that is no longer offered falls back to default.
+    static func action(button: String, generation: RemoteGeneration, siriAction: ButtonAction,
+                       overrides: [String: ButtonAction] = [:]) -> ButtonAction {
+        if let chosen = overrides[overrideKey(button)],
+           choices(button: button, generation: generation)?.contains(chosen) == true {
+            return chosen
+        }
+        return defaultAction(button: button, generation: generation, siriAction: siriAction)
+    }
+
+    static func defaultAction(button: String, generation: RemoteGeneration, siriAction: ButtonAction) -> ButtonAction {
         guard !generation.absentButtonKeys.contains(button) else { return .none }
         if button == AdvancedMenuInputState.trigger(for: generation) { return .advancedMenu }
         if button == "playPause" { return .skillPicker }
@@ -20,6 +31,29 @@ enum RemoteButtonMapping {
         }
         let baseline = remoteButtonDescriptors.first { $0.key == button }?.defaultAction ?? .none
         return generation.action(for: button, defaultAction: baseline, siriAction: siriAction)
+    }
+
+    /// The 1st-gen Menu button reports HID "menu"; the aluminum Back reports "back". Both are
+    /// the guide's "back" control, so one stored choice covers whichever usage arrives.
+    static func overrideKey(_ button: String) -> String { button == "menu" ? "back" : button }
+
+    /// Everything the user may pick for a non-Siri button, the button's own default first; nil
+    /// for controls with a fixed role (Advanced Menu opener, caret confirmation, the clickpad
+    /// ring, directions) and for buttons this remote does not have. Siri has its own list,
+    /// `isAssignableToSiriButton`. TV only takes instant actions: its tap waits for release so
+    /// a 0.5 s hold can open Computer Use, which would strand a repeat or a held key.
+    static func choices(button: String, generation: RemoteGeneration) -> [ButtonAction]? {
+        let button = overrideKey(button)
+        guard !generation.absentButtonKeys.contains(button),
+              button != AdvancedMenuInputState.trigger(for: generation),
+              ["back", "tv", "playPause", "volumeUp", "volumeDown", "power"].contains(button)
+        else { return nil }
+        let menu: [ButtonAction] = [.enterKey, .shiftEnter, .commandEnter, .backspace, .escKey, .ctrlC,
+                                    .undo, .redo, .bulletIndent, .bulletOutdent, .skillPicker,
+                                    .launchAgentClient, .none]
+        let baseline = defaultAction(button: button, generation: generation, siriAction: .spaceKey)
+        let offered = button == "tv" ? menu.filter(\.isInstant) : menu
+        return [baseline] + offered.filter { $0 != baseline }
     }
 }
 

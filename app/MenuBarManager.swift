@@ -116,6 +116,12 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case advancedMenu = "Advanced Menu"
     case positionCaret = "Position text cursor"
     case skillPicker = "Skill Picker"
+    // Offered in Settings' per-button pills (2026-11-08); raw values are persisted.
+    case commandEnter = "Command + Enter: Send"
+    case undo = "Undo"
+    case redo = "Redo"
+    /// Siri only (2026-11-08): VibeRemote records the hold and types the transcript itself.
+    case vibeDictation = "VibeRemote Dictation"
 
     var requiresHold: Bool {
         switch self {
@@ -126,14 +132,24 @@ enum ButtonAction: String, CaseIterable, Sendable {
         }
     }
 
-    /// Composite actions exist to fold two roles onto one physical key on a remote that is
-    /// short of keys. They are assigned by the generation profile, never chosen by hand.
-    var isAssignableToSiriButton: Bool {
+    /// Siri drives the microphone while it is physically held, so it only takes the held
+    /// keys dictation apps listen for (user's choice, 2026-11-08). Composite actions are
+    /// assigned by the generation profile and are never offered here either.
+    var isAssignableToSiriButton: Bool { requiresHold || self == .vibeDictation }
+
+    /// Actions whose hold is a dictation session: the release waits for the bridge's voice
+    /// tail to drain, so the end of the sentence is not cut off.
+    var holdsDictation: Bool { requiresHold || self == .vibeDictation }
+
+    /// One keystroke on press, nothing held or repeated: safe to defer to release, which the
+    /// TV button does so that holding it can open Computer Use instead.
+    var isInstant: Bool {
         switch self {
-        case .shiftEnterOrModifier, .agentClientOrSlash, .advancedMenu, .positionCaret, .skillPicker:
-            return false
-        default:
+        case .enterKey, .shiftEnter, .commandEnter, .escKey, .ctrlC, .undo, .redo,
+             .launchAgentClient, .skillPicker, .bulletIndent, .bulletOutdent, .none:
             return true
+        default:
+            return false
         }
     }
 
@@ -145,6 +161,8 @@ enum ButtonAction: String, CaseIterable, Sendable {
             return "Create a bullet list, or indent the current item"
         case .bulletOutdent:
             return "Outdent, or remove the current list item"
+        case .vibeDictation:
+            return "VibeRemote transcribes what you say while Siri is held and types it"
         default: return rawValue
         }
     }
@@ -241,6 +259,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     var touchStatus = "Waiting for a remote touch surface"
     private var remoteConnected = false
     private var remoteGeneration: RemoteGeneration = .unknown
+    /// Settings' per-button choices, per remote family because the two layouts differ.
+    private var buttonOverrides: [RemoteGeneration: [String: ButtonAction]] = MenuBarManager.loadButtonOverrides()
+    private static let buttonOverridesDefaultsKey = "buttonActionOverrides"
     /// The remote's own Bluetooth name, shown under the connection state. nil falls back to
     /// the hardware family, which is all we know before any interface opens.
     private var remoteName: String?
@@ -469,7 +490,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             batteryPercent: remoteBatteryPercent,
             siriAction: siriButtonAction,
             generation: remoteGeneration,
-            idleTimeout: remoteIdleTimeout
+            idleTimeout: remoteIdleTimeout,
+            remoteName: remoteName,
+            buttonOverrides: buttonOverrides[remoteGeneration] ?? [:]
         )
     }
 
@@ -499,11 +522,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                     requestBluetooth: { [weak self] in self?.requestBluetoothAccessHandler?() },
                     requestInput: { [weak self] in self?.requestInputAccessHandler?() },
                     requestAccessibility: { [weak self] in self?.requestControlAccessHandler?() },
-                    setUpHelper: { [weak self] in
-                        guard let self else { return }
-                        if PrivilegedHelperClient.shared.state == .awaitingApproval { self.openHelperSettings() }
-                        else { self.registerPrivilegedHelper() }
-                    },
+                    setUpHelper: { [weak self] in self?.setUpPrivilegedHelper() },
                     installAudio: { [weak self] in self?.installAudioDriver() }),
                 finish: { [weak self] action in self?.setSiriButtonAction(action) })
         }
@@ -527,11 +546,14 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 setSiriAction: { [weak self] action in self?.setSiriButtonAction(action) },
                 resetSiriAction: { [weak self] in
                     self?.setRemoteIdleTimeout(.defaultValue)
+                    self?.resetButtonOverrides()
                     self?.setSiriButtonAction(Self.siriButtonDefaultAction)
                 },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
                 actions: SettingsActions(
                     installAudioDriver: { [weak self] in self?.installAudioDriver() },
+                    setUpHelper: { [weak self] in self?.setUpPrivilegedHelper() },
+                    setButtonAction: { [weak self] button, action in self?.setButtonAction(action, for: button) },
                     restartBridge: { [weak self] in self?.startMicrophoneBridge() },
                     copyDiagnostics: { [weak self] in self?.copyDiagnostics() },
                     openAppLog: { [weak self] in self?.openAppLog() },
@@ -712,7 +734,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(settingsItem)
         menu.addItem(AppUpdater.shared.makeMenuItem())
         // Also reachable by holding TV; the menu item works without a remote.
-        let agentItem = NSMenuItem(title: "Computer Use Agent", action: #selector(toggleAgentPanel), keyEquivalent: "")
+        let agentItem = NSMenuItem(title: "Computer Use", action: #selector(toggleAgentPanel), keyEquivalent: "")
         agentItem.target = self
         menu.addItem(agentItem)
         // The guide starts with pairing, so it stays reachable while disconnected too.
@@ -872,8 +894,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         case .unsupported: state.helper = "Unavailable (needs macOS 13+)"
         }
         state.bridgeRunning = microphoneStatus.running
-        state.canInstallDriver = microphoneStatus.outputDeviceName != "VibeRemote"
-            && microphoneBridgeManager.bundledAudioDriverAvailable
+        state.setupIssues = SettingsDiagnostics.setupIssues(
+            helper: PrivilegedHelperClient.shared.state,
+            outputDeviceName: microphoneStatus.outputDeviceName,
+            driverInstallable: microphoneBridgeManager.bundledAudioDriverAvailable)
         if let diagnostics {
             state.report = SettingsDiagnostics.Report(
                 remoteAddress: diagnostics.remoteAddress,
@@ -976,6 +1000,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
             alert.addButton(withTitle: "OK")
             alert.runModal()
         }
+    }
+
+    /// Onboarding and Settings share one entry point: register first, and once the request
+    /// exists take the user to Login Items, where macOS shows the approval switch.
+    private func setUpPrivilegedHelper() {
+        if PrivilegedHelperClient.shared.state == .awaitingApproval { openHelperSettings() }
+        else { registerPrivilegedHelper() }
     }
 
     @objc private func openHelperSettings() {
@@ -1133,7 +1164,50 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// shows: a 1st-gen and a 2nd/3rd-gen remote can be paired at the same time and each must
     /// keep its own profile.
     func getMapping(for button: String, generation: RemoteGeneration? = nil) -> ButtonAction {
-        RemoteButtonMapping.action(button: button, generation: generation ?? remoteGeneration, siriAction: siriButtonAction)
+        let generation = generation ?? remoteGeneration
+        return RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriButtonAction,
+                                          overrides: buttonOverrides[generation] ?? [:])
+    }
+
+    /// Stored as `{generation: {button: action raw value}}`; unknown or no-longer-offered
+    /// entries are dropped on read so a stale choice can never reach the input path.
+    private static func loadButtonOverrides() -> [RemoteGeneration: [String: ButtonAction]] {
+        let stored = UserDefaults.standard.dictionary(forKey: buttonOverridesDefaultsKey) as? [String: [String: String]] ?? [:]
+        var result: [RemoteGeneration: [String: ButtonAction]] = [:]
+        for (rawGeneration, buttons) in stored {
+            guard let generation = RemoteGeneration(rawValue: rawGeneration) else { continue }
+            for (button, rawAction) in buttons {
+                guard let action = ButtonAction(rawValue: rawAction),
+                      RemoteButtonMapping.choices(button: button, generation: generation)?.contains(action) == true
+                else { continue }
+                result[generation, default: [:]][button] = action
+            }
+        }
+        return result
+    }
+
+    /// Applies to the remote family Settings is showing. Choosing the default removes the entry.
+    private func setButtonAction(_ action: ButtonAction, for button: String) {
+        let generation = remoteGeneration
+        let key = RemoteButtonMapping.overrideKey(button)
+        guard let choices = RemoteButtonMapping.choices(button: key, generation: generation),
+              choices.contains(action) else { return }
+        if action == choices.first { buttonOverrides[generation]?[key] = nil }
+        else { buttonOverrides[generation, default: [:]][key] = action }
+        saveButtonOverrides()
+        rebuildMenu()
+    }
+
+    private func resetButtonOverrides() {
+        buttonOverrides = [:]
+        saveButtonOverrides()
+    }
+
+    private func saveButtonOverrides() {
+        let stored = Dictionary(uniqueKeysWithValues: buttonOverrides.filter { !$0.value.isEmpty }.map {
+            ($0.key.rawValue, $0.value.mapValues(\.rawValue))
+        })
+        UserDefaults.standard.set(stored, forKey: Self.buttonOverridesDefaultsKey)
     }
 
 

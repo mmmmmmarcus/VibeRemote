@@ -81,6 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteInputHandler?.onRemoteIdleDisconnectRequested = { [weak self] deviceKey in
             self?.disconnectIdleRemote(deviceKey: deviceKey)
         }
+        remoteInputHandler?.onDictationBegin = { DictationController.shared.begin() }
+        remoteInputHandler?.onDictationEnd = { DictationController.shared.end() }
         
         // Start remote detection
         remoteDetector = RemoteDetector(
@@ -481,6 +483,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // While Computer Use owns the Dock icon, a click on it reopens its callout.
+        if agentPanel.dockClicked() { return true }
         menuBarManager?.showSettings()
         return true
     }

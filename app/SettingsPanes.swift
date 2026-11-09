@@ -61,6 +61,7 @@ struct SettingsRootView: View {
                                restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
                                actions: actions)
                 case .cursor: TextCursorPane(generation: model.snapshot.generation)
+                case .dictation: DictationPane(siriAction: model.snapshot.siriAction, setSiriAction: setSiriAction)
                 case .agent: AgentPane(generation: model.snapshot.generation,
                                        openPanel: actions.openAgentPanel)
                 case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
@@ -68,6 +69,14 @@ struct SettingsRootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Panes already draw their title inside the transparent title-bar band; the content
+            // column joins them so the pill below can line up with that title.
+            .ignoresSafeArea(edges: .top)
+            .overlay(alignment: .topTrailing) {
+                SetupIssuePill(diagnostics: model.diagnostics, actions: actions)
+                    .padding(.top, SettingsMetrics.xxl - 2)
+                    .padding(.trailing, SettingsMetrics.xxl)
+            }
             .background(SettingsVisualEffect(material: .contentBackground).ignoresSafeArea())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -151,6 +160,155 @@ private struct SettingsSidebarRow: View {
         .onHover { hovering = $0 }
         .accessibilityIdentifier("settings.sidebar.\(tab.rawValue)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+// MARK: - Setup guide
+
+/// A Liquid Glass pill in the window's top-right corner, shown on every pane while the helper
+/// or the audio driver needs the user. It names the fix and opens the step-by-step guide.
+private struct SetupIssuePill: View {
+    let diagnostics: SettingsDiagnostics
+    let actions: SettingsActions
+    @State private var showsGuide = false
+
+    var body: some View {
+        if let title = diagnostics.setupPillTitle {
+            Button { showsGuide.toggle() } label: {
+                HStack(spacing: SettingsMetrics.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    Text(title)
+                }
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
+            .accessibilityIdentifier("settings.setupPill")
+            .popover(isPresented: $showsGuide, arrowEdge: .bottom) {
+                SetupGuideView(issues: diagnostics.setupIssues, actions: actions)
+            }
+        }
+    }
+}
+
+/// One block per issue, helper first: approving it removes the password prompt that
+/// installing the driver would otherwise raise.
+private struct SetupGuideView: View {
+    let issues: [SettingsDiagnostics.SetupIssue]
+    let actions: SettingsActions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SettingsMetrics.xl) {
+            ForEach(Array(issues.enumerated()), id: \.element.id) { index, issue in
+                if index > 0 { Divider() }
+                VStack(alignment: .leading, spacing: SettingsMetrics.md) {
+                    Label(SetupGuide.title(issue), systemImage: SetupGuide.symbol(issue))
+                        .font(.headline)
+                    Text(SetupGuide.explanation(issue))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: SettingsMetrics.xs) {
+                        ForEach(Array(SetupGuide.steps(issue).enumerated()), id: \.offset) { number, step in
+                            HStack(alignment: .firstTextBaseline, spacing: SettingsMetrics.sm) {
+                                Text("\(number + 1).").monospacedDigit().foregroundStyle(.secondary)
+                                Text(step).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    if let action = SetupGuide.guideActionTitle(issue) {
+                        Button(action) { SetupGuide.perform(issue, actions: actions) }
+                            .buttonStyle(.borderedProminent)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+            }
+        }
+        .padding(SettingsMetrics.xxl - 4)
+        .frame(width: 320)
+    }
+}
+
+/// Copy and actions for each setup issue, shared by the Status rows and the guide.
+enum SetupGuide {
+    typealias Issue = SettingsDiagnostics.SetupIssue
+
+    static func statusText(_ issue: Issue) -> String {
+        switch issue {
+        case .helperNotSetUp: return "Not set up"
+        case .helperAwaitingApproval: return "Waiting for approval"
+        case .audioDriverMissing: return "Not installed"
+        }
+    }
+
+    /// The short button on the Status row.
+    static func actionTitle(_ issue: Issue) -> String? {
+        switch issue {
+        case .helperNotSetUp: return "Set Up…"
+        case .helperAwaitingApproval: return "Open Settings…"
+        case .audioDriverMissing(let installable): return installable ? "Install…" : nil
+        }
+    }
+
+    static func guideActionTitle(_ issue: Issue) -> String? {
+        switch issue {
+        case .helperNotSetUp: return "Set Up Helper"
+        case .helperAwaitingApproval: return "Open Login Items"
+        case .audioDriverMissing(let installable): return installable ? "Install Audio Driver" : nil
+        }
+    }
+
+    static func title(_ issue: Issue) -> String {
+        switch issue {
+        case .helperNotSetUp: return "Set Up the Helper"
+        case .helperAwaitingApproval: return "Approve the Helper"
+        case .audioDriverMissing: return "Install the Audio Driver"
+        }
+    }
+
+    static func symbol(_ issue: Issue) -> String {
+        issue.isHelper ? "lock.shield" : "speaker.badge.exclamationmark"
+    }
+
+    static func explanation(_ issue: Issue) -> String {
+        switch issue {
+        case .helperNotSetUp:
+            return "The helper captures the remote's microphone over Bluetooth. Approve it once and the voice bridge starts without asking for your password."
+        case .helperAwaitingApproval:
+            return "The helper is registered, but macOS is still waiting for you to allow it."
+        case .audioDriverMissing(let installable):
+            return installable
+                ? "Your voice plays into the VibeRemote audio device, which Mac apps then use as a microphone. That device isn't installed yet."
+                : "Your voice plays into the VibeRemote audio device, which Mac apps then use as a microphone. This build doesn't include the driver."
+        }
+    }
+
+    static func steps(_ issue: Issue) -> [String] {
+        switch issue {
+        case .helperNotSetUp:
+            return ["Make sure VibeRemote is running from the Applications folder.",
+                    "Click Set Up Helper.",
+                    "In Login Items & Extensions, turn on VibeRemote under Allow in the Background.",
+                    "Come back to Settings. This alert clears by itself."]
+        case .helperAwaitingApproval:
+            return ["Click Open Login Items.",
+                    "Under Allow in the Background, turn on VibeRemote.",
+                    "Enter your password if macOS asks, then come back to Settings."]
+        case .audioDriverMissing(true):
+            return ["Click Install Audio Driver.",
+                    "Enter your password if asked. An approved helper installs it without one.",
+                    "Sound pauses for a moment while macOS restarts its audio service."]
+        case .audioDriverMissing(false):
+            return ["In the app folder, run ./build_audio_driver.sh.",
+                    "Reinstall VibeRemote with ./install.sh.",
+                    "Open Settings again and click Install Audio Driver."]
+        }
+    }
+
+    @MainActor
+    static func perform(_ issue: Issue, actions: SettingsActions) {
+        switch issue {
+        case .helperNotSetUp, .helperAwaitingApproval: actions.setUpHelper()
+        case .audioDriverMissing(let installable): if installable { actions.installAudioDriver() }
+        }
     }
 }
 
@@ -253,9 +411,10 @@ struct SettingsListActions<Content: View>: View {
 
 // MARK: - Remote
 
-/// Everything about the paired remote on one pane: the CAD hero, the two editable
-/// controls, the full button guide, and the microphone bridge's status. Buttons and
-/// Microphone were separate panes until this layout folded them in as sections.
+/// Everything about the paired remote on one pane: the CAD hero with a glass pill beside
+/// every button (click one to choose what that button does), Auto Disconnect, and one Status
+/// section for the link, battery and microphone bridge. The Siri pop-up row and the read-only
+/// Buttons list were replaced by the pills (2026-11-08).
 private struct RemotePane: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
@@ -265,12 +424,16 @@ private struct RemotePane: View {
 
     var body: some View {
         SettingsPane(title: "Remote") {
-            Section { RemoteHero(snapshot: model.snapshot) }
             Section {
-                SettingsRow(title: "Siri Button") {
-                    SiriActionPopUp(action: model.snapshot.siriAction, onSelect: setSiriAction)
-                        .fixedSize()
-                }
+                RemoteHero(snapshot: model.snapshot, setSiriAction: setSiriAction,
+                           setButtonAction: actions.setButtonAction)
+            } footer: {
+                Text("Click a label to choose what its button does. Siri takes the held keys dictation apps listen for.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            Section {
                 SettingsRow(title: "Auto Disconnect") {
                     Picker("", selection: Binding(get: { model.snapshot.idleTimeout }, set: setIdleTimeout)) {
                         ForEach(RemoteIdleTimeout.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -288,27 +451,33 @@ private struct RemotePane: View {
                         .accessibilityIdentifier("settings.restoreDefaults")
                 }
             }
-            Section("Buttons") { buttonGuide }
-            Section("Microphone") { microphoneStatus }
+            Section("Status") { status }
         }
-        // The microphone rows read the same async snapshot the Diagnostics pane does.
+        // The bridge and setup rows read the same async snapshot the Diagnostics pane does.
         .onAppear(perform: actions.refreshDiagnostics)
     }
 
-    /// Read-only: every button but Siri has a fixed function, and Siri is edited above.
-    @ViewBuilder private var buttonGuide: some View {
-        ForEach(RemoteSettingsGuide.buttons(for: model.snapshot.generation), id: \.self) { key in
-            SettingsRow(
-                title: RemoteSettingsGuide.buttonName(for: key, generation: model.snapshot.generation),
-                value: RemoteSettingsGuide.title(for: key, snapshot: model.snapshot)
-                    .replacingOccurrences(of: "\n", with: " · "),
-                subtitle: key == "tv" ? "Hold: Interface Control" : nil
-            )
-        }
-    }
-
-    @ViewBuilder private var microphoneStatus: some View {
+    /// Connection, battery and the voice bridge always show. Helper and Audio Driver appear
+    /// only while they need the user; when both are fine there is nothing to act on, and the
+    /// Fix pill at the top of the window offers the step-by-step guide for either.
+    @ViewBuilder private var status: some View {
+        let snapshot = model.snapshot
         let diagnostics = model.diagnostics
+        SettingsRow(title: "Bluetooth",
+                    subtitle: snapshot.connected ? snapshot.remoteName : "Pair the remote in Bluetooth settings",
+                    statusDot: snapshot.connected ? .green : .gray) {
+            Text(snapshot.connected ? "Connected" : "Disconnected")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("settings.connection")
+        }
+        if snapshot.connected {
+            SettingsRow(title: "Battery") {
+                HStack(spacing: SettingsMetrics.md) {
+                    Text(batteryText(snapshot)).foregroundStyle(.secondary)
+                    SettingsBatteryGauge(connected: snapshot.connected, percent: snapshot.batteryPercent)
+                }
+            }
+        }
         SettingsRow(title: "Voice Bridge", subtitle: diagnostics.attention,
                     statusDot: diagnostics.bridgeRunning ? .green : .orange) {
             HStack(spacing: SettingsMetrics.md) {
@@ -317,91 +486,212 @@ private struct RemotePane: View {
                     .controlSize(.small)
             }
         }
-        SettingsRow(title: "Helper", value: diagnostics.helper)
-        SettingsRow(title: "Output Device",
-                    value: diagnostics.report.map { $0.outputDevice ?? "Missing" } ?? "Checking…")
-        SettingsRow(title: "Audio Driver") {
-            Button(diagnostics.canInstallDriver ? "Install…" : "Reinstall…",
-                   action: actions.installAudioDriver)
-                .controlSize(.small)
+        ForEach(diagnostics.setupIssues) { issue in
+            SettingsRow(title: issue.isHelper ? "Helper" : "Audio Driver",
+                        statusDot: .red) {
+                HStack(spacing: SettingsMetrics.md) {
+                    Text(SetupGuide.statusText(issue)).foregroundStyle(.secondary)
+                    if let title = SetupGuide.actionTitle(issue) {
+                        Button(title) { SetupGuide.perform(issue, actions: actions) }
+                            .controlSize(.small)
+                    }
+                }
+            }
         }
     }
 
+    private func batteryText(_ snapshot: RemoteSettingsSnapshot) -> String {
+        guard let percent = snapshot.batteryPercent, (0...100).contains(percent) else { return "Unknown" }
+        return "\(percent)%"
+    }
 }
 
-/// The CAD remote with hover-only function callouts, then connection and battery.
+/// The CAD remote with a glass pill beside each control: left-column controls get a pill on
+/// the left, right-column ones on the right, each with an arrow toward its button. Hovering
+/// a pill lights its CAD button and the reverse; clicking an editable pill opens a menu of
+/// that button's choices. Pills fade while the remote is dragged, since they point at the
+/// resting pose.
 private struct RemoteHero: View {
     let snapshot: RemoteSettingsSnapshot
-    @State private var hoveredControl: String?
+    let setSiriAction: (ButtonAction) -> Void
+    let setButtonAction: (String, ButtonAction) -> Void
+    @State private var modelHover: String?
+    @State private var pillHover: String?
+    @State private var dragging = false
     private var layout: RemoteSettingsLayout { RemoteSettingsLayout(generation: snapshot.generation) }
 
+    static let pillHeight: CGFloat = 26
+    static let pillPitch: CGFloat = 30
+
     var body: some View {
-        VStack(spacing: 14) {
-            ZStack(alignment: .top) {
-                RemoteModelView(generation: snapshot.generation, onHover: { hoveredControl = $0 })
-                    .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
-                    .accessibilityLabel(snapshot.generation.displayName)
-                HStack(alignment: .top, spacing: 0) {
-                    callouts(layout.left, side: .left)
-                    Spacer().frame(width: RemoteModelScene.previewBodyGutter)
-                    callouts(layout.right, side: .right)
-                }
-                .allowsHitTesting(false)
-            }
-            HStack(spacing: 12) {
-                SettingsBatteryGauge(connected: snapshot.connected, percent: snapshot.batteryPercent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(snapshot.connected ? "Connected" : "Disconnected")
-                        .font(.headline)
-                        .accessibilityIdentifier("settings.connection")
-                    Text(batteryText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+        ZStack(alignment: .topLeading) {
+            RemoteModelView(generation: snapshot.generation, highlighted: pillHover,
+                            onHover: { modelHover = $0 }, onDragging: { dragging = $0 })
+                .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
+                .accessibilityLabel(snapshot.generation.displayName)
+            column(layout.left, side: .left)
+            column(layout.right, side: .right)
+                .offset(x: RemoteModelScene.calloutColumnWidth + RemoteModelScene.previewBodyGutter)
         }
+        .frame(width: RemoteModelScene.previewWidth, height: RemoteModelScene.previewHeight)
         .frame(maxWidth: .infinity)
         .padding(.vertical, SettingsMetrics.md)
     }
 
-    private var batteryText: String {
-        guard snapshot.connected else { return "Pair the remote in Bluetooth settings" }
-        guard let percent = snapshot.batteryPercent, (0...100).contains(percent) else { return "Battery unknown" }
-        return "Battery \(percent)%"
-    }
-
-    private enum Side { case left, right }
-
-    private func callouts(_ items: [RemoteSettingsLayout.Callout], side: Side) -> some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(items) { item in
-                callout(item.key, side: side)
-                    .opacity(hoveredControl == item.key ? 1 : 0)
-                    .accessibilityHidden(hoveredControl != item.key)
-                    .offset(y: RemoteModelScene.guideY(item.centerY) - 17)
+    private func column(_ items: [RemoteSettingsLayout.Callout], side: PillSide) -> some View {
+        let targets = items.map { RemoteModelScene.guideY($0.centerY) }
+        let centers = RemotePillLayout.centers(targets, pitch: Self.pillPitch, height: RemoteModelScene.previewHeight)
+        return ZStack(alignment: .topLeading) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                pill(item.key, side: side, tipY: targets[index] - centers[index] + Self.pillHeight / 2)
+                    .frame(width: RemoteModelScene.calloutColumnWidth,
+                           alignment: side == .left ? .trailing : .leading)
+                    .offset(y: centers[index] - Self.pillHeight / 2)
             }
         }
         .frame(width: RemoteModelScene.calloutColumnWidth, height: RemoteModelScene.previewHeight,
                alignment: .topLeading)
+        .opacity(dragging ? 0 : 1)
+        .animation(.easeOut(duration: 0.15), value: dragging)
+        .allowsHitTesting(!dragging)
     }
 
-    private func callout(_ key: String, side: Side) -> some View {
-        let title = RemoteSettingsGuide.title(for: key, snapshot: snapshot)
-        return HStack(spacing: 6) {
-            if side == .right { connector }
-            Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                .frame(width: RemoteModelScene.calloutColumnWidth - 22,
-                       alignment: side == .left ? .trailing : .leading)
-            if side == .left { connector }
+    private func pill(_ key: String, side: PillSide, tipY: CGFloat) -> some View {
+        let guide = RemoteSettingsGuide.title(for: key, snapshot: snapshot)
+        // One line per pill; a second guide line (the glass surface's swipe) stays in the label.
+        let title = String(guide.split(separator: "\n").first ?? Substring(guide))
+        let options = RemoteSettingsGuide.pillOptions(for: key, snapshot: snapshot)
+        return ButtonPill(title: title, side: side, tipY: tipY, editable: options != nil,
+                          highlighted: pillHover == key || modelHover == key,
+                          onHover: { inside in
+                              if inside { pillHover = key } else if pillHover == key { pillHover = nil }
+                          },
+                          onTap: { presentMenu(for: key) })
+            .accessibilityLabel("\(RemoteSettingsGuide.buttonName(for: key, generation: snapshot.generation)): \(guide.replacingOccurrences(of: "\n", with: ", "))")
+            .accessibilityIdentifier("settings.pill.\(key)")
+    }
+
+    private func presentMenu(for key: String) {
+        guard let options = RemoteSettingsGuide.pillOptions(for: key, snapshot: snapshot) else { return }
+        let defaultChoice = key == "siri"
+            ? remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction
+            : options.choices.first
+        ButtonActionMenu.present(choices: options.choices, current: options.current, defaultChoice: defaultChoice) { action in
+            if key == "siri" { setSiriAction(action) } else { setButtonAction(key, action) }
         }
-        .frame(height: 34)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(title)
-        .accessibilityIdentifier("settings.guide.\(key)")
+    }
+}
+
+enum PillSide { case left, right }
+
+/// A one-line glass capsule with an arrow on the side facing the remote. `tipY` is where the
+/// arrow points, in the pill's own coordinates; it differs from the middle when the pill had
+/// to move off its button's row to clear a neighbour.
+private struct ButtonPill: View {
+    let title: String
+    let side: PillSide
+    let tipY: CGFloat
+    let editable: Bool
+    let highlighted: Bool
+    let onHover: (Bool) -> Void
+    let onTap: () -> Void
+
+    static let arrowLength: CGFloat = 9
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(editable ? Color.primary : Color.secondary)
+                if editable {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 11)
+            .frame(height: RemoteHero.pillHeight)
+            .padding(side == .left ? .trailing : .leading, Self.arrowLength)
+            .fixedSize(horizontal: true, vertical: false)
+            .contentShape(PillShape(side: side, tipY: tipY))
+            .glassEffect(highlighted ? .regular.tint(Color.accentColor.opacity(0.35)).interactive(editable)
+                                     : .regular.interactive(editable),
+                         in: PillShape(side: side, tipY: tipY))
+        }
+        .buttonStyle(.plain)
+        // Fixed-role pills stay enabled so hover still lights their button; tapping does nothing.
+        .onHover(perform: onHover)
+        .help(editable ? "Choose what this button does" : "This button's role is fixed")
+    }
+}
+
+/// A capsule plus a triangular arrow on its inner side whose tip sits at `tipY`, clamped to
+/// the pill's height; the arrow's base stays on the straight part of the capsule.
+private struct PillShape: Shape {
+    let side: PillSide
+    let tipY: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let length = ButtonPill.arrowLength
+        let body = side == .left
+            ? CGRect(x: rect.minX, y: rect.minY, width: rect.width - length, height: rect.height)
+            : CGRect(x: rect.minX + length, y: rect.minY, width: rect.width - length, height: rect.height)
+        let tip = min(max(tipY, rect.minY + 2), rect.maxY - 2)
+        let base = min(max(tip, rect.midY - 4), rect.midY + 4)
+        var arrow = Path()
+        if side == .left {
+            arrow.move(to: CGPoint(x: body.maxX - body.height / 2, y: base - 6))
+            arrow.addLine(to: CGPoint(x: rect.maxX, y: tip))
+            arrow.addLine(to: CGPoint(x: body.maxX - body.height / 2, y: base + 6))
+        } else {
+            arrow.move(to: CGPoint(x: body.minX + body.height / 2, y: base - 6))
+            arrow.addLine(to: CGPoint(x: rect.minX, y: tip))
+            arrow.addLine(to: CGPoint(x: body.minX + body.height / 2, y: base + 6))
+        }
+        arrow.closeSubpath()
+        return Path(roundedRect: body, cornerRadius: body.height / 2, style: .continuous).union(arrow)
+    }
+}
+
+/// A native drop-down of a button's choices, popped up at the pointer with the current one
+/// checked and under the pointer, like an NSPopUpButton. Each item explains itself in a tooltip.
+@MainActor
+enum ButtonActionMenu {
+    private final class Target: NSObject {
+        let onSelect: (ButtonAction) -> Void
+        init(onSelect: @escaping (ButtonAction) -> Void) { self.onSelect = onSelect }
+        @objc func choose(_ item: NSMenuItem) {
+            guard let raw = item.representedObject as? String, let action = ButtonAction(rawValue: raw) else { return }
+            onSelect(action)
+        }
     }
 
-    private var connector: some View {
-        Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 16, height: 1)
+    static func makeMenu(choices: [ButtonAction], current: ButtonAction, defaultChoice: ButtonAction?,
+                         target: AnyObject?) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for action in choices {
+            let title = action == defaultChoice ? "\(action.settingsTitle) (Default)" : action.settingsTitle
+            let item = NSMenuItem(title: title, action: #selector(Target.choose(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = action.rawValue
+            item.state = action == current ? .on : .off
+            item.toolTip = action.actionDescription
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    static func present(choices: [ButtonAction], current: ButtonAction, defaultChoice: ButtonAction?,
+                        onSelect: @escaping (ButtonAction) -> Void) {
+        let target = Target(onSelect: onSelect)
+        let menu = makeMenu(choices: choices, current: current, defaultChoice: defaultChoice, target: target)
+        // popUp tracks synchronously, so `target` outlives the selection.
+        menu.popUp(positioning: menu.items.first { $0.state == .on }, at: NSEvent.mouseLocation, in: nil)
+        withExtendedLifetime(target) {}
     }
 }
 
@@ -421,18 +711,18 @@ private struct SettingsBatteryGauge: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(Color.primary.opacity(0.12), lineWidth: 4)
+            Circle().stroke(Color.primary.opacity(0.12), lineWidth: 3)
             if let reading {
                 Circle().trim(from: 0, to: CGFloat(reading) / 100)
                     .stroke(reading <= 20 ? Color.red : Color.green,
-                            style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
             Image(systemName: "appletvremote.gen4.fill")
-                .font(.system(size: 17, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(connected ? Color.primary : Color.secondary)
         }
-        .frame(width: 36, height: 36)
+        .frame(width: 22, height: 22)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityIdentifier("settings.battery")
@@ -440,10 +730,10 @@ private struct SettingsBatteryGauge: View {
     }
 }
 
-// MARK: - Interface Control
+// MARK: - Computer Use
 
-/// Interface Control's choices, read from and written to the same defaults and Keychain
-/// item as the agent panel, which reloads them each time it opens.
+/// Computer Use's choices, read from and written to the same defaults and Keychain
+/// item as the Computer Use callout, which reloads them each time it opens.
 @MainActor
 private final class AgentSettingsStore: ObservableObject {
     @Published var settings = AgentSettings.load() { didSet { if settings != oldValue { settings.save() } } }
@@ -457,7 +747,7 @@ private final class AgentSettingsStore: ObservableObject {
 }
 
 /// System Settings shows a gesture as the abstract input on the left and what it produces
-/// on the right; Interface Control is harder to picture than a button, so it gets the same
+/// on the right; Computer Use is harder to picture than a button, so it gets the same
 /// treatment. The remote is the technical drawing the first-run guide uses, which keeps this
 /// pane and Text Cursor in one visual family.
 struct AgentDemo: View {
@@ -582,7 +872,7 @@ private struct AgentPane: View {
     @State private var keyDraft = ""
 
     var body: some View {
-        SettingsPane(title: "Interface Control") {
+        SettingsPane(title: "Computer Use") {
             Section {
                 AgentDemo(generation: generation)
                     .frame(height: 104)
@@ -590,7 +880,7 @@ private struct AgentPane: View {
                     .padding(.vertical, SettingsMetrics.md)
                     .accessibilityHidden(true)
             } footer: {
-                Text("Hold TV for half a second — or pick Computer Use Agent in the menu bar — then say what you want done. The agent works in whatever app is in front, through the backend below.")
+                Text("Hold TV for half a second — or pick Computer Use in the menu bar. A field pops up from VibeRemote's Dock icon; type or dictate what you want done and send it. The icon turns green while the agent works in the app that was in front.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

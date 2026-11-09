@@ -10,7 +10,11 @@ let package = Package(
         .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"]),
         .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
     ],
-    dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
+        // On-device Whisper for VibeRemote Dictation; only its WhisperKit library is linked.
+        .package(url: "https://github.com/argmaxinc/WhisperKit", exact: "1.1.1"),
+    ],
     targets: [
         .target(name: "SharedAudio", path: "SharedAudio", publicHeadersPath: "include"),
         .target(name: "NativeTouch", path: "NativeTouch", publicHeadersPath: "include", linkerSettings: [.linkedFramework("CoreFoundation")]),
@@ -39,7 +43,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "VibeRemote",
-            dependencies: ["HelperProtocol", "NativeTouch", .product(name: "Sparkle", package: "Sparkle")],
+            dependencies: ["HelperProtocol", "NativeTouch", .product(name: "Sparkle", package: "Sparkle"),
+                           .product(name: "WhisperKit", package: "WhisperKit")],
             path: ".",
             exclude: [
                 "SharedAudio", "NativeTouch", "scripts",
@@ -81,7 +86,8 @@ let package = Package(
                 "RemoteInputHandler.swift",
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
-                "SystemVolume.swift", "ComputerUseAgent.swift", "AgentPanel.swift"
+                "SystemVolume.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
+                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
@@ -94,6 +100,8 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("IOBluetooth"),
                 .linkedFramework("Security"),
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFoundation"),
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
         ),

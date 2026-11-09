@@ -65,7 +65,8 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `install.sh` | Developer-ID-signed build deployed over `/Applications/VibeRemote.app`; the stable signature is what preserves the TCC grants. |
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
-| `VibeRemote.entitlements` | Only `com.apple.security.device.bluetooth`. |
+| `Dictation.swift`, `DictationEngines.swift`, `DictationPane.swift` | VibeRemote Dictation: recorder, typer, controller; Apple/WhisperKit/OpenAI/Seed ASR engines; Settings pane. |
+| `VibeRemote.entitlements` | `com.apple.security.device.bluetooth` and `com.apple.security.device.audio-input` (Dictation records the virtual device under the hardened runtime). |
 
 ## Build, run, test
 
@@ -152,9 +153,19 @@ it is not proof of generation. Classification uses the whole physical interface 
 - Both generations use the physical Siri button for **Siri Button Mapping** and
   firmware-gated microphone capture. The old touch surface and new clickpad center
   confirm active caret positioning; outside it, old surface press is Enter and aluminum center is reserved. Do not remap the old surface to Siri again.
-- **Composite actions are profile-assigned, never user-chosen.** The Siri submenu iterates
-  `ButtonAction.allCases`, so profile composites return `false` from
-  `isAssignableToSiriButton`. `loadSiriButtonAction` re-checks it on read.
+- **Composite actions are profile-assigned, never user-chosen.** Siri only takes the held
+  dictation keys (Space, Right Command, Right Option; user's choice 2026-11-08) plus
+  `vibeDictation` (`isAssignableToSiriButton` = `requiresHold || vibeDictation`), and `loadSiriButtonAction` re-checks it on read, so an
+  older saved Siri choice outside that set falls back to Space.
+- **Per-button remapping (2026-11-08, user's request).** Settings' pills edit Back/Menu, TV,
+  Play/Pause (aluminum), Volume Up/Down and Power. `RemoteButtonMapping.choices` is the one
+  list of what each may take (its default first; TV only `isInstant` actions because its tap
+  waits for release so a hold opens Computer Use); nil means a fixed role: the Advanced Menu
+  opener, the touch surface / clickpad center, the clickpad ring and directions. Choices are
+  stored per generation under `buttonActionOverrides` and validated on read and on dispatch,
+  keyed by `overrideKey` (HID "menu" → "back"). New actions: Command+Enter, Undo, Redo.
+  Remapping changes only what a button sends: Advanced Menu ownership, chords, the volume
+  revert guard and passive-capture ownership still key off the physical button.
 - Older remotes without a dedicated Consumer/0x04 audio collection have their voice
   frames sniffed off every interface whose reports could hold a 20 ms Opus frame
   (`RemoteInputHandler.shouldSniffAudio`). The confirmed 0A00 black-glass remote does
@@ -212,11 +223,23 @@ black-glass and aluminum layouts, including side Siri, Mute and Power only on al
 First-generation CAD has no printed legends: small ink planes use imported button-face
 bounds, without replacing the CAD buttons. The aluminum symbols are CAD geometry.
 `RemoteSettingsLayout` callouts follow the converted control coordinates in a 398-point
-reference frame, projected into a 280-point preview with camera padding; keep callouts aligned when changing display scale. Drag has continuous pitch/yaw with logarithmic resistance and no hard angle limits and release restores the guide pose; Reduce
+reference frame, projected into a 320-point preview (tall enough for one pill per row; 460 points wide so
+it fits the 720-point window)
+with camera padding; keep pills aligned when changing display scale. Drag has continuous pitch/yaw with logarithmic resistance and no hard angle limits and release restores the guide pose; Reduce
 Motion skips that animation. No remote actions, extra HID/Bluetooth managers, idle spin
 or frame timers. Keep `rendersContinuously` and `isPlaying` off; rebuild only on generation
 changes. Check both generations in light/dark appearance and in the same retained window.
-Original PNGs remain bundled references. Callouts are read-only and appear only over the corresponding CAD button on hover; highlight the matching CAD button blue and hide both label and highlight while dragging or when the pointer exits. Preserve and restore original materials without tinting shared materials on other parts. Split the volume rocker into upper/lower regions. Only Siri is editable. Do not display the remote generation as a visible heading; keep connection state and battery.
+Original PNGs remain bundled references. Every control shows its function at once in a
+one-line Liquid Glass pill beside the remote (left-column controls on the left, right-column
+on the right) with an arrow toward its button; `RemotePillLayout` pushes a pill off its row
+only as far as needed to clear its neighbour, and the arrow still aims at the button.
+Hovering a pill highlights its CAD button blue (`RemoteModelView.highlighted`) and hovering
+the button highlights the pill; pills fade out while the remote is dragged. Clicking an
+editable pill pops up a native `NSMenu` of `RemoteSettingsGuide.pillOptions` (current one
+checked, default marked); fixed-role pills show no chevron and do nothing on click.
+Preserve and restore original materials without tinting shared materials on other parts.
+Split the volume rocker into upper/lower regions. Do not display the remote generation as a
+visible heading; keep connection state and battery.
 Preserve first-generation composite defaults except its fixed Advanced Menu opener.
 
 Opening Settings switches the app's activation policy to `.regular` so its Dock icon
@@ -244,26 +267,29 @@ or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
 disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes: **Remote** (the CAD
-remote with hover-only callouts, connection/battery, Siri Button pop-up, Auto Disconnect,
-Restore Defaults for exactly those two, then a read-only **Buttons** section listing each
-control's function, top-down, with the family's printed names, and a **Microphone** section
-with bridge start/restart, helper, output device and driver install), **Text Cursor**
+remote with a clickable glass pill per button, Auto Disconnect, Restore Defaults for the
+Siri choice, every pill choice and Auto Disconnect, and a **Status** section:
+Bluetooth connection with the remote's name, battery (connected only) and bridge
+start/restart; Helper and Audio Driver rows appear only while
+`SettingsDiagnostics.setupIssues` names them, using the same rules as the status-menu
+banners and onboarding — helper not approved, or no supported output device at all. There is
+no Output Device row), **Text Cursor**
 (Settings is also the manual, so the one gesture that is no button gets its own pane:
 the onboarding `CursorDemo` loop, then start/move/confirm/cancel steps that name the
 family's own parts — touch surface versus clickpad, and no Power key on the 1st-gen
-remote), **Interface Control**
+remote), **Computer Use**
 (an `AgentDemo` illustration in System Settings' shape — abstract input on the left, what
 it produces on the right: the TV hold on the blueprint remote, then the instruction typing
-into the agent panel and the pointer pressing a control in the front window — then backend,
-per-backend model, OpenRouter key; same defaults/Keychain as the agent panel,
+into the Computer Use callout and the pointer pressing a control in the front window — then backend,
+per-backend model, OpenRouter key; same defaults/Keychain as the callout,
 which reloads them on open), **Diagnostics**
 (fields from the async `MicrophoneBridgeDiagnostics`, Copy Diagnostics, app log) and
 **About** (version, Check for Updates, Getting Started, links). Software Update lives in
 About; the sidebar's About row shows a dot only while Sparkle has a valid update session.
 Automatic checks are always enabled at updater startup, including for previously opted-out
 installs; do not expose an opt-out checkbox. No mode selector or pointer/scroll sliders.
-The Siri pop-up stays an `NSPopUpButton` (per-item tooltips, rebuilt only when the choice
-changes). Window state comes from
+`SiriActionPopUp` (an `NSPopUpButton`, per-item tooltips, rebuilt only when the choice
+changes) remains for onboarding's Siri page only. Window state comes from
 `MenuBarManager` and must not create a second HID/Bluetooth manager. The exact Figma artwork is a SwiftPM
 resource; `build.sh` stages its bundle and `create_app_bundle.sh` embeds it in
 `Contents/Resources`, which `SettingsAssets` resolves before the CLI `Bundle.module` fallback.
@@ -847,15 +873,19 @@ Settings callouts show function text only, never a second line repeating physica
 names. RemoteSettingsLayout selects the physical generation. Center = caret positioning;
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
-Sidebar groups are Remote (Remote, Text Cursor, Interface Control) and VibeRemote
+Sidebar groups are Remote (Remote, Text Cursor, Dictation, Computer Use) and VibeRemote
 (Diagnostics, About); `remoteTabs + appTabs` must stay equal to `allCases`.
+While any setup issue exists, every pane shows a Liquid Glass capsule in the window's top-right
+corner (red `exclamationmark.triangle.fill`, "Fix Helper", "Fix Audio Driver" or "Fix Setup")
+whose popover is the step-by-step guide with the same actions as the rows. Settings refreshes
+diagnostics when its window becomes key, so approving the helper in System Settings clears it.
 
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
 configuration lives in Settings; the audio driver install lives in the Remote pane's
-Microphone section and diagnostics in the Diagnostics pane.
+Status section (and the Fix guide) and diagnostics in the Diagnostics pane.
 Keep live status, Settings and Quit, plus actionable permission/setup
 errors when applicable. Row order below the status summary is Settings…, Check for Updates,
-Computer Use Agent, Restart Onboarding, then a separator and Quit. Advanced Menu is opened from the remote only; do not expose
+Computer Use, Restart Onboarding, then a separator and Quit. Advanced Menu is opened from the remote only; do not expose
 another entry in the status menu or Settings' application menu. `MenuBarManager.publishDiagnostics`
 feeds both panes on every menu rebuild and diagnostics refresh, including while disconnected.
 
@@ -1013,16 +1043,40 @@ Rebuilt from scratch at the user's request on top of
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) (vendored v1.0.2 in
 `Vendor/AgentDesktop/`, bundled to `Contents/Helpers/AgentDesktop/` and re-signed); none of
 the removed command-assistant code was reused. `ComputerUseAgent.swift` holds settings,
-prompts, stream parsers and `AgentRun`; `AgentPanel.swift` holds the panel and its model.
+prompts, stream parsers and `AgentRun`; `AgentPanel.swift` holds the callout controller,
+its view and the `ComputerUseAgent` model; `AgentDock.swift` holds the Dock pieces.
+- Name: the feature is **Computer Use** everywhere visible (Settings pane, TV callout,
+  menu item, callout header). The `SettingsTab.agent` raw value stays for saved state.
+- Dock callout (2026-11-08, first version): opening holds a regular activation policy so
+  the menu-bar app gets a Dock icon (`DockPresence.computerUseHoldsDock` keeps
+  `restoreAccessoryPolicy` from removing it). `AgentDockTile` recolors the icon through
+  `NSDockTile` (macOS's live-tile API): blue while composing, green while a command runs, then
+  the normal icon with a ✓/! badge. Recolor = screen a gradient squircle, masked by the icon's
+  own alpha, over the icon. `DockIconLocator` reads VibeRemote's AXDockItem frame from the
+  Dock's accessibility tree (no public API; matched by bundle URL) and waits for two equal
+  reads 50 ms apart because a new icon slides in. `DockCalloutPlacement` (tested) points a
+  glass `DockCalloutShape` arrow at the icon on bottom/left/right Docks; without a located
+  icon it floats arrowless above the screen bottom. The callout is a borderless key-capable
+  panel at `.popUpMenu` level whose field takes focus on open. The callout is **only the input
+  bar** (user's request, 2026-11-08): field plus a circular Send button — no header, hint,
+  step list, result card or pickers. Send (or Return/Select) runs the command and returns
+  focus to the target app, but the callout **stays up** unfocused: the field becomes one
+  status line (`ComputerUseAgent.status`, whichever came last of the agent's step or message)
+  with a spinner and Stop in place of Send. On finish the same line shows the outcome with a
+  ✓/! icon and the tile gets a ✓/! badge; 8 s later both go away unless the callout is key.
+  While Computer Use holds the Dock icon, clicking it focuses the bar (a fresh field after a
+  finish); otherwise reopen still shows Settings. Esc closes. Long-press TV stops a running
+  command, closes an open callout, or opens a fresh one. Backend and model live only in the
+  Settings pane.
 - Trigger: `AgentButtonGate` (TV held ≥ 0.5 s). Aluminum TV (plain Shift+Enter) fires on
   release so a hold can become the agent; 1st-gen TV stays a modifier, and a chorded hold
   never opens it. The menu-bar item does the same without a remote.
-- Input: the user's own dictation app types into the focused panel (user's choice over
-  built-in speech). Remote Select is consumed by the panel only while it is key.
-  The panel must use `NSApp.activate(ignoringOtherApps: true)`: a remote press is no user
+- Input: the user's own dictation app types into the focused callout (user's choice over
+  built-in speech). Remote Select is consumed by the callout only while it is key.
+  The callout must use `NSApp.activate(ignoringOtherApps: true)`: a remote press is no user
   event in this app, so cooperative `activate()` was refused and Typeless pasted into the
   previous app while typing after a click worked (2026-11-01). The log line
-  "Agent panel shown … active= key=" records whether activation took.
+  "Computer Use callout shown key= icon= active=" records activation and the located icon.
 - Backends (user's choice): Claude Code CLI (`--tools Bash --allowedTools
   Bash(agent-desktop:*)`, stream-json), Codex CLI (`exec --json`, must be
   `danger-full-access`: its seatbelt returns EPERM for agent-desktop), OpenRouter
@@ -1045,6 +1099,35 @@ prompts, stream parsers and `AgentRun`; `AgentPanel.swift` holds the panel and i
   Accessibility grant. Claude Code on this Mac reported "not logged in" from the sandboxed
   dev shell (2026-11-01); the panel surfaces that error. The user ran it end to end from the
   remote with Codex on 2026-11-01.
+
+### VibeRemote Dictation (2026-11-08)
+
+At the user's request VibeRemote can transcribe itself instead of holding a key for a third-party
+dictation app. Siri's `vibeDictation` action (pill title "Dictation"; Settings › Dictation's
+toggle writes the same Siri choice) begins `DictationController` on Siri down and ends it at the
+exact moment a mapped dictation key would be released: `holdsDictation` routes it through the
+same voice-tail/`voice-drained` wait and safety timeout, the first-generation tail continues the
+same recording, and an aluminum re-press ends (and transcribes) the previous hold first. No key is
+held. It is Siri-only; no other button's `choices` may include it.
+- Capture: an in-app `AVAudioEngine` pinned (AUHAL current device) to the bridge's own virtual
+  input, found by `supportedOutputDeviceNames`, running only from Siri down to drain + 150 ms.
+  The voice helper and the shared-memory HAL are unchanged. Needs Microphone TCC,
+  `NSMicrophoneUsageDescription` and the audio-input entitlement. Clips under 0.3 s are dropped;
+  digital silence reports "No audio arrived" (bridge stopped).
+- Engines take one finished 16 kHz mono clip (`DictationAudio`), no streaming: Apple
+  `DictationTranscriber` (`.shortDictation`, asset downloaded on first use; Automatic uses the
+  Mac's locale), WhisperKit 1.1.1 (only its `WhisperKit` product; models downloaded on demand to
+  Application Support/VibeRemote/WhisperKit, folder remembered in defaults), OpenAI
+  `/v1/audio/transcriptions` multipart WAV, and Seed ASR via Volcengine's synchronous flash
+  endpoint (`volc.bigasr.auc_turbo`; `X-Api-Key`, or App ID + Access Token for old-console keys;
+  outcome in the `X-Api-Status-Code` header, 20000003 = silence). Keys are bring-your-own,
+  one Keychain item per service, never in defaults or logs.
+- Output: one line (newlines collapsed so a composer cannot submit), typed as Unicode keyboard
+  events in ≤20-UTF-16 chunks split on character boundaries — never the clipboard. Transcripts
+  are never logged; the log records provider, durations and character count only.
+- Hardware/network verification still outstanding: real holds on both generations, each engine,
+  Apple asset download, WhisperKit download/load time, and the Volcengine flash request fields
+  (taken from the documentation summary, not a verbatim spec).
 
 ### Dictation trigger (2026-10-31)
 

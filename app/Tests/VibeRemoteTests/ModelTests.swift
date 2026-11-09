@@ -663,6 +663,53 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(correlation.resolve(button: "mute", pressed: true, repeating: false, now: 3.3))
     }
 
+    func testPillsRemapOrdinaryButtonsButKeepFixedRoles() {
+        let undoRedo: [String: ButtonAction] = ["volumeUp": .redo, "volumeDown": .undo, "back": .escKey]
+        for generation in [RemoteGeneration.aluminumClickpad, .glassTouchSurface] {
+            XCTAssertEqual(RemoteButtonMapping.action(button: "volumeUp", generation: generation, siriAction: .spaceKey, overrides: undoRedo), .redo)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "volumeDown", generation: generation, siriAction: .spaceKey, overrides: undoRedo), .undo)
+            // The glass Menu button reports HID "menu"; its choice is stored under "back".
+            XCTAssertEqual(RemoteButtonMapping.action(button: "menu", generation: generation, siriAction: .spaceKey, overrides: undoRedo), .escKey)
+            // Defaults lead each list, and fixed roles offer nothing.
+            XCTAssertEqual(RemoteButtonMapping.choices(button: "volumeUp", generation: generation)?.first, .bulletIndent)
+            XCTAssertNil(RemoteButtonMapping.choices(button: "select", generation: generation))
+            XCTAssertNil(RemoteButtonMapping.choices(button: "navUp", generation: generation))
+            XCTAssertNil(RemoteButtonMapping.choices(button: AdvancedMenuInputState.trigger(for: generation), generation: generation))
+            // TV's tap waits for release, so it only offers instant actions.
+            XCTAssertTrue(RemoteButtonMapping.choices(button: "tv", generation: generation)!.dropFirst().allSatisfy(\.isInstant))
+            XCTAssertFalse(RemoteButtonMapping.choices(button: "tv", generation: generation)!.contains(.backspace))
+        }
+        // An override for a fixed-role control is ignored rather than trusted.
+        XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .aluminumClickpad, siriAction: .spaceKey,
+                                                  overrides: ["mute": .undo]), .advancedMenu)
+        XCTAssertNil(RemoteButtonMapping.choices(button: "power", generation: .glassTouchSurface))
+        XCTAssertEqual(RemoteButtonMapping.choices(button: "power", generation: .aluminumClickpad)?.first, .enterKey)
+        var snapshot = RemoteSettingsSnapshot(connected: true, batteryPercent: 50, siriAction: .spaceKey,
+                                              generation: .aluminumClickpad)
+        XCTAssertTrue(snapshot.isAtDefaults)
+        snapshot.buttonOverrides = ["volumeUp": .redo]
+        XCTAssertFalse(snapshot.isAtDefaults)
+        XCTAssertEqual(RemoteSettingsGuide.title(for: "volumeUp", snapshot: snapshot), "Redo")
+    }
+
+    @MainActor
+    func testPillLayoutKeepsEveryPillOnItsOwnRow() {
+        let placed = RemotePillLayout.centers([100, 110, 112, 300], pitch: 30, height: 320)
+        XCTAssertEqual(placed, [100, 130, 160, 300])
+        // A column pushed past the bottom shifts back up, still apart.
+        XCTAssertEqual(RemotePillLayout.centers([300, 310], pitch: 30, height: 320), [275, 305])
+        for generation in [RemoteGeneration.aluminumClickpad, .glassTouchSurface] {
+            let layout = RemoteSettingsLayout(generation: generation)
+            for column in [layout.left, layout.right] {
+                let centers = RemotePillLayout.centers(column.map { RemoteModelScene.guideY($0.centerY) },
+                                                       pitch: 30, height: RemoteModelScene.previewHeight).sorted()
+                for (a, b) in zip(centers, centers.dropFirst()) { XCTAssertGreaterThanOrEqual(b - a, 30 - 0.001) }
+                XCTAssertGreaterThanOrEqual(centers.first!, 15)
+                XCTAssertLessThanOrEqual(centers.last!, RemoteModelScene.previewHeight - 15)
+            }
+        }
+    }
+
     func testOnlySiriIsCustomizableAndPlayOpensSkill() {
         for siri in ButtonAction.allCases.filter(\.isAssignableToSiriButton) {
             XCTAssertEqual(RemoteButtonMapping.action(button: "siri", generation: .aluminumClickpad, siriAction: siri), siri)
@@ -806,6 +853,11 @@ final class ModelTests: XCTestCase {
             button: "siri",
             generation: .glassTouchSurface
         ))
+        // VibeRemote Dictation waits for the same drain before it stops recording.
+        XCTAssertEqual(RemoteInputHandler.voiceTailReleaseTimeout(
+            action: .vibeDictation, button: "siri", generation: .glassTouchSurface), 4)
+        XCTAssertEqual(RemoteInputHandler.voiceTailReleaseTimeout(
+            action: .vibeDictation, button: "siri", generation: .aluminumClickpad), 3)
         XCTAssertNil(RemoteInputHandler.voiceTailReleaseTimeout(
             action: .rightOpt,
             button: "tv",
@@ -940,26 +992,23 @@ final class ModelTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] {
             [view] + view.subviews.flatMap(descendants)
         }
-        // The toolbar's native More menu also uses a pop-up internally. Count only
-        // remote mappings so this assertion describes the settings content.
+        // Every mapping is a pill now; Settings no longer embeds a Siri pop-up button.
         let mappingKeys = Set(remoteButtonDescriptors.map(\.key))
-        let controls = descendants(frame).compactMap { $0 as? NSPopUpButton }
-            .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
-        XCTAssertEqual(controls.count, 1)
-        let siri = try XCTUnwrap(controls.first { $0.identifier?.rawValue == "siri" })
-        XCTAssertEqual(siri.numberOfItems, ButtonAction.allCases.filter(\.isAssignableToSiriButton).count)
-        XCTAssertNil(siri.item(withTitle: ButtonAction.shiftEnterOrModifier.settingsTitle))
-        XCTAssertNil(siri.item(withTitle: ButtonAction.agentClientOrSlash.settingsTitle))
-        siri.selectItem(withTitle: ButtonAction.rightCmd.settingsTitle)
-        NSApp.sendAction(try XCTUnwrap(siri.action), to: siri.target, from: siri)
-        XCTAssertEqual(chosenAction, .rightCmd)
-        XCTAssertEqual(Set(controls.compactMap { $0.identifier?.rawValue }), ["siri"])
+        XCTAssertTrue(descendants(frame).compactMap { $0 as? NSPopUpButton }
+            .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }.isEmpty)
+        // A pill's menu lists its choices, checks the current one and reports a pick.
+        let siriOptions = try XCTUnwrap(RemoteSettingsGuide.pillOptions(for: "siri", snapshot: controller.model.snapshot))
+        XCTAssertEqual(siriOptions.choices, [.spaceKey, .rightCmd, .rightOpt, .vibeDictation])
+        XCTAssertEqual(siriOptions.current, .rightOpt)
+        let menu = ButtonActionMenu.makeMenu(choices: siriOptions.choices, current: siriOptions.current,
+                                             defaultChoice: .spaceKey, target: nil)
+        XCTAssertEqual(menu.items.map(\.title), ["Space (Default)", "Right Command", "Right Option", "Dictation"])
+        XCTAssertEqual(menu.items.map(\.state), [.off, .off, .on, .off])
+        _ = chosenAction
         controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt, generation: .glassTouchSurface))
         frame.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        let oldControls = descendants(frame).compactMap { $0 as? NSPopUpButton }
-            .filter { mappingKeys.contains($0.identifier?.rawValue ?? "") }
-        XCTAssertEqual(Set(oldControls.compactMap { $0.identifier?.rawValue }), ["siri"])
+        controller.update(RemoteSettingsSnapshot(connected: true, batteryPercent: 59, siriAction: .rightOpt))
 
         // System Settings layout: fixed Spotter-sized window, no toolbar, Remote pane first.
         XCTAssertNil(window.toolbar)
@@ -971,6 +1020,16 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(controller.model.snapshot.isAtDefaults)
         controller.update(diagnostics: SettingsDiagnostics(helper: "Approved", bridgeRunning: true))
         XCTAssertEqual(controller.model.diagnostics.helper, "Approved")
+        // Render every pane once with the Fix pill and the issue rows showing as well.
+        controller.update(diagnostics: SettingsDiagnostics(
+            helper: "Waiting for approval", bridgeRunning: false,
+            setupIssues: [.helperAwaitingApproval, .audioDriverMissing(installable: true)]))
+        for tab in SettingsTab.allCases {
+            controller.model.tab = tab
+            frame.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        controller.update(diagnostics: SettingsDiagnostics(helper: "Approved", bridgeRunning: true))
         for tab in SettingsTab.allCases {
             controller.model.tab = tab
             frame.layoutSubtreeIfNeeded()
@@ -1086,6 +1145,33 @@ final class ModelTests: XCTestCase {
 
 
 
+    func testSettingsSetupIssuesOnlyAppearWhileHelperOrDriverNeedsTheUser() {
+        typealias D = SettingsDiagnostics
+        XCTAssertEqual(D.setupIssues(helper: .ready, outputDeviceName: "VibeRemote", driverInstallable: true), [])
+        // A fallback device is a working driver, matching the status menu and onboarding.
+        XCTAssertEqual(D.setupIssues(helper: .ready, outputDeviceName: "BlackHole 2ch", driverInstallable: true), [])
+        // Nothing to fix on an unsupported OS, so no red pill.
+        XCTAssertEqual(D.setupIssues(helper: .unsupported, outputDeviceName: "VibeRemote", driverInstallable: true), [])
+        XCTAssertEqual(D.setupIssues(helper: .notRegistered, outputDeviceName: nil, driverInstallable: false),
+                       [.helperNotSetUp, .audioDriverMissing(installable: false)])
+
+        var diagnostics = D()
+        XCTAssertNil(diagnostics.setupPillTitle)
+        diagnostics.setupIssues = [.helperAwaitingApproval]
+        XCTAssertEqual(diagnostics.setupPillTitle, "Fix Helper")
+        diagnostics.setupIssues = [.audioDriverMissing(installable: true)]
+        XCTAssertEqual(diagnostics.setupPillTitle, "Fix Audio Driver")
+        diagnostics.setupIssues = [.helperNotSetUp, .audioDriverMissing(installable: true)]
+        XCTAssertEqual(diagnostics.setupPillTitle, "Fix Setup")
+
+        // Every issue has guide steps; only an uninstallable driver has no button to press.
+        for issue in [D.SetupIssue.helperNotSetUp, .helperAwaitingApproval,
+                      .audioDriverMissing(installable: true), .audioDriverMissing(installable: false)] {
+            XCTAssertFalse(SetupGuide.steps(issue).isEmpty)
+            XCTAssertEqual(SetupGuide.guideActionTitle(issue) == nil, issue == .audioDriverMissing(installable: false))
+        }
+    }
+
     func testButtonsPaneListsEachControlTopDownWithItsPrintedName() {
         let glass = RemoteSettingsGuide.buttons(for: .glassTouchSurface)
         XCTAssertEqual(glass.first, "select")
@@ -1098,11 +1184,11 @@ final class ModelTests: XCTestCase {
         // Buttons and Microphone are sections of the Remote pane, so the sidebar's two
         // groups must still account for every tab.
         XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.appTabs, SettingsTab.allCases)
-        XCTAssertEqual(SettingsTab.agent.title, "Interface Control")
+        XCTAssertEqual(SettingsTab.agent.title, "Computer Use")
         // Settings is also the manual, so the one gesture that is not a button is a pane
         // of its own, grouped with the remote rather than with the app's own settings.
         XCTAssertEqual(SettingsTab.cursor.title, "Text Cursor")
-        // Interface Control's demo runs on one loop: the instruction types out, the agent
+        // Computer Use's demo runs on one loop: the instruction types out, the agent
         // acts, the result rests. Each phase has to land inside the loop, in order.
         XCTAssertEqual(AgentDemo.phase(0.05, from: 0.12, to: 0.40), 0, accuracy: 1e-9)
         XCTAssertEqual(AgentDemo.phase(0.26, from: 0.12, to: 0.40), 0.5, accuracy: 1e-9)
@@ -1704,9 +1790,17 @@ final class ModelTests: XCTestCase {
             XCTAssertNotEqual(action, .shiftEnterOrModifier)
             XCTAssertNotEqual(action, .agentClientOrSlash)
         }
-        XCTAssertTrue(ButtonAction.spaceKey.isAssignableToSiriButton)
-        XCTAssertTrue(ButtonAction.rightCmd.isAssignableToSiriButton)
-        XCTAssertTrue(ButtonAction.none.isAssignableToSiriButton)
+        // Siri drives the microphone while held, so it only takes the held dictation keys and
+        // VibeRemote's own dictation.
+        XCTAssertEqual(ButtonAction.allCases.filter(\.isAssignableToSiriButton), [.spaceKey, .rightCmd, .rightOpt, .vibeDictation])
+        XCTAssertFalse(ButtonAction.vibeDictation.requiresHold, "Dictation holds no key down")
+        XCTAssertTrue(ButtonAction.vibeDictation.holdsDictation)
+        // No other button may take it: only Siri streams microphone audio.
+        for button in ["back", "tv", "playPause", "volumeUp", "volumeDown", "power"] {
+            for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+                XCTAssertFalse(RemoteButtonMapping.choices(button: button, generation: generation)?.contains(.vibeDictation) ?? false)
+            }
+        }
     }
 
     func testOnlyTheOlderRemoteSniffsOrdinaryInterfacesForAudio() {

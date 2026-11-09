@@ -205,6 +205,10 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>VibeRemote Dictation records the Siri Remote microphone while you hold Siri, then types what you said.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>VibeRemote Dictation can turn your speech into text with Apple's on-device speech recognition.</string>
 </dict>
 </plist>
 EOF

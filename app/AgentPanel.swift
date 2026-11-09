@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// State of the computer-use agent shown in the panel. One command runs at a time.
+/// State of Computer Use, shown in the Dock callout. One command runs at a time.
 @MainActor
 final class ComputerUseAgent: ObservableObject {
     enum Phase: Equatable { case composing, running, finished(String), failed(String) }
@@ -10,9 +10,14 @@ final class ComputerUseAgent: ObservableObject {
     static let stepLimit = 40
 
     @Published var command = ""
-    @Published private(set) var phase: Phase = .composing
+    @Published private(set) var phase: Phase = .composing {
+        didSet { if phase != oldValue { onPhaseChange?(phase) } }
+    }
     @Published private(set) var steps: [String] = []
     @Published private(set) var latestMessage: String?
+    /// The one line the callout shows while a command runs: whichever came last of the
+    /// agent's message or its most recent step.
+    @Published private(set) var status: String?
     @Published var settings: AgentSettings { didSet { if settings != oldValue { settings.save() } } }
     @Published private(set) var hasOpenRouterKey: Bool
     /// Codex's own model list, re-read each time the panel opens.
@@ -22,6 +27,8 @@ final class ComputerUseAgent: ObservableObject {
     private(set) var context = AgentContext()
     private var run: AgentRun?
     var onRunStarted: (() -> Void)?
+    /// Drives the Dock tile: blue while composing, green while a command runs.
+    var onPhaseChange: ((Phase) -> Void)?
 
     init(settings: AgentSettings = .load(), hasOpenRouterKey: Bool = AgentKeychain.openRouterKey() != nil) {
         self.settings = settings
@@ -52,6 +59,7 @@ final class ComputerUseAgent: ObservableObject {
         }
         steps = []
         latestMessage = nil
+        status = nil
         phase = .running
         let run = AgentRun { [weak self] event in self?.handle(event) }
         self.run = run
@@ -61,11 +69,15 @@ final class ComputerUseAgent: ObservableObject {
 
     func stop() { run?.stop() }
 
+    /// Puts the cursor back in the command field, e.g. each time the callout pops up.
+    func requestFocus() { focusRequest += 1 }
+
     func startOver() {
         guard !isRunning else { return }
         command = ""
         steps = []
         latestMessage = nil
+        status = nil
         phase = .composing
         focusRequest += 1
     }
@@ -80,8 +92,10 @@ final class ComputerUseAgent: ObservableObject {
         case .action(let label):
             steps.append(label)
             if steps.count > Self.stepLimit { steps.removeFirst(steps.count - Self.stepLimit) }
+            status = label
         case .message(let text):
             latestMessage = text
+            status = text
         case .finished(let text):
             phase = .finished(text ?? "Done.")
             run = nil
@@ -92,62 +106,82 @@ final class ComputerUseAgent: ObservableObject {
     }
 }
 
-/// Floating panel for the computer-use agent. It takes focus while composing so the user's
-/// dictation app types the command into it, then hands focus back while the agent works.
+/// Computer Use pops up from VibeRemote's Dock icon. It takes focus while composing so the
+/// user's dictation or input method types the command into it, then hands focus back to the
+/// target app while the agent works and the tile stays green. See AgentDock.swift.
 @MainActor
 final class AgentPanelController: NSObject, NSWindowDelegate {
-    static let width: CGFloat = 400
+    static let width: CGFloat = 360
+    /// How long a finished command's outcome stays up unless the user clicks into the callout.
+    static let resultLifetime: TimeInterval = 8
 
     let agent = ComputerUseAgent()
-    private var panel: NSPanel?
+    private let callout = AgentCalloutModel()
+    private let tile = AgentDockTile()
+    private var panel: AgentCalloutPanel?
+    private var hosting: NSHostingController<AgentCalloutView>?
     private var previousApp: NSRunningApplication?
+    private var iconFrame: CGRect?
+    private var presentation: Task<Void, Never>?
+    private var resultDismissal: DispatchWorkItem?
+    /// True while VibeRemote shows its Dock icon on Computer Use's behalf.
+    private(set) var holdsDock = false
 
     var isVisible: Bool { panel?.isVisible == true }
 
     override init() {
         super.init()
-        agent.onRunStarted = { [weak self] in self?.returnFocus() }
+        agent.onRunStarted = { [weak self] in self?.commandSent() }
+        agent.onPhaseChange = { [weak self] phase in self?.phaseChanged(phase) }
     }
 
-    func toggle() { isVisible ? close() : show() }
+    /// The menu-bar item: open a fresh command, or put the callout away.
+    func toggle() { isVisible ? dismiss() : show(fresh: true) }
 
-    /// Long-press TV: open the panel, stop a running command, or close a finished one.
+    /// Long-press TV: stop a running command, close an open callout, or open a fresh one.
     func remoteLongPress() {
-        if !isVisible { show() }
-        else if agent.isRunning { agent.stop() }
-        else { close() }
+        if agent.isRunning { agent.stop() }
+        else if isVisible { dismiss() }
+        else { show(fresh: true) }
     }
 
-    func show() {
+    /// A click on the Dock icon while Computer Use owns it shows the input bar: the running
+    /// command with its Stop button, or a fresh field once a command has finished. Returns
+    /// false otherwise so the app delegate keeps its ordinary reopen behavior (Settings).
+    func dockClicked() -> Bool {
+        guard holdsDock else { return false }
+        if panel?.isKeyWindow == true { dismiss() } else { show(fresh: !agent.isRunning) }
+        return true
+    }
+
+    func show(fresh: Bool) {
+        resultDismissal?.cancel()
         let front = NSWorkspace.shared.frontmostApplication
         if let front, front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApp = front
-            agent.prepare(context: AgentContext(appName: front.localizedName, bundleID: front.bundleIdentifier))
-        } else {
-            agent.prepare(context: agent.context)
         }
-        let panel = self.panel ?? makePanel()
-        self.panel = panel
-        if !panel.isVisible { position(panel) }
-        // The remote is not a user event in this app, so cooperative activate() can be refused:
-        // the panel then floats without focus and dictation apps paste into the previous app.
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            rmDebug("🤖 Agent panel shown for \(self?.previousApp?.bundleIdentifier ?? "unknown") active=\(NSApp.isActive) key=\(panel.isKeyWindow)")
+        if fresh {
+            agent.prepare(context: previousApp.map {
+                AgentContext(appName: $0.localizedName, bundleID: $0.bundleIdentifier)
+            } ?? agent.context)
         }
+        holdDock()
+        if agent.phase == .composing { tile.apply(.composing) }
+        present(key: true)
     }
 
-    func close() {
-        agent.stop()
-        guard let panel, panel.isVisible else { return }
-        let wasKey = panel.isKeyWindow
-        panel.orderOut(nil)
+    func dismiss() {
+        presentation?.cancel()
+        resultDismissal?.cancel()
+        let wasKey = panel?.isKeyWindow == true
+        panel?.orderOut(nil)
+        // A running command keeps the green tile; anything else gives the Dock icon back.
+        if !agent.isRunning { releaseDock() }
         if wasKey { returnFocus() }
     }
 
-    /// Remote Select while the panel has focus runs the command, or starts a new one after a
-    /// result. Both edges are consumed so caret positioning never sees half a click.
+    /// Remote Select while the callout has focus sends the command, or starts a new one after
+    /// a result. Both edges are consumed so caret positioning never sees half a click.
     func handleRemoteButton(_ button: String, pressed: Bool) -> Bool {
         guard button == "select", let panel, panel.isVisible, panel.isKeyWindow, NSApp.isActive else { return false }
         guard pressed else { return true }
@@ -159,9 +193,59 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
         return true
     }
 
-    func windowWillClose(_ notification: Notification) {
-        agent.stop()
+    // MARK: Phases
+
+    /// The callout stays up, now showing the agent's latest status, but gives focus back so
+    /// the agent works in the app the user was in. It floats above other windows unfocused.
+    private func commandSent() {
+        tile.apply(.working)
         returnFocus()
+    }
+
+    private func phaseChanged(_ phase: ComputerUseAgent.Phase) {
+        switch phase {
+        case .composing:
+            if holdsDock { tile.apply(.composing) }
+        case .running:
+            tile.apply(.working)
+        case .finished, .failed:
+            guard holdsDock else { return }
+            let failed: Bool
+            if case .failed = phase { failed = true } else { failed = false }
+            // The bar's status line becomes the outcome and the tile gets a badge; both stay
+            // briefly so the user can see them, then the callout and Dock icon go away.
+            tile.apply(.normal, badge: failed ? "!" : "✓")
+            scheduleResultDismissal()
+        }
+    }
+
+    private func scheduleResultDismissal() {
+        resultDismissal?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.agent.isRunning, self.agent.phase != .composing,
+                  self.panel?.isKeyWindow != true else { return }
+            self.dismiss()
+        }
+        resultDismissal = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resultLifetime, execute: work)
+    }
+
+    // MARK: Dock
+
+    /// The app is menu-bar only; a regular activation policy is what puts its icon in the Dock.
+    private func holdDock() {
+        guard !holdsDock else { return }
+        holdsDock = true
+        DockPresence.computerUseHoldsDock = true
+        NSApp.setActivationPolicy(.regular)
+    }
+
+    private func releaseDock() {
+        guard holdsDock else { return }
+        holdsDock = false
+        DockPresence.computerUseHoldsDock = false
+        tile.apply(.normal, badge: nil)
+        restoreAccessoryPolicy(closing: nil)
     }
 
     private func returnFocus() {
@@ -169,223 +253,181 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
         previousApp.activate()
     }
 
-    private func makePanel() -> NSPanel {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 200),
-                            styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+    // MARK: Presentation
+
+    /// Waits for the Dock icon to settle (a newly shown icon slides in), then pops the callout
+    /// up from it. Without a located icon the callout floats above the bottom of the screen.
+    private func present(key: Bool) {
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        presentation?.cancel()
+        presentation = Task { @MainActor [weak self] in
+            let icon = await Self.settledIconFrame()
+            guard let self, !Task.isCancelled else { return }
+            self.iconFrame = icon
+            self.place(panel, fitting: true)
+            if key {
+                // A remote press is no user event in this app, so cooperative activate() can be
+                // refused; the field then has no focus and input methods type into the old app.
+                NSApp.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+                self.agent.requestFocus()
+            } else {
+                panel.orderFrontRegardless()
+            }
+            rmDebug("🤖 Computer Use callout shown key=\(key) icon=\(icon.map { "\($0)" } ?? "none") active=\(NSApp.isActive)")
+        }
+    }
+
+    /// Two equal reads 50 ms apart, within 0.8 s; the last read otherwise.
+    private static func settledIconFrame() async -> CGRect? {
+        guard AXIsProcessTrusted() else { return nil }
+        var last: CGRect?
+        for _ in 0..<16 {
+            let frame = DockIconLocator.iconFrame()
+            if let frame, frame == last { return frame }
+            last = frame
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if Task.isCancelled { return last }
+        }
+        return last
+    }
+
+    private func place(_ panel: NSPanel, fitting: Bool) {
+        let screen = iconFrame.flatMap { icon in
+            NSScreen.screens.first { $0.frame.intersects(icon) }
+        } ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+        callout.edge = iconFrame.map { DockCalloutPlacement.edge(of: $0, in: screen.frame) }
+        var size = panel.frame.size
+        if fitting, let view = hosting?.view {
+            view.layoutSubtreeIfNeeded()
+            size = view.fittingSize
+        }
+        let placement = DockCalloutPlacement.place(size: size, icon: iconFrame,
+                                                   screen: screen.frame, visible: screen.visibleFrame)
+        callout.arrowOffset = placement.arrowOffset
+        panel.setFrame(NSRect(origin: placement.origin, size: size), display: true)
+    }
+
+    /// The callout grows with its text and phase; keep its arrow on the icon afterwards.
+    func windowDidResize(_ notification: Notification) {
+        guard let panel, panel.isVisible else { return }
+        place(panel, fitting: false)
+    }
+
+    private func makePanel() -> AgentCalloutPanel {
+        let panel = AgentCalloutPanel(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 120),
+                                      styleMask: [.borderless], backing: .buffered, defer: false)
         panel.identifier = NSUserInterfaceItemIdentifier("VibeRemote.AgentPanel")
-        panel.title = "Agent"
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.isMovableByWindowBackground = true
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        // Stays visible while the target app has focus and the agent works.
+        panel.title = "Computer Use"
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        // The glass draws its own edge; a WindowServer shadow would outline the arrow's alpha.
+        panel.hasShadow = false
+        // Above the Dock, which it points at.
+        panel.level = .popUpMenu
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let hosting = NSHostingController(rootView: AgentPanelView(agent: agent))
+        let hosting = NSHostingController(rootView: AgentCalloutView(
+            agent: agent, callout: callout, dismiss: { [weak self] in self?.dismiss() }))
         hosting.sizingOptions = [.preferredContentSize]
+        hosting.view.wantsLayer = true
+        hosting.view.layer?.backgroundColor = .clear
         panel.contentViewController = hosting
+        self.hosting = hosting
         return panel
-    }
-
-    private func position(_ panel: NSPanel) {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
-        guard let visible = screen?.visibleFrame else { return }
-        let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - 48))
     }
 }
 
-struct AgentPanelView: View {
+/// Lets `restoreAccessoryPolicy` keep the Dock icon while Computer Use is using it.
+@MainActor
+enum DockPresence {
+    static var computerUseHoldsDock = false
+}
+
+/// Borderless, so it must opt in to key status for the command field to take input.
+final class AgentCalloutPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+final class AgentCalloutModel: ObservableObject {
+    @Published var edge: DockEdge? = .bottom
+    @Published var arrowOffset: CGFloat = AgentPanelController.width / 2
+}
+
+/// Only the input bar. Composing, it is the field and its Send button. While a command runs
+/// (the callout stays up), the field gives way to one status line, the agent's latest step
+/// or message, and Send becomes Stop; after it finishes, the same line shows the outcome.
+struct AgentCalloutView: View {
     @ObservedObject var agent: ComputerUseAgent
+    @ObservedObject var callout: AgentCalloutModel
+    let dismiss: () -> Void
     @FocusState private var commandFocused: Bool
-    @State private var keyDraft = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "cursorarrow.motionlines")
-                    .foregroundStyle(.tint)
-                Text("Agent")
-                    .font(.headline)
-                if let app = agent.context.appName {
-                    Text("· \(app)")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Picker("Backend", selection: $agent.settings.backend) {
-                    ForEach(AgentBackend.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                .labelsHidden()
-                .fixedSize()
-                .disabled(agent.isRunning)
-                .accessibilityIdentifier("VibeRemote.Agent.Backend")
-            }
-            // The title bar is transparent; keep the header clear of the close button.
-            .padding(.leading, 56)
-
-            if !agent.isRunning {
-                modelFields
-            }
-
-            if agent.phase == .composing {
-                TextField("Hold Siri and say what to do", text: $agent.command, axis: .vertical)
-                    .lineLimit(2...6)
+        HStack(alignment: agent.phase == .composing ? .bottom : .center, spacing: 8) {
+            switch agent.phase {
+            case .composing:
+                TextField("What do you want to do?", text: $agent.command, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.title3)
-                    .padding(12)
-                    .glassEffect(in: RoundedRectangle(cornerRadius: 14))
+                    .lineLimit(1...5)
                     .focused($commandFocused)
                     .onSubmit { agent.submit() }
+                    .padding(.vertical, 4)
+                    .accessibilityLabel("Computer Use")
                     .accessibilityIdentifier("VibeRemote.Agent.Command")
-            } else {
-                Text(agent.command)
-                    .font(.title3)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-            }
-
-            if !agent.steps.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(agent.steps.suffix(5).enumerated()), id: \.offset) { _, step in
-                        Label(step, systemImage: "chevron.right")
-                            .font(.callout.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-            }
-
-            status
-
-            HStack {
-                Text(hint)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                actionButton
+                barButton("arrow.up", label: "Send", id: "VibeRemote.Agent.Send") { agent.submit() }
+                    .disabled(!agent.canSubmit)
+            case .running:
+                ProgressView().controlSize(.small)
+                statusLine(agent.status ?? "Working…")
+                barButton("stop.fill", label: "Stop", id: "VibeRemote.Agent.Stop") { agent.stop() }
+            case .finished(let text):
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                statusLine(text)
+            case .failed(let text):
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                statusLine(text)
             }
         }
-        .padding(16)
-        .frame(width: AgentPanelController.width)
+        .padding(12)
+        .frame(width: AgentPanelController.width, alignment: .leading)
+        .padding(.bottom, callout.edge == .bottom ? DockCalloutPlacement.arrowLength : 0)
+        .padding(.leading, callout.edge == .left ? DockCalloutPlacement.arrowLength : 0)
+        .padding(.trailing, callout.edge == .right ? DockCalloutPlacement.arrowLength : 0)
+        .glassEffect(.regular, in: DockCalloutShape(edge: callout.edge, arrowOffset: callout.arrowOffset))
+        .onExitCommand(perform: dismiss)
         .onAppear { commandFocused = true }
         .onChange(of: agent.focusRequest) { commandFocused = true }
     }
 
-    @ViewBuilder private var status: some View {
-        switch agent.phase {
-        case .composing:
-            EmptyView()
-        case .running:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(agent.latestMessage ?? "Working with \(agent.settings.backend.title)…")
-                    .lineLimit(2)
-                    .foregroundStyle(.secondary)
-            }
-        case .finished(let text):
-            Label(text, systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-        case .failed(let text):
-            Label(text, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .textSelection(.enabled)
-        }
+    private func statusLine(_ text: String) -> some View {
+        Text(text)
+            .font(.title3)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .help(text)
+            .accessibilityIdentifier("VibeRemote.Agent.Status")
     }
 
-    @ViewBuilder private var actionButton: some View {
-        switch agent.phase {
-        case .composing:
-            Button("Run") { agent.submit() }
-                .buttonStyle(.glassProminent)
-                .disabled(!agent.canSubmit)
-                .accessibilityIdentifier("VibeRemote.Agent.Run")
-        case .running:
-            Button("Stop") { agent.stop() }
-                .buttonStyle(.glass)
-                .accessibilityIdentifier("VibeRemote.Agent.Stop")
-        case .finished, .failed:
-            Button("New Command") { agent.startOver() }
-                .buttonStyle(.glass)
-                .accessibilityIdentifier("VibeRemote.Agent.NewCommand")
+    private func barButton(_ symbol: String, label: String, id: String,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.body.weight(.semibold))
+                .frame(width: 20, height: 20)
         }
-    }
-
-    private var hint: String {
-        switch agent.phase {
-        case .composing: return "Hold Siri to dictate · Select to run"
-        case .running: return "Hold TV to stop"
-        case .finished, .failed: return "Select for a new command · Hold TV to close"
-        }
-    }
-
-    @ViewBuilder private var modelFields: some View {
-        switch agent.settings.backend {
-        case .claudeCode:
-            modelPicker(AgentModelCatalog.choices(AgentModelCatalog.claudeCode, keeping: agent.settings.claudeModel),
-                        selection: $agent.settings.claudeModel)
-        case .codex:
-            modelPicker(AgentModelCatalog.choices(agent.codexModels, keeping: agent.settings.codexModel),
-                        selection: $agent.settings.codexModel)
-        case .openRouter:
-            openRouterFields
-        }
-    }
-
-    private func modelPicker(_ choices: [AgentModelChoice], selection: Binding<String>) -> some View {
-        HStack {
-            Text("Model").frame(width: 56, alignment: .leading)
-            Picker("Model", selection: selection) {
-                ForEach(choices, id: \.id) { Text($0.title).tag($0.id) }
-            }
-            .labelsHidden()
-            .accessibilityIdentifier("VibeRemote.Agent.Model")
-        }
-        .font(.callout)
-    }
-
-    private var openRouterFields: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Model").frame(width: 56, alignment: .leading)
-                TextField(AgentSettings.defaultOpenRouterModel, text: $agent.settings.openRouterModel)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("VibeRemote.Agent.Model")
-                Menu {
-                    ForEach(AgentModelCatalog.openRouterSuggestions, id: \.self) { model in
-                        Button(model) { agent.settings.openRouterModel = model }
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("Suggested models")
-            }
-            HStack {
-                Text("API key").frame(width: 56, alignment: .leading)
-                SecureField(agent.hasOpenRouterKey ? "Saved in Keychain" : "sk-or-…", text: $keyDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(saveKey)
-                    .accessibilityIdentifier("VibeRemote.Agent.APIKey")
-                Button("Save", action: saveKey)
-                    .disabled(keyDraft.isEmpty)
-            }
-        }
-        .font(.callout)
-    }
-
-    private func saveKey() {
-        guard !keyDraft.isEmpty else { return }
-        agent.saveOpenRouterKey(keyDraft)
-        keyDraft = ""
+        .buttonStyle(.glassProminent)
+        .buttonBorderShape(.circle)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
     }
 }

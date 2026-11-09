@@ -10,10 +10,14 @@ enum RemoteModelScene {
     // The camera's orthographic scale is fixed in world units, so the CAD renders at a
     // size proportional to `previewHeight`: changing it alone rescales the whole preview,
     // and `guideY` keeps the callouts on their buttons.
-    static let previewHeight: CGFloat = 160
-    /// A callout column beside the CAD, wide enough for two lines of guide text. Text
-    /// does not scale with the preview, so this stays fixed.
-    static let calloutColumnWidth: CGFloat = 112
+    /// Tall enough that every button's pill fits on its own row beside the remote: the
+    /// aluminum layout's closest rows (volume up/down, ring/Back) sit about 24 points apart.
+    static let previewHeight: CGFloat = 320
+    /// A pill column beside the CAD, wide enough for the longest one-line function name.
+    /// Text does not scale with the preview, so this stays fixed. The whole preview
+    /// (2 × 166 + 128 = 460) must fit the 720-point window's Form section, about 470 points
+    /// wide; anything wider overflows and clips the sidebar and the pane's right edge.
+    static let calloutColumnWidth: CGFloat = 166
     /// The gutter the CAD renders into, between the two callout columns. It scales with
     /// the preview so the callouts keep the same clearance from the remote at any size.
     static var previewBodyGutter: CGFloat { previewHeight * 0.4 }
@@ -163,9 +167,17 @@ enum RemoteModelScene {
 @MainActor
 struct RemoteModelView: NSViewRepresentable {
     let generation: RemoteGeneration
+    /// A control lit from outside the model, e.g. while the pointer is over its pill.
+    var highlighted: String? = nil
     var onHover: (String?) -> Void = { _ in }
+    var onDragging: (Bool) -> Void = { _ in }
     func makeNSView(context: Context) -> RemoteModelNSView { RemoteModelNSView() }
-    func updateNSView(_ view: RemoteModelNSView, context: Context) { view.onHover = onHover; view.configure(generation: generation) }
+    func updateNSView(_ view: RemoteModelNSView, context: Context) {
+        view.onHover = onHover
+        view.onDragging = onDragging
+        view.configure(generation: generation)
+        view.setExternalHighlight(highlighted)
+    }
     static func dismantleNSView(_ view: RemoteModelNSView, coordinator: ()) { view.scene = nil }
 }
 
@@ -173,7 +185,9 @@ struct RemoteModelView: NSViewRepresentable {
 final class RemoteModelNSView: SCNView {
     override var isOpaque: Bool { false }
     var onHover: (String?) -> Void = { _ in }
+    var onDragging: (Bool) -> Void = { _ in }
     private var hoveredControl: String?
+    private var externalHighlight: String?
     private var hoverTracking: NSTrackingArea?
     private var generation: RemoteGeneration?
     private var dragOrigin: NSPoint?
@@ -221,8 +235,15 @@ final class RemoteModelNSView: SCNView {
     private func publishHover(_ key: String?) {
         guard hoveredControl != key else { return }
         hoveredControl = key
-        applyHighlight(key)
+        applyHighlight(externalHighlight ?? key)
         onHover(key)
+    }
+
+    func setExternalHighlight(_ key: String?) {
+        guard externalHighlight != key else { return }
+        externalHighlight = key
+        // Pills point at the resting pose; while dragging nothing is lit.
+        if dragOrigin == nil { applyHighlight(key ?? hoveredControl) }
     }
 
     func applyHighlight(_ key: String?) {
@@ -291,6 +312,7 @@ final class RemoteModelNSView: SCNView {
             remote.eulerAngles = dragAngles
         }
         dragOrigin = convert(event.locationInWindow, from: nil)
+        onDragging(true)
     }
     override func mouseDragged(with event: NSEvent) {
         guard let origin = dragOrigin, let remote else { return }
@@ -312,6 +334,7 @@ final class RemoteModelNSView: SCNView {
     }
     @objc private func cancelDrag() { publishHover(nil); restorePose(animated: false) }
     private func restorePose(animated: Bool = true) {
+        if dragOrigin != nil { onDragging(false) }
         dragOrigin = nil
         SCNTransaction.begin()
         SCNTransaction.animationDuration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.3 : 0
