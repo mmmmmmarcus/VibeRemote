@@ -582,7 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if claimed { return true }
         // Reserved buttons stay inert in Touch too; do not forward native media keys.
-        if menuBarManager.getMapping(for: edge.button, generation: .aluminumClickpad) == .none { return true }
+        if menuBarManager.getMapping(for: edge.button, generation: .aluminumClickpad, pressed: edge.pressed) == .none { return true }
 
         remoteInputHandler?.handleCapturedButton(edge)
         return true

@@ -28,6 +28,23 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
     var remoteName: String? = nil
     /// The user's per-button choices for `generation`, keyed by `RemoteButtonMapping.overrideKey`.
     var buttonOverrides: [String: ButtonAction] = [:]
+    /// Every profile, and the one Settings is editing. `siriAction` and `buttonOverrides`
+    /// above are that profile's effective values, General's filled in where it follows them.
+    var profiles: ButtonProfileSet = .defaults()
+    var editingProfileID: String = ButtonProfile.generalID
+
+    var editingProfile: ButtonProfile { profiles.profile(id: editingProfileID) ?? profiles.general }
+
+    /// Whether `key` ("siri" or a button) follows General in the edited app profile.
+    func followsGeneral(_ key: String) -> Bool {
+        profiles.inherits(key, profile: editingProfileID, generation: generation)
+    }
+
+    /// What `key` does in General, for an app profile's "Same as General" choice.
+    func generalAction(for key: String) -> ButtonAction {
+        key == "siri" ? profiles.siriAction(profile: ButtonProfile.generalID)
+            : profiles.action(button: key, generation: generation, profile: ButtonProfile.generalID)
+    }
 
     func action(for button: String) -> ButtonAction {
         RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriAction,
@@ -168,6 +185,8 @@ extension ButtonAction {
         case .agentClientOrSlash: return "Client / Skill"
         case .advancedMenu: return "Advanced Menu"
         case .skillPicker: return "Skill"
+        case .slashSkill: return "Skill (/)"
+        case .dollarSkill: return "Skill ($)"
         case .commandEnter: return "Command + Enter"
         case .undo: return "Undo"
         case .redo: return "Redo"
@@ -249,6 +268,12 @@ struct SettingsActions {
     var setUpHelper: () -> Void = {}
     /// A pill's choice for a non-Siri button on the remote family Settings shows.
     var setButtonAction: (String, ButtonAction) -> Void = { _, _ in }
+    /// An app profile's "Same as General" for one pill ("siri" or a button key).
+    var followGeneral: (String) -> Void = { _ in }
+    var selectProfile: (String) -> Void = { _ in }
+    /// Adds a profile for the app (bundle identifier, display name) and starts editing it.
+    var addProfile: (String, String) -> Void = { _, _ in }
+    var removeProfile: (String) -> Void = { _ in }
     var restartBridge: () -> Void = {}
     var copyDiagnostics: () -> Void = {}
     var openAppLog: () -> Void = {}
@@ -293,10 +318,12 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 }
 
 extension RemoteSettingsSnapshot {
-    /// Restore Defaults covers exactly the two choices Settings can change on the remote.
+    /// Restore Defaults covers the edited profile's choices (and, for General, Auto Disconnect).
     var isAtDefaults: Bool {
-        let defaultAction = remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction ?? .spaceKey
-        return siriAction == defaultAction && idleTimeout == .defaultValue && buttonOverrides.isEmpty
+        // Auto Disconnect is not per app, so only General's Restore Defaults covers it. For
+        // General the effective values above are its own choices.
+        guard editingProfileID == ButtonProfile.generalID else { return profiles.isAtDefaults(editingProfileID) }
+        return siriAction == ButtonProfileSet.siriDefault && idleTimeout == .defaultValue && buttonOverrides.isEmpty
     }
 }
 

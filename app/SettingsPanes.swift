@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 /// Settings metrics and colors, matching Spotter's Settings window so both apps read as one
@@ -61,7 +62,10 @@ struct SettingsRootView: View {
                                restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
                                actions: actions)
                 case .cursor: TextCursorPane(generation: model.snapshot.generation)
-                case .dictation: DictationPane(siriAction: model.snapshot.siriAction, setSiriAction: setSiriAction)
+                case .dictation:
+                    let using = model.snapshot.profiles.profiles(withSiri: .vibeDictation)
+                    DictationPane(profiles: using.map(\.name),
+                                  everywhere: using.count == model.snapshot.profiles.all.count)
                 case .agent: AgentPane(generation: model.snapshot.generation,
                                        openPanel: actions.openAgentPanel)
                 case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
@@ -425,10 +429,15 @@ private struct RemotePane: View {
     var body: some View {
         SettingsPane(title: "Remote") {
             Section {
+                SettingsRow(title: "Profile", subtitle: profileSubtitle) {
+                    ProfilePicker(snapshot: model.snapshot, actions: actions)
+                }
+            }
+            Section {
                 RemoteHero(snapshot: model.snapshot, setSiriAction: setSiriAction,
-                           setButtonAction: actions.setButtonAction)
+                           setButtonAction: actions.setButtonAction, followGeneral: actions.followGeneral)
             } footer: {
-                Text("Click a label to choose what its button does. Siri takes the held keys dictation apps listen for.")
+                Text(heroFooter)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -455,6 +464,18 @@ private struct RemotePane: View {
         }
         // The bridge and setup rows read the same async snapshot the Diagnostics pane does.
         .onAppear(perform: actions.refreshDiagnostics)
+    }
+
+    private var profileSubtitle: String {
+        let profile = model.snapshot.editingProfile
+        return profile.isGeneral ? "Used in every app without a profile of its own."
+            : "Used while \(profile.name) is in front."
+    }
+
+    private var heroFooter: String {
+        model.snapshot.editingProfile.isGeneral
+            ? "Click a label to choose what its button does. Siri takes the held keys dictation apps listen for."
+            : "Click a label to change it for \(model.snapshot.editingProfile.name) only. Buttons you leave alone do what General says."
     }
 
     /// Connection, battery and the voice bridge always show. Helper and Audio Driver appear
@@ -515,6 +536,7 @@ private struct RemoteHero: View {
     let snapshot: RemoteSettingsSnapshot
     let setSiriAction: (ButtonAction) -> Void
     let setButtonAction: (String, ButtonAction) -> Void
+    let followGeneral: (String) -> Void
     @State private var modelHover: String?
     @State private var pillHover: String?
     @State private var dragging = false
@@ -576,8 +598,22 @@ private struct RemoteHero: View {
         let defaultChoice = key == "siri"
             ? remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction
             : options.choices.first
-        ButtonActionMenu.present(choices: options.choices, current: options.current, defaultChoice: defaultChoice) { action in
-            if key == "siri" { setSiriAction(action) } else { setButtonAction(key, action) }
+        // An app profile offers "Same as General" first; General has nothing to follow.
+        let general = snapshot.editingProfile.isGeneral ? nil
+            : ButtonActionMenu.General(action: snapshot.generalAction(for: key), following: snapshot.followsGeneral(key))
+        ButtonActionMenu.present(choices: options.choices, current: options.current, defaultChoice: defaultChoice,
+                                 general: general) { action in
+            guard let action else { followGeneral(key); return }
+            if key == "siri" {
+                setSiriAction(action)
+                // Choosing Dictation is how it is turned on, so ask for the microphone now
+                // rather than failing the first hold.
+                if action == .vibeDictation, AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+                    AVCaptureDevice.requestAccess(for: .audio) { _ in }
+                }
+            } else {
+                setButtonAction(key, action)
+            }
         }
     }
 }
@@ -660,38 +696,142 @@ private struct PillShape: Shape {
 /// checked and under the pointer, like an NSPopUpButton. Each item explains itself in a tooltip.
 @MainActor
 enum ButtonActionMenu {
+    /// An app profile's "Same as General (X)" item: what General does, and whether the button
+    /// follows it now (then it is the checked item rather than the explicit choice).
+    struct General {
+        let action: ButtonAction
+        let following: Bool
+    }
+
+    nonisolated private static let followGeneralTag = "__general__"
+
     private final class Target: NSObject {
-        let onSelect: (ButtonAction) -> Void
-        init(onSelect: @escaping (ButtonAction) -> Void) { self.onSelect = onSelect }
+        let onSelect: (ButtonAction?) -> Void
+        init(onSelect: @escaping (ButtonAction?) -> Void) { self.onSelect = onSelect }
         @objc func choose(_ item: NSMenuItem) {
-            guard let raw = item.representedObject as? String, let action = ButtonAction(rawValue: raw) else { return }
+            guard let raw = item.representedObject as? String else { return }
+            if raw == ButtonActionMenu.followGeneralTag { onSelect(nil); return }
+            guard let action = ButtonAction(rawValue: raw) else { return }
             onSelect(action)
         }
     }
 
     static func makeMenu(choices: [ButtonAction], current: ButtonAction, defaultChoice: ButtonAction?,
-                         target: AnyObject?) -> NSMenu {
+                         general: General? = nil, target: AnyObject?) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        if let general {
+            let item = NSMenuItem(title: "Same as General (\(general.action.settingsTitle))",
+                                  action: #selector(Target.choose(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = followGeneralTag
+            item.state = general.following ? .on : .off
+            item.toolTip = "Do whatever this button does in the General profile"
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         for action in choices {
             let title = action == defaultChoice ? "\(action.settingsTitle) (Default)" : action.settingsTitle
             let item = NSMenuItem(title: title, action: #selector(Target.choose(_:)), keyEquivalent: "")
             item.target = target
             item.representedObject = action.rawValue
-            item.state = action == current ? .on : .off
+            item.state = action == current && general?.following != true ? .on : .off
             item.toolTip = action.actionDescription
             menu.addItem(item)
         }
         return menu
     }
 
+    /// `onSelect(nil)` means "Same as General".
     static func present(choices: [ButtonAction], current: ButtonAction, defaultChoice: ButtonAction?,
-                        onSelect: @escaping (ButtonAction) -> Void) {
+                        general: General? = nil, onSelect: @escaping (ButtonAction?) -> Void) {
         let target = Target(onSelect: onSelect)
-        let menu = makeMenu(choices: choices, current: current, defaultChoice: defaultChoice, target: target)
+        let menu = makeMenu(choices: choices, current: current, defaultChoice: defaultChoice,
+                            general: general, target: target)
         // popUp tracks synchronously, so `target` outlives the selection.
         menu.popUp(positioning: menu.items.first { $0.state == .on }, at: NSEvent.mouseLocation, in: nil)
         withExtendedLifetime(target) {}
+    }
+}
+
+/// The Remote pane's profile menu: every profile with its app icon (the edited one checked),
+/// then Add App, a submenu of every installed app that has no profile yet, and Remove for an
+/// app profile. A native menu like the pills', so it reads as a macOS pop-up.
+private struct ProfilePicker: View {
+    let snapshot: RemoteSettingsSnapshot
+    let actions: SettingsActions
+
+    var body: some View {
+        let profile = snapshot.editingProfile
+        Button(action: present) {
+            HStack(spacing: 6) {
+                Image(nsImage: InstalledApp.icon(bundleID: profile.bundleID))
+                    .resizable()
+                    .frame(width: 16, height: 16)
+                Text(profile.name)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize()
+        .accessibilityLabel("Profile: \(profile.name)")
+        .accessibilityIdentifier("settings.profile")
+    }
+
+    private func present() {
+        let target = ProfileMenuTarget(actions: actions)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        var checked: NSMenuItem?
+        for profile in snapshot.profiles.all {
+            let item = NSMenuItem(title: profile.name, action: #selector(ProfileMenuTarget.select(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = profile.id
+            item.image = InstalledApp.icon(bundleID: profile.bundleID)
+            if profile.id == snapshot.editingProfileID { item.state = .on; checked = item }
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let add = NSMenuItem(title: "Add App", action: nil, keyEquivalent: "")
+        let apps = NSMenu()
+        apps.autoenablesItems = false
+        let taken = Set(snapshot.profiles.apps.compactMap(\.bundleID))
+        for app in InstalledApp.scan() where !taken.contains(app.bundleID) {
+            let item = NSMenuItem(title: app.name, action: #selector(ProfileMenuTarget.add(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = [app.bundleID, app.name]
+            item.image = InstalledApp.icon(bundleID: app.bundleID)
+            apps.addItem(item)
+        }
+        add.submenu = apps
+        menu.addItem(add)
+        let profile = snapshot.editingProfile
+        if !profile.isGeneral {
+            let remove = NSMenuItem(title: "Remove \u{201C}\(profile.name)\u{201D} Profile",
+                                    action: #selector(ProfileMenuTarget.remove(_:)), keyEquivalent: "")
+            remove.target = target
+            remove.representedObject = profile.id
+            menu.addItem(remove)
+        }
+        // popUp tracks synchronously, so `target` outlives the selection.
+        menu.popUp(positioning: checked, at: NSEvent.mouseLocation, in: nil)
+        withExtendedLifetime(target) {}
+    }
+}
+
+private final class ProfileMenuTarget: NSObject {
+    let actions: SettingsActions
+    init(actions: SettingsActions) { self.actions = actions }
+    @objc func select(_ item: NSMenuItem) {
+        if let id = item.representedObject as? String { actions.selectProfile(id) }
+    }
+    @objc func add(_ item: NSMenuItem) {
+        guard let pair = item.representedObject as? [String], pair.count == 2 else { return }
+        actions.addProfile(pair[0], pair[1])
+    }
+    @objc func remove(_ item: NSMenuItem) {
+        if let id = item.representedObject as? String { actions.removeProfile(id) }
     }
 }
 

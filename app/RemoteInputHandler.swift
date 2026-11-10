@@ -928,7 +928,8 @@ final class RemoteInputHandler {
             VolumeRevertGuard.shared.handleRemoteButton(buttonName, pressed: isPressed)
         }
 
-        let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration)
+        // The press latches the frontmost app's profile; its release maps under the same one.
+        let action = menuBarManager?.getMapping(for: buttonName, generation: sourceGeneration, pressed: isPressed)
             ?? ButtonAction.none
 
         microphoneBridgeManager?.handleButton(button: buttonName, pressed: isPressed)
@@ -1101,6 +1102,10 @@ final class RemoteInputHandler {
             toggleAgentClient()
         case .skillPicker:
             sendSkillPickerTrigger()
+        case .slashSkill:
+            send(.slash)
+        case .dollarSkill:
+            send(.dollar)
         case .bulletIndent:
             // Dispatch just after the physical down event. Codex drops Cmd+Shift+8 when
             // it is posted synchronously from the volume-button release callback; this
@@ -1350,15 +1355,22 @@ final class RemoteInputHandler {
         let keyCode: Int
         let flags: CGEventFlags
         let text: String
+
+        static let dollar = SkillPickerTrigger(keyCode: kVK_ANSI_4, flags: .maskShift, text: "$")
+        static let slash = SkillPickerTrigger(keyCode: kVK_ANSI_Slash, flags: [], text: "/")
     }
 
     nonisolated static func skillPickerTrigger(for bundleIdentifier: String?) -> SkillPickerTrigger {
-        if bundleIdentifier == codexBundleID {
-            return SkillPickerTrigger(keyCode: kVK_ANSI_4, flags: .maskShift, text: "$")
-        }
+        if bundleIdentifier == codexBundleID { return .dollar }
         // Claude and other apps retain the existing slash behavior. Browser/terminal
         // processes do not reliably identify their page/session, so do not guess.
-        return SkillPickerTrigger(keyCode: kVK_ANSI_Slash, flags: [], text: "/")
+        return .slash
+    }
+
+    /// A profile's pinned Skill trigger: no app detection, the profile already chose the host.
+    private func send(_ trigger: SkillPickerTrigger) {
+        rmDebug("⌨️ Skill trigger \(trigger.text) (profile)")
+        sendKey(trigger.keyCode, flags: trigger.flags, text: trigger.text)
     }
 
     private func performChord(_ chord: ModifierChord) {

@@ -655,8 +655,35 @@ private final class CaretAXQuery {
               position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite else { return blocked("selection or editor bounds unavailable") }
         return Editor(element: element, pid: pid, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
     }
+    /// The editor's own collapsed-range rectangle, accepted only when it is caret-shaped and
+    /// inside the editor. Used for an empty editor, where there are no glyphs to calibrate
+    /// against: the native one-line-above quirk would put it above the editor and fail here.
+    func uncalibratedInsertion(_ offset: Int, in editor: Editor) -> CGRect? {
+        var range = CFRange(location: offset, length: 0), rect = CGRect.zero
+        guard let value = AXValueCreate(.cfRange, &range),
+              unpack(attribute(editor.element, kAXBoundsForRangeParameterizedAttribute, value), .cgRect, &rect),
+              rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite, rect.height.isFinite, rect.height > 0,
+              CaretRangeGeometry.isInsertionRect(rect),
+              editor.bounds.contains(CGPoint(x: rect.minX, y: rect.midY)) else { return nil }
+        return rect
+    }
     func caret(_ offset: Int, in editor: Editor) -> CGRect? {
         if let context = markerGeometry, !CFEqual(context.element, editor.element) { markerGeometry = nil }
+        var lightlyRefreshed = false
+        if let context = markerGeometry, context.navigator.text != editor.text {
+            // Markers are walked against a text snapshot. Caret positioning never sees the text
+            // change (it cancels instead), but dictation reads while it types: re-seed against
+            // the new text and keep the editor's calibrated convention, which belongs to the
+            // editor, not to its text. The provider does not change with the text, so first
+            // try re-anchoring through it alone; the full ancestor walk and leaf seeding cost
+            // up to ~270 ms per read and made the dictation bubble trail the words.
+            if let refreshed = refreshedMarkerGeometry(context, for: editor) {
+                markerGeometry = refreshed
+                lightlyRefreshed = true
+            } else {
+                markerGeometry = makeMarkerGeometry(editor)
+            }
+        }
         func bounds(_ requested: NSRange) -> CGRect? {
             if let context = markerGeometry { return markerBounds(requested, in: context) }
             var range = CFRange(location: requested.location, length: requested.length), rect = CGRect.zero
@@ -685,7 +712,13 @@ private final class CaretAXQuery {
             geometryCorrection = (editor.element, mode)
             rmDebug("Caret AX geometry calibrated: \(mode.rawValue), source=\(markerGeometry == nil ? "ranges" : "text-markers")")
         }
-        guard let raw = bounds(NSRange(location: offset, length: 0)),
+        var insertion = bounds(NSRange(location: offset, length: 0))
+        if insertion == nil, lightlyRefreshed {
+            // The quick re-anchor found no usable marker here: fall back to the full seeding.
+            markerGeometry = makeMarkerGeometry(editor)
+            insertion = bounds(NSRange(location: offset, length: 0))
+        }
+        guard let raw = insertion,
               let rect = geometryCorrection?.mode.apply(to: raw),
               editor.bounds.insetBy(dx: -1, dy: 0).contains(CGPoint(x: rect.minX, y: rect.midY)) else { entryDiagnostic("caret outside editor or unavailable"); return nil }
         // Keep the native caret anchor even for a partially visible line; clipping
@@ -716,22 +749,9 @@ private final class CaretAXQuery {
                let value = attribute(provider, "AXStringForTextMarkerRange", raw) as? String,
                value == editor.text {
                 let range = unsafeBitCast(raw, to: AXTextMarkerRange.self)
-                var markers = [0: AXTextMarkerRangeCopyStartMarker(range)]
-                markers[editor.text.utf16.count] = AXTextMarkerRangeCopyEndMarker(range)
-                // Anchor at the real selection too, so a long editor does not need
-                // to be walked from its first character before the overlay appears.
-                if let selection = attribute(provider, "AXSelectedTextMarkerRange"),
-                   CFGetTypeID(selection) == AXTextMarkerRangeGetTypeID() {
-                    let selected = unsafeBitCast(selection, to: AXTextMarkerRange.self)
-                    let current = AXTextMarkerRangeCopyStartMarker(selected)
-                    let prefix = AXTextMarkerRangeCreate(nil, AXTextMarkerRangeCopyStartMarker(range), current)
-                    let expected = (editor.text as NSString).substring(to: editor.selection.location)
-                    if attribute(provider, "AXStringForTextMarkerRange", prefix) as? String == expected {
-                        markers[editor.selection.location] = current
-                    }
-                }
                 let context = MarkerGeometry(element: editor.element, provider: provider,
-                                             navigator: CaretMarkerNavigator(text: editor.text, markers: markers))
+                                             navigator: CaretMarkerNavigator(text: editor.text,
+                                                                             markers: anchors(provider, range, editor)))
                 seedTextLeafMarkers(in: context, editorRange: range)
                 entryDiagnostic("verified editor-local text markers at ancestor depth=\(depth)")
                 return context
@@ -741,6 +761,37 @@ private final class CaretAXQuery {
         }
         entryDiagnostic("editor-local text markers unavailable")
         return nil
+    }
+
+    /// The editor range's endpoints plus the real selection, so a long editor does not need
+    /// to be walked from its first character before the overlay appears.
+    private func anchors(_ provider: AXUIElement, _ range: AXTextMarkerRange, _ editor: Editor) -> [Int: AXTextMarker] {
+        var markers = [0: AXTextMarkerRangeCopyStartMarker(range)]
+        markers[editor.text.utf16.count] = AXTextMarkerRangeCopyEndMarker(range)
+        if let selection = attribute(provider, "AXSelectedTextMarkerRange"),
+           CFGetTypeID(selection) == AXTextMarkerRangeGetTypeID() {
+            let selected = unsafeBitCast(selection, to: AXTextMarkerRange.self)
+            let current = AXTextMarkerRangeCopyStartMarker(selected)
+            let prefix = AXTextMarkerRangeCreate(nil, AXTextMarkerRangeCopyStartMarker(range), current)
+            let expected = (editor.text as NSString).substring(to: editor.selection.location)
+            if attribute(provider, "AXStringForTextMarkerRange", prefix) as? String == expected {
+                markers[editor.selection.location] = current
+            }
+        }
+        return markers
+    }
+
+    /// Same editor, new text: re-anchor through the provider already verified for it, with
+    /// the same exact-text check as a full seeding. Leaf anchors are skipped; a collapsed
+    /// container marker is still re-anchored on demand by `markerBounds`.
+    private func refreshedMarkerGeometry(_ stale: MarkerGeometry, for editor: Editor) -> MarkerGeometry? {
+        guard CFEqual(stale.element, editor.element),
+              let raw = attribute(stale.provider, "AXTextMarkerRangeForUIElement", editor.element),
+              CFGetTypeID(raw) == AXTextMarkerRangeGetTypeID(),
+              attribute(stale.provider, "AXStringForTextMarkerRange", raw) as? String == editor.text else { return nil }
+        let range = unsafeBitCast(raw, to: AXTextMarkerRange.self)
+        return MarkerGeometry(element: editor.element, provider: stale.provider,
+                              navigator: CaretMarkerNavigator(text: editor.text, markers: anchors(stale.provider, range, editor)))
     }
 
     private func seedTextLeafMarkers(in context: MarkerGeometry, editorRange: AXTextMarkerRange) {
@@ -849,6 +900,104 @@ private final class CaretAXQuery {
         guard let value = AXValueCreate(.cgPoint, &p),
               unpack(attribute(editor.element, kAXRangeForPositionParameterizedAttribute, value), .cfRange, &range) else { return nil }
         return CaretNavigation.boundaries(editor.text).min { abs($0 - range.location) < abs($1 - range.location) }
+    }
+}
+
+/// Where the next typed character will appear, for callers that only need to point at it
+/// rather than move it. Dictation parks its indicator here. Keep one instance per use: the
+/// query caches each editor's calibration and web text markers, which can cost up to 120 ms to
+/// rebuild, and the indicator re-reads several times a second while text streams in.
+///
+/// Reads run on a private serial queue, one in flight and only the latest waiting, like caret
+/// positioning's tracking worker: a web editor's marker walk would otherwise stall the main
+/// thread, which is also where the dictation typewriter sends its keystrokes. The unchecked
+/// conformance transfers `query` to that queue; `inFlight` and `pending` stay on main.
+final class CaretInsertionPoint: @unchecked Sendable {
+    enum Accuracy: String, Sendable {
+        /// Calibrated against real glyphs, exactly as caret positioning measures it.
+        case glyph
+        /// An empty editor's own collapsed-range rectangle.
+        case emptyEditor
+        /// An empty editor that reports no caret rectangle: its leading edge, where the
+        /// first character will appear.
+        case editorStart
+    }
+
+    struct Reading: Sendable {
+        let caret: CGRect
+        let editor: CGRect
+        let accuracy: Accuracy
+    }
+
+    private let queue = DispatchQueue(label: "com.viberemote.caret-insertion", qos: .userInitiated)
+    private let query = CaretAXQuery()
+    private var inFlight = false
+    private var pending: (@MainActor @Sendable (Reading?) -> Void)?
+    /// Main-confined read timings since the last `takeTimings`, for the indicator's log line.
+    private var timings: [TimeInterval] = []
+
+    /// Read count, mean and slowest read in milliseconds, then starts a fresh tally.
+    @MainActor
+    func takeTimings() -> (count: Int, mean: Double, slowest: Double) {
+        defer { timings.removeAll() }
+        guard !timings.isEmpty else { return (0, 0, 0) }
+        return (timings.count, timings.reduce(0, +) / Double(timings.count) * 1000, (timings.max() ?? 0) * 1000)
+    }
+
+    /// Measures off the main thread and answers on it. A request made while one is in flight
+    /// replaces any older waiting request, so a burst of typing costs at most two reads.
+    @MainActor
+    func read(_ completion: @escaping @MainActor @Sendable (Reading?) -> Void) {
+        guard !inFlight else { pending = completion; return }
+        inFlight = true
+        queue.async { [self] in
+            let started = ProcessInfo.processInfo.systemUptime
+            let reading = measure()
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.inFlight = false
+                    self.timings.append(elapsed)
+                    completion(reading)
+                    if let next = self.pending {
+                        self.pending = nil
+                        self.read(next)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Caret positioning never guesses, because a wrong caret would move the user's text.
+    /// An indicator only points: in an empty editor the caret can only be at the start, and
+    /// the first streamed words replace this with measured glyph geometry.
+    private func measure() -> Reading? {
+        guard let editor = query.observe() else { return nil }
+        if let caret = query.caret(Int(editor.selection.location), in: editor) {
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .glyph)
+        }
+        guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else { return nil }
+        if let raw = query.uncalibratedInsertion(0, in: editor) {
+            return Reading(caret: CGRect(x: raw.minX, y: raw.minY, width: 2, height: raw.height),
+                           editor: editor.bounds, accuracy: .emptyEditor)
+        }
+        return Reading(caret: Self.editorStart(editor.bounds), editor: editor.bounds, accuracy: .editorStart)
+    }
+
+    /// Web editors (Claude's and Codex's ProseMirror composers) report an empty document as a
+    /// single line break, and Chromium then answers every caret-rectangle query with a zero
+    /// rect, so "empty" means nothing but line breaks with the caret before them.
+    static func isEmptyEditor(text: String, caret: Int) -> Bool {
+        caret == 0 && text.allSatisfy(\.isNewline)
+    }
+
+    /// The first character's spot in an empty editor, in AX (top-left) coordinates: centered in
+    /// a single-line field, near the top of a taller text area. A small inset only: Chromium's
+    /// editable box starts at its text, while AppKit adds about 5 pt of line padding.
+    static func editorStart(_ bounds: CGRect) -> CGRect {
+        let height = min(18, max(10, bounds.height - 8))
+        let top = bounds.height <= 36 ? bounds.midY - height / 2 : bounds.minY + 6
+        return CGRect(x: bounds.minX + 3, y: top, width: 2, height: height)
     }
 }
 
@@ -1225,9 +1374,51 @@ import QuartzCore
 
 /// Figma 1345:6560, exported at 4x; the source SVG is bundled alongside it.
 /// Only the straight 2 pt stem adapts to the editor's line height.
+/// The two things the same cursor can mean. One silhouette, two readings: the ordinary
+/// dark one positions the caret, and the orange one says VibeRemote is listening and shows
+/// where the transcript will land. Caret positioning cancels on a Siri press, so the user
+/// never sees both at once.
+@MainActor
+enum CaretBubbleStyle: Equatable, CaseIterable {
+    case positioning, dictation
+
+    var tint: NSColor { self == .dictation ? .systemOrange : .labelColor }
+    var symbol: String {
+        self == .dictation ? "mic.fill" : "arrow.up.and.down.and.arrow.left.and.right"
+    }
+}
+
+/// What the dictation bubble says while it is up. Drawn live by the canvas rather than
+/// baked into the cached artwork, because both change every frame.
+enum CaretGlyph: Equatable {
+    /// Recording: a mic outline that fills from the bottom with the live input level, so
+    /// silence (bridge stopped, wrong device) is visibly different from speech.
+    case listening
+    /// Transcribing: a spinner in place of the mic, so the wait after release reads as work.
+    case recognizing
+}
+
+@MainActor
+enum CaretGlyphImages {
+    private static let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        .applying(NSImage.SymbolConfiguration(paletteColors: [.textBackgroundColor]))
+    static let micOutline = NSImage(systemSymbolName: "mic", accessibilityDescription: nil)?
+        .withSymbolConfiguration(configuration)
+    static let micFill = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(configuration)
+
+    /// How much of the mic glyph, from the bottom, a level fills. The stand is the lowest
+    /// ~30% of the glyph; filling it on any sound and letting the capsule carry the volume
+    /// keeps quiet speech from reading as silence.
+    static func fillFraction(level: CGFloat) -> CGFloat {
+        level <= 0.02 ? 0 : 0.3 + 0.7 * min(1, level)
+    }
+}
+
 @MainActor
 enum CaretBubbleArtwork {
-    static func image(appearance: NSAppearance, bundle: Bundle = SettingsAssets.bundle, includeSymbol: Bool = true) -> CGImage? {
+    static func image(appearance: NSAppearance, bundle: Bundle = SettingsAssets.bundle, includeSymbol: Bool = true,
+                      style: CaretBubbleStyle = .positioning) -> CGImage? {
         guard let url = bundle.url(forResource: "CaretBubble", withExtension: "png"),
               let silhouette = NSImage(contentsOf: url),
               let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 96, pixelsHigh: 128,
@@ -1239,11 +1430,11 @@ enum CaretBubbleArtwork {
         context.cgContext.scaleBy(x: 4, y: 4)
         appearance.performAsCurrentDrawingAppearance {
             silhouette.draw(in: CGRect(x: 0, y: 0, width: 24, height: 32))
-            NSColor.labelColor.withAlphaComponent(1).setFill()
+            style.tint.withAlphaComponent(1).setFill()
             CGRect(x: 0, y: 0, width: 24, height: 32).fill(using: .sourceAtop)
             let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.textBackgroundColor]))
-            if includeSymbol, let symbol = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right", accessibilityDescription: nil)?
+            if includeSymbol, let symbol = NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(configuration) {
                 let size = symbol.size
                 // Unflipped drawing: the bubble center is 12 pt below the top.
@@ -1270,6 +1461,12 @@ final class CaretOverlay {
         var previewArtwork: NSImage?
         var symbolOpacity: CGFloat = 0
         var lean: CGFloat = 0
+        /// The stem is drawn here rather than in the artwork, so it needs the same tint.
+        var tint: NSColor = .labelColor
+        /// nil draws the artwork's own symbol, as caret positioning always does.
+        var glyph: CaretGlyph?
+        var level: CGFloat = 0
+        var spinnerAngle: CGFloat = 0
         var insertionBottom = CGPoint(x: 14, y: 2)
         var stemRect: CGRect { CGRect(x: insertionBottom.x - 1, y: insertionBottom.y, width: 2, height: lineHeight) }
         override var isOpaque: Bool { false }
@@ -1284,7 +1481,7 @@ final class CaretOverlay {
             context.beginTransparencyLayer(auxiliaryInfo: nil)
             context.saveGState()
             context.clip(to: CGRect(x: stemRect.minX - 1, y: stemRect.minY + clipBottom, width: 4, height: clipHeight))
-            NSColor.labelColor.withAlphaComponent(1).setFill()
+            tint.withAlphaComponent(1).setFill()
             NSBezierPath(roundedRect: stemRect, xRadius: 1, yRadius: 1).fill()
             context.restoreGState()
             // Only the balloon bends. The insertion stem and its clipping rectangle
@@ -1299,13 +1496,52 @@ final class CaretOverlay {
             previewArtwork?.draw(in: bubbleRect, from: .zero, operation: .sourceOver,
                                  fraction: 1, respectFlipped: false, hints: nil)
             if symbolOpacity > 0 {
-                // Composite the symbol-bearing image over the identical silhouette,
-                // so the symbol fades in without dimming the bubble underneath it.
-                artwork?.draw(in: bubbleRect, from: .zero, operation: .sourceOver,
-                              fraction: symbolOpacity, respectFlipped: false, hints: nil)
+                if let glyph {
+                    // The artwork draws its symbol 20 pt above the bubble's bottom edge.
+                    drawGlyph(glyph, center: CGPoint(x: 0, y: bubbleRect.minY + 20 * expansion),
+                              scale: expansion, opacity: symbolOpacity)
+                } else {
+                    // Composite the symbol-bearing image over the identical silhouette,
+                    // so the symbol fades in without dimming the bubble underneath it.
+                    artwork?.draw(in: bubbleRect, from: .zero, operation: .sourceOver,
+                                  fraction: symbolOpacity, respectFlipped: false, hints: nil)
+                }
             }
             context.endTransparencyLayer()
             context.restoreGState()
+        }
+
+        private func drawGlyph(_ glyph: CaretGlyph, center: CGPoint, scale: CGFloat, opacity: CGFloat) {
+            guard scale > 0.01, let context = NSGraphicsContext.current?.cgContext else { return }
+            switch glyph {
+            case .listening:
+                guard let outline = CaretGlyphImages.micOutline, let fill = CaretGlyphImages.micFill else { return }
+                func rect(_ image: NSImage) -> CGRect {
+                    let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+                    return CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                                  width: size.width, height: size.height)
+                }
+                outline.draw(in: rect(outline), from: .zero, operation: .sourceOver,
+                             fraction: opacity, respectFlipped: false, hints: nil)
+                let fraction = CaretGlyphImages.fillFraction(level: level)
+                guard fraction > 0 else { return }
+                let filled = rect(fill)
+                context.saveGState()
+                context.clip(to: CGRect(x: filled.minX, y: filled.minY,
+                                        width: filled.width, height: filled.height * fraction))
+                fill.draw(in: filled, from: .zero, operation: .sourceOver,
+                          fraction: opacity, respectFlipped: false, hints: nil)
+                context.restoreGState()
+            case .recognizing:
+                let start = spinnerAngle * 180 / .pi
+                let arc = NSBezierPath()
+                arc.appendArc(withCenter: center, radius: 4.6 * scale, startAngle: start,
+                              endAngle: start + 270, clockwise: false)
+                arc.lineWidth = 1.8 * scale
+                arc.lineCapStyle = .round
+                NSColor.textBackgroundColor.withAlphaComponent(opacity).setStroke()
+                arc.stroke()
+            }
         }
     }
     final class Panel: NSPanel {
@@ -1317,6 +1553,7 @@ final class CaretOverlay {
     private(set) var canvas: Canvas?
     private var timer: Timer?
     private var artworkAppearance: NSAppearance.Name?
+    private var artworkStyle: CaretBubbleStyle?
     private var warnedMissingArtwork = false
     private var targetOpacity: CGFloat = 0
     private var targetExpansion: CGFloat = 0
@@ -1325,9 +1562,68 @@ final class CaretOverlay {
     private var expansionSpring = CaretBubbleSpring()
     private var leanSpring = CaretBubbleSpring()
     private var lastTick: TimeInterval = 0
+    /// Runs only while a live glyph is up: level easing and the spinner need every frame,
+    /// the bubble's own transitions do not.
+    private var glyphTimer: Timer?
+    private var lastGlyphTick: TimeInterval = 0
+    private var targetLevel: CGFloat = 0
+
+    func setGlyph(_ glyph: CaretGlyph?) {
+        guard let canvas else { return }
+        if canvas.glyph != glyph {
+            canvas.glyph = glyph
+            canvas.level = 0
+            targetLevel = 0
+        }
+        canvas.needsDisplay = true
+        updateGlyphTimer()
+    }
+
+    /// A normalized 0...1 input level. The canvas eases toward it every frame.
+    func setLevel(_ level: CGFloat) {
+        targetLevel = min(1, max(0, level))
+    }
+
+    /// One frame of glyph motion. Returns false once there is nothing left to animate.
+    @discardableResult
+    func advanceGlyph(elapsed: TimeInterval) -> Bool {
+        guard let canvas, let glyph = canvas.glyph, targetOpacity > 0 else { return false }
+        canvas.level = DictationLevelMeter.eased(canvas.level, toward: glyph == .listening ? targetLevel : 0,
+                                                 elapsed: elapsed)
+        if glyph == .recognizing {
+            // One turn every 0.9 s, clockwise like the system spinner.
+            canvas.spinnerAngle = (canvas.spinnerAngle - CGFloat(elapsed) * 2 * .pi / 0.9)
+                .truncatingRemainder(dividingBy: 2 * .pi)
+        }
+        canvas.needsDisplay = true
+        return true
+    }
+
+    private func updateGlyphTimer() {
+        guard canvas?.glyph != nil, targetOpacity > 0 else {
+            glyphTimer?.invalidate(); glyphTimer = nil
+            return
+        }
+        guard glyphTimer == nil else { return }
+        lastGlyphTick = ProcessInfo.processInfo.systemUptime
+        let frames = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] tick in
+            let keepRunning = MainActor.assumeIsolated {
+                guard let self else { return false }
+                let now = ProcessInfo.processInfo.systemUptime
+                let elapsed = min(0.05, max(0, now - self.lastGlyphTick))
+                self.lastGlyphTick = now
+                let running = self.advanceGlyph(elapsed: elapsed)
+                if !running { self.glyphTimer = nil }
+                return running
+            }
+            if !keepRunning { tick.invalidate() }
+        }
+        glyphTimer = frames
+        RunLoop.main.add(frames, forMode: .common)
+    }
 
     func show(caret: CGRect, editor: CGRect, progress: CGFloat, tracking: Bool = false, present: Bool = true,
-              preparationLean: CGFloat = 0) {
+              preparationLean: CGFloat = 0, style: CaretBubbleStyle = .positioning) {
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         if panel == nil {
             let window = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -1355,12 +1651,15 @@ final class CaretOverlay {
         canvas.clipBottom = max(0, caret.maxY - editor.maxY)
         canvas.clipHeight = max(0, min(caret.maxY, editor.maxY) - max(caret.minY, editor.minY))
         let appearance = canvas.effectiveAppearance
-        if artworkAppearance != appearance.name || canvas.artwork == nil || canvas.previewArtwork == nil {
-            if let image = CaretBubbleArtwork.image(appearance: appearance),
-               let plain = CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false) {
+        canvas.tint = style.tint
+        if artworkAppearance != appearance.name || artworkStyle != style
+            || canvas.artwork == nil || canvas.previewArtwork == nil {
+            if let image = CaretBubbleArtwork.image(appearance: appearance, style: style),
+               let plain = CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false, style: style) {
                 canvas.artwork = NSImage(cgImage: image, size: CGSize(width: 24, height: 32))
                 canvas.previewArtwork = NSImage(cgImage: plain, size: CGSize(width: 24, height: 32))
                 artworkAppearance = appearance.name
+                artworkStyle = style
                 rmDebug("Caret bubble artwork ready: \(image.width)x\(image.height)")
             } else if !warnedMissingArtwork {
                 warnedMissingArtwork = true
@@ -1390,6 +1689,7 @@ final class CaretOverlay {
     func hide() {
         guard canvas != nil else { return }
         transition(opacity: 0, expansion: 0, symbolOpacity: 0, lean: 0)
+        updateGlyphTimer()
     }
     /// Advance from the current rendered values so a new touch can reverse a close.
     /// Keep the silhouette visible until the balloon has returned into its stem.

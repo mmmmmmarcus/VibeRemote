@@ -129,4 +129,42 @@ final class DictationTests: XCTestCase {
         XCTAssertEqual(DictationAudio(samples: Array(repeating: 0, count: 8_000)).duration, 0.5, accuracy: 0.0001)
         XCTAssertGreaterThan(DictationAudio(samples: [0.5, -0.5]).rms, 0.4)
     }
+
+    /// The meter's job is to tell silence from speech at a glance: digital silence and room
+    /// noise read empty, close speech reads full, and it rises monotonically in between.
+    func testLevelMeterSeparatesSilenceFromSpeech() {
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0), 0)
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.001), 0)          // -60 dBFS
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.5), 1, accuracy: 0.01) // -6 dBFS
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 1), 1)
+        // Ordinary speech (around -18 dBFS) must sit well below full, or the mic stops moving.
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.126), 0.69, accuracy: 0.02)
+        let quiet = DictationLevelMeter.normalized(rms: 0.01), loud = DictationLevelMeter.normalized(rms: 0.05)
+        XCTAssertGreaterThan(quiet, 0)
+        XCTAssertGreaterThan(loud, quiet)
+        XCTAssertEqual(DictationLevelMeter.rms([0.5, -0.5, 0.5, -0.5]), 0.5, accuracy: 0.0001)
+    }
+
+    func testLevelMeterAttacksFasterThanItReleases() {
+        let rise = DictationLevelMeter.eased(0, toward: 1, elapsed: 0.05)
+        let fall = 1 - DictationLevelMeter.eased(1, toward: 0, elapsed: 0.05)
+        XCTAssertGreaterThan(rise, 0.7)
+        XCTAssertLessThan(fall, 0.3)
+        XCTAssertEqual(DictationLevelMeter.eased(0.4, toward: 0.4, elapsed: 1), 0.4)
+    }
+
+    func testPeakIsTheLoudestWindowNotTheAverage() {
+        let samples = [Float](repeating: 0, count: 8_000) + [Float](repeating: 0.1, count: 800)
+        XCTAssertEqual(DictationLevelMeter.peakDecibels(samples), -20, accuracy: 0.1)
+        XCTAssertLessThan(DictationLevelMeter.peakDecibels([]), -100)
+    }
+
+    /// Any sound fills the mic's stand at once; the capsule carries the volume.
+    @MainActor
+    func testMicFillsFromTheStandUp() {
+        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 0), 0)
+        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 0.1), 0.37, accuracy: 0.001)
+        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 1), 1)
+        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 3), 1)
+    }
 }

@@ -46,6 +46,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `SettingsWindowController.swift` | Retained native settings window, SwiftUI remote diagram, read-only button callouts, Siri action pop-up, live status snapshot. |
 | `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vibeRemoteLogPath` and `rmDebug`. |
 | `RemoteGeneration.swift` | Tells the 1st-gen remote from the 2nd/3rd-gen one and holds every behavioral difference between them. |
+| `ButtonProfiles.swift` | Per-app button profiles: `ButtonProfileSet` (General + app profiles, resolution, editing, seeds), `ButtonProfileStore`, `ButtonProfileLatch`, `InstalledApp` scan for Add App. |
 | `RemoteInputHandler.swift` | Opens HID interfaces, maps buttons, sends synthetic key events, performs the `0xAF` input-enable Feature write. |
 | `ListEditingController.swift` | Reads the focused editor through AX and plans native list/indent commands without rewriting its text. |
 | `RemoteHIDChannel.swift` | Direct HID-over-GATT (CoreBluetooth) path — see caveats below. |
@@ -66,6 +67,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `Dictation.swift`, `DictationEngines.swift`, `DictationPane.swift` | VibeRemote Dictation: recorder, typer, controller; Apple/WhisperKit/OpenAI/Seed ASR engines; Settings pane. |
+| `DictationStreaming.swift` | Streaming dictation: Volcengine SAUC frame codec and WebSocket session, the typewriter that types and corrects partials, the per-hold live state, and the `--verify-seed-stream` check. |
 | `VibeRemote.entitlements` | `com.apple.security.device.bluetooth` and `com.apple.security.device.audio-input` (Dictation records the virtual device under the hardened runtime). |
 
 ## Build, run, test
@@ -1037,6 +1039,34 @@ tap gate. (A new agent-desktop based agent replaced it on 2026-11-01; see below.
 existing Advanced Menu/caret ownership and microphone tail/drain handling.
 Historical benchmark reports are evidence only, not supported runtime features.
 
+### Per-app button profiles (2026-11-10)
+
+At the user's request (modeled on Logitech's app-specific profiles) Settings › Remote edits one
+**profile** at a time, chosen from a Profile row above the remote. General is the fallback: an app
+without a profile, and every button an app profile leaves alone, does what General says. An app
+profile stores only the buttons the user changed for it (pill menu "Same as General (X)" goes back),
+so later General edits still reach the rest. Siri is per profile too (nil follows General), which
+makes Dictation per app; the Dictation pane lists the profiles whose Siri resolves to Dictation.
+- Defaults: General, Claude (`com.anthropic.claudefordesktop`) and ChatGPT (`com.openai.codex`, the
+  Codex app installed as ChatGPT.app). Their seeds pin the Skill trigger on every button whose
+  default is the app-detecting `.skillPicker` (aluminum Play/Pause): `.slashSkill` "/" for Claude,
+  `.dollarSkill` "$" for ChatGPT. General keeps `.skillPicker`'s detection, and Advanced Menu's Skill
+  is not profile-driven. Glass Play/Pause opens Advanced Menu, so glass seeds pin nothing.
+- Storage: General keeps `siriButtonAction` / `buttonActionOverrides` (no migration). App profiles
+  live in `buttonProfiles`; its absence means never seeded, so removed seeds stay removed. Nothing is
+  written until the first edit. Choices are validated on read as before.
+- Dispatch: `MenuBarManager.getMapping(for:generation:pressed:)` resolves the frontmost app's
+  bundle ID at the press and `ButtonProfileLatch` reuses that profile for the release, keyed by
+  generation + button. Both callers (`processButton` and the passive-capture `.none` check) pass the
+  edge. Never resolve the release fresh: Toggle Codex / Claude changes the frontmost app itself, and a
+  held key released under another mapping would stick. Remapping still changes only what a button
+  sends (Advanced Menu ownership, chords, guards and passive-capture ownership are untouched).
+- Add App lists `.app` bundles in /Applications (and one vendor folder level), /Applications/Utilities,
+  /System/Applications(/Utilities) and ~/Applications, deduplicated by bundle ID (~44 ms here).
+  Restore Defaults restores the edited profile (an app profile returns to its seed); only General's
+  also resets Auto Disconnect. The user confirmed the Profile row, Add App and per-app buttons work
+  on 2026-11-10.
+
 ### Computer-use agent (2026-11-01)
 
 Rebuilt from scratch at the user's request on top of
@@ -1103,8 +1133,9 @@ its view and the `ComputerUseAgent` model; `AgentDock.swift` holds the Dock piec
 ### VibeRemote Dictation (2026-11-08)
 
 At the user's request VibeRemote can transcribe itself instead of holding a key for a third-party
-dictation app. Siri's `vibeDictation` action (pill title "Dictation"; Settings › Dictation's
-toggle writes the same Siri choice) begins `DictationController` on Siri down and ends it at the
+dictation app. Siri's `vibeDictation` action (pill title "Dictation"; the Siri pill is the only switch —
+Settings › Dictation has no on/off toggle since 2026-11-09, user's request, and only says
+whether Siri uses it) begins `DictationController` on Siri down and ends it at the
 exact moment a mapped dictation key would be released: `holdsDictation` routes it through the
 same voice-tail/`voice-drained` wait and safety timeout, the first-generation tail continues the
 same recording, and an aluminum re-press ends (and transcribes) the previous hold first. No key is
@@ -1125,9 +1156,91 @@ held. It is Siri-only; no other button's `choices` may include it.
 - Output: one line (newlines collapsed so a composer cannot submit), typed as Unicode keyboard
   events in ≤20-UTF-16 chunks split on character boundaries — never the clipboard. Transcripts
   are never logged; the log records provider, durations and character count only.
-- Hardware/network verification still outstanding: real holds on both generations, each engine,
-  Apple asset download, WhisperKit download/load time, and the Volcengine flash request fields
-  (taken from the documentation summary, not a verbatim spec).
+- Indicator (2026-11-09, user's request): a hold is silent and types nothing until it ends, so
+  `DictationIndicator` shows the caret cursor at the insertion point in orange for as long as
+  the hold is recording or being transcribed. It is the same `CaretOverlay` silhouette as caret
+  positioning in a second `CaretBubbleStyle` (`.dictation`: `systemOrange`, `mic.fill`), never a
+  second kind of cursor; a Siri press cancels positioning, so the two are never both on screen.
+  The style tints the bubble artwork and the canvas-drawn stem, and keys the artwork cache
+  alongside the appearance. Geometry comes from one `CaretInsertionPoint` per indicator (it caches calibration and web
+  text markers, which cost up to 120 ms to rebuild). Glyph-calibrated geometry wins. Unlike caret
+  positioning, which must never guess because it moves text, the indicator only points: an
+  empty editor (no glyphs to calibrate — the usual place to dictate, and the reason it first
+  failed to appear on 2026-11-09) uses its collapsed-range rect if caret-shaped and inside the
+  editor, else its leading edge (3 pt in). "Empty" means only line breaks with the caret at 0:
+  Claude's ProseMirror composer reports an empty document as "\n", and Chromium answers every
+  caret-rect query there with a zero rect at (0, y), so it always takes the leading-edge path.
+  The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
+  on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 20 ms after the keystroke that asked for it (at most one per 30 ms) because Chromium's AX tree lags. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding only when that yields no insertion geometry. The indicator logs read count, mean and slowest read per hold. A non-empty
+  editor without usable geometry still gets no indicator. The log records which accuracy was used. It hides before the transcript is typed, because the caret
+  moves as the words land. Seen on screen from a real aluminum-remote hold on 2026-11-09.
+  Live states (same day, user's request): while recording, the bubble's glyph is a `mic` outline
+  that `mic.fill` fills from the bottom with the recorder's per-tap RMS (`DictationLevelMeter`:
+  -45...-6 dBFS, recalibrated from real holds that peaked at -7 dBFS, where -14 pinned ordinary
+  speech at full; fast attack / slow release; any sound fills the stand, the capsule carries the
+  volume), so a stopped bridge reads visibly empty. While the clip is transcribed a spinner
+  replaces the mic. `CaretGlyph` is drawn live by the canvas rather than baked into the cached
+  artwork; nil keeps caret positioning's baked symbol. A 60 Hz glyph timer runs only while a
+  glyph is shown and stops on hide. Only the current hold moves the indicator, so an aluminum
+  re-press during transcription keeps its new listening mic. The completion log adds the clip's
+  loudest 50 ms window in dBFS for calibrating that range.
+- Seed ASR verified on hardware 2026-11-09: an aluminum-remote hold typed its transcript
+  (3.0 s audio -> 29 characters in 1.57 s) against Volcengine's `volc.bigasr.auc_turbo`
+  flash endpoint, so the request fields and the old-console `X-Api-App-Key` +
+  `X-Api-Access-Key` pair are confirmed. That account's 极速版 resource must be activated
+  separately from 豆包录音文件识别模型2.0, which is a different service.
+- Hardware/network verification still outstanding: first-generation holds, the Apple,
+  WhisperKit and OpenAI engines, Apple asset download and WhisperKit download/load time.
+
+### Streaming dictation — flow output (2026-11-09, user's request)
+
+Reference: Doubao IME 1.0.3 (`/Library/Input Methods/DoubaoIme.app`), read statically from its
+binary's type names, method signatures and log formats; its `alog` logs are encrypted and were
+not read. It streams Opus over a persistent WebSocket/QUIC link to a SAUC-family recognizer,
+runs two-pass recognition (fast partials, then a re-recognized sentence), shows partials as IMK
+**marked text**, and paces them with `ASRTypeWriter` / `TypewriterSpring`: keep the common
+prefix, replace only the changed tail (`replaceLength`, `commonPrefixCount`), interval shrinking
+with backlog, one skipped tick after a replace "in web env". Final text is IMK `insertText` or
+synthetic Cmd+V with a clipboard snapshot/restore. VibeRemote is not an input method and cannot
+set marked text in another app, so the user chose (2026-11-09) real keystrokes in the editor.
+
+- Seed ASR only, Settings › Dictation › "Type While Speaking" (`dictationSeedStreaming`, default
+  on). Other providers keep the one-shot path.
+- Wire: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async` (the optimized bidirectional
+  mode, which only answers when the result changes). Headers are the flash API's old-console pair
+  (`X-Api-App-Key` + `X-Api-Access-Key`) or new-console `X-Api-Key`, plus `X-Api-Resource-Id`
+  `volc.bigasr.sauc.duration` (流式语音识别大模型 1.0 小时版, enabled on the user's `default` app
+  7967928849 with the same Access Token; 2.0 would be `volc.seedasr.sauc.duration`) and
+  `X-Api-Connect-Id`. Frames: 4-byte header, big-endian sizes, server responses carry a sequence;
+  flags 0b0010 mark the last (negative) packet. Request `enable_nonstream: true` for Doubao's two
+  passes (`definite` only on the second), `result_type: full`, 16 kHz s16le PCM in 200 ms packets,
+  no compression (the server answers in the client's; gzip is still decoded defensively).
+- `DictationTypewriter` is the only writer: partials, the final result and the flash fallback all
+  set its target, and it reconciles the screen by common prefix. Pace: one character per tick
+  spread over ~0.18 s while nearly caught up (12–45 ms), more per tick as text backs up, ≤20
+  UTF-16 units per key event; deletes up to 40 per tick then one settling tick. A later hold's
+  typewriter waits for the previous one, so keystrokes never interleave.
+- Corrections delete real characters, so they are guarded: focus (pid, then the AX focused
+  element) is fixed at the hold's first edit and re-checked before every delete and at least every
+  100 ms while typing; before deleting, the AX caret must sit exactly at anchor + typed UTF-16
+  length (a lagging editor gets six 30 ms retries). Any failure stops typing for that hold and
+  leaves what is on screen; nothing is ever deleted beyond what the hold typed. Unreadable
+  selection or focus proceeds on the remaining checks.
+- After release: drain grace, last packet, wait ≤4 s for the final; on failure or timeout the
+  recorded clip goes to the flash API and the typewriter reconciles toward that answer. The
+  orange bubble follows the caret (≤8 reads/s, trailing read) while text streams, spins after
+  release, and hides once the typewriter has settled. The log line records route, update count,
+  time to first text, characters, corrected characters and settle time — never text.
+- `VibeRemote --verify-seed-stream <audio file>` streams a file through the same session in real
+  time using the installed app's own Keychain key (run the signed `/Applications` binary). On
+  2026-11-09: synthetic English 6.4 s → 18 updates, first text 0.84 s after connect, final 0.61 s
+  after the last packet; Mandarin 7.0 s → 17 updates, 0.67 s, 0.59 s, word-perfect. The one-shot
+  flash path had taken 1.57 s for a 3 s hold.
+- Hardware, 2026-11-09: the user confirmed text flows into the editor from a real aluminum hold
+  (logged: 7.1 s audio, 4 updates, first text 6.46 s into the hold, 0 corrected, settled 0.51 s
+  after release). Still unverified: first-generation holds, a long continuous utterance (that
+  hold's first text came late, which may only mean speech started late), correction flicker,
+  and the caret guard in web editors.
 
 ### Dictation trigger (2026-10-31)
 

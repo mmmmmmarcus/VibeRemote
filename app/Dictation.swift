@@ -19,6 +19,10 @@ struct DictationSettings: Equatable, Sendable {
     /// Only the older Volcengine console issues an App ID; new-console keys leave it empty.
     var seedAppID = ""
     var seedResourceID = SeedASRDictationEngine.defaultResourceID
+    /// Seed ASR only: recognize while Siri is held and type partial text as it arrives,
+    /// correcting it as recognition firms up. Off falls back to one transcription on release.
+    var seedStreaming = true
+    var seedStreamResourceID = SeedStreamFrame.defaultResourceID
 
     private enum Key {
         static let provider = "dictationProvider"
@@ -27,6 +31,8 @@ struct DictationSettings: Equatable, Sendable {
         static let openAIModel = "dictationOpenAIModel"
         static let seedAppID = "dictationSeedAppID"
         static let seedResourceID = "dictationSeedResourceID"
+        static let seedStreaming = "dictationSeedStreaming"
+        static let seedStreamResourceID = "dictationSeedStreamResourceID"
     }
 
     static func load(from defaults: UserDefaults = .standard) -> DictationSettings {
@@ -39,6 +45,8 @@ struct DictationSettings: Equatable, Sendable {
         settings.openAIModel = defaults.string(forKey: Key.openAIModel).flatMap { $0.isEmpty ? nil : $0 } ?? OpenAIDictationEngine.defaultModel
         settings.seedAppID = defaults.string(forKey: Key.seedAppID) ?? ""
         settings.seedResourceID = defaults.string(forKey: Key.seedResourceID).flatMap { $0.isEmpty ? nil : $0 } ?? SeedASRDictationEngine.defaultResourceID
+        settings.seedStreaming = defaults.object(forKey: Key.seedStreaming) as? Bool ?? true
+        settings.seedStreamResourceID = defaults.string(forKey: Key.seedStreamResourceID).flatMap { $0.isEmpty ? nil : $0 } ?? SeedStreamFrame.defaultResourceID
         return settings
     }
 
@@ -49,6 +57,8 @@ struct DictationSettings: Equatable, Sendable {
         defaults.set(openAIModel, forKey: Key.openAIModel)
         defaults.set(seedAppID.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.seedAppID)
         defaults.set(seedResourceID.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.seedResourceID)
+        defaults.set(seedStreaming, forKey: Key.seedStreaming)
+        defaults.set(seedStreamResourceID.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.seedStreamResourceID)
     }
 }
 
@@ -152,10 +162,15 @@ final class DictationRecorder: @unchecked Sendable {
     private var samples: [Float] = []
     // Touched only by the tap, which AVAudioEngine calls serially on its render thread.
     private var converter: AVAudioConverter?
+    /// Set before the tap is installed and only read by it afterwards.
+    private var onSamples: (@Sendable ([Float]) -> Void)?
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: DictationAudio.sampleRate,
                                        channels: 1, interleaved: false)!
 
-    func start(deviceID: AudioDeviceID) throws {
+    /// `onSamples` receives each tap's 16 kHz mono samples on the render thread, roughly every
+    /// 40 ms: the level meter and the streaming session both read them there.
+    func start(deviceID: AudioDeviceID, onSamples: (@Sendable ([Float]) -> Void)? = nil) throws {
+        self.onSamples = onSamples
         let input = engine.inputNode
         guard let unit = input.audioUnit else { throw DictationError("Could not open the VibeRemote input.") }
         var device = deviceID
@@ -203,6 +218,7 @@ final class DictationRecorder: @unchecked Sendable {
         }
         guard error == nil, output.frameLength > 0, let channel = output.floatChannelData?[0] else { return }
         let chunk = UnsafeBufferPointer(start: channel, count: Int(output.frameLength))
+        onSamples?(Array(chunk))
         lock.lock(); defer { lock.unlock() }
         guard Double(samples.count) < Self.maximumDuration * DictationAudio.sampleRate else { return }
         samples.append(contentsOf: chunk)
@@ -249,6 +265,138 @@ enum DictationTyper {
     }
 }
 
+// MARK: - Indicator
+
+/// Turns the recorder's raw RMS into what the indicator shows. The bridge's virtual input is
+/// digital silence until the remote's first voice frame lands, so the floor sits well above
+/// zero signal. The ceiling comes from real holds (2026-11-09): speech peaked at -7 dBFS, and a
+/// -14 ceiling kept ordinary talking pinned at full, so the mic looked static instead of moving
+/// with the voice. -6 leaves syllables visibly rising and falling below the top.
+enum DictationLevelMeter {
+    static let floorDecibels: Float = -45
+    static let ceilingDecibels: Float = -6
+
+    static func rms<C: Collection>(_ samples: C) -> Float where C.Element == Float {
+        guard !samples.isEmpty else { return 0 }
+        return (samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)).squareRoot()
+    }
+
+    static func decibels(rms: Float) -> Float { 20 * log10(max(rms, 0.000_001)) }
+
+    static func normalized(rms: Float) -> CGFloat {
+        let value = (decibels(rms: rms) - floorDecibels) / (ceilingDecibels - floorDecibels)
+        return CGFloat(min(1, max(0, value)))
+    }
+
+    /// Fast attack, slow release: syllables register at once, and the mic does not flicker
+    /// empty between them.
+    static func eased(_ current: CGFloat, toward target: CGFloat, elapsed: TimeInterval) -> CGFloat {
+        let time = target > current ? 0.035 : 0.18
+        return current + (target - current) * CGFloat(1 - exp(-max(0, elapsed) / time))
+    }
+
+    /// The loudest 50 ms window of a finished clip, for calibrating the meter from the log.
+    static func peakDecibels(_ samples: [Float], window: Int = 800) -> Float {
+        guard !samples.isEmpty else { return decibels(rms: 0) }
+        var peak: Float = 0
+        var start = 0
+        while start < samples.count {
+            peak = max(peak, rms(samples[start..<min(samples.count, start + window)]))
+            start += window
+        }
+        return decibels(rms: peak)
+    }
+}
+
+/// The orange twin of the caret cursor. While a hold is recording it stands at the insertion
+/// point with a mic that fills with the live input level, so the user can see that VibeRemote
+/// is hearing them and where the words will land. While the clip is transcribed, a spinner
+/// replaces the mic. Reuses `CaretOverlay`, so it is the same silhouette the user already
+/// knows from caret positioning; a Siri press cancels positioning, so the two are never on
+/// screen together. An empty editor has no glyphs to measure, so the bubble starts at its
+/// leading edge, where the first word will land; see `CaretInsertionPoint`.
+@MainActor
+final class DictationIndicator {
+    private let overlay = CaretOverlay()
+    private let insertion = CaretInsertionPoint()
+    /// Between `listen` and `hide`: the hold wants a bubble, even before a read has placed one.
+    private var active = false
+    private var shown = false
+    private var glyph: CaretGlyph = .listening
+    /// Bumped by every `listen` and `hide`, so a read that lands after the hold moved on is
+    /// dropped instead of resurrecting the bubble.
+    private var generation = 0
+
+    /// Also used by an aluminum re-press that arrives while the previous hold is still being
+    /// transcribed: the bubble is already up, so it only turns back into a listening mic.
+    func listen() {
+        glyph = .listening
+        if shown {
+            overlay.setGlyph(.listening)
+            overlay.setLevel(0)
+            return
+        }
+        active = true
+        generation += 1
+        let token = generation
+        insertion.read { [weak self] point in
+            guard let self, token == self.generation, self.active else { return }
+            guard let point else {
+                rmDebug("🗣 Dictation indicator: no editable caret in the focused element")
+                return
+            }
+            self.place(point)
+        }
+    }
+
+    func hear(rms: Float) {
+        guard shown else { return }
+        overlay.setLevel(DictationLevelMeter.normalized(rms: rms))
+    }
+
+    func recognize() {
+        glyph = .recognizing
+        guard shown else { return }
+        overlay.setGlyph(.recognizing)
+    }
+
+    /// Streaming types while the bubble is up, so it moves with the caret to the end of the
+    /// words. If the first read found no caret, the first words can still bring the bubble up.
+    /// A failed read keeps the last good position rather than guessing.
+    func follow() {
+        guard active else { return }
+        let token = generation
+        insertion.read { [weak self] point in
+            guard let self, token == self.generation, self.active, let point else { return }
+            self.place(point)
+        }
+    }
+
+    private func place(_ point: CaretInsertionPoint.Reading) {
+        overlay.show(caret: point.caret, editor: point.editor, progress: 1, style: .dictation)
+        guard !shown else { return }
+        shown = true
+        rmDebug("🗣 Dictation indicator shown (\(point.accuracy.rawValue))")
+        overlay.setGlyph(glyph)
+        overlay.setLevel(0)
+    }
+
+    /// Called before the transcript is typed: the caret moves as the words land, and a
+    /// bubble left behind at the old position would be pointing at nothing.
+    func hide() {
+        active = false
+        generation += 1
+        let timing = insertion.takeTimings()
+        if timing.count > 1 {
+            rmDebug(String(format: "🗣 Dictation indicator: %d caret reads, mean %.0f ms, slowest %.0f ms",
+                           timing.count, timing.mean, timing.slowest))
+        }
+        guard shown else { return }
+        shown = false
+        overlay.hide()
+    }
+}
+
 // MARK: - Controller
 
 /// One hold at a time: begin on Siri down, end once the bridge has drained after release.
@@ -266,7 +414,15 @@ final class DictationController: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
 
+    private let indicator = DictationIndicator()
     private var recorder: DictationRecorder?
+    /// The streaming side of the hold that is recording, if it streams.
+    private var live: DictationLiveHold?
+    /// The newest hold's typewriter: the next hold waits for it, so keystrokes never interleave.
+    private var lastTypewriter: DictationTypewriter?
+    private var lastFollow: TimeInterval = 0
+    private var followPending = false
+    private var lastEmit: TimeInterval = 0
     private var recordingStartedAt = Date.distantPast
     /// Increments per hold so a slow transcript from an older hold never overwrites a newer
     /// hold's status. Its text is still typed: the user spoke it.
@@ -303,49 +459,115 @@ final class DictationController: ObservableObject {
             fail("The VibeRemote audio device is missing. Install the audio driver in Settings › Remote.")
             return
         }
+        let live = settings.provider == .seedASR && settings.seedStreaming ? startStream(settings) : nil
+        let session = live?.session
         let recorder = DictationRecorder()
         do {
-            try recorder.start(deviceID: device)
+            try recorder.start(deviceID: device) { [weak self] samples in
+                session?.append(samples)
+                let rms = DictationLevelMeter.rms(samples)
+                Task { @MainActor in self?.indicator.hear(rms: rms) }
+            }
         } catch {
+            live?.cancel()
+            live?.typewriter.stop("recording failed")
             fail(error.localizedDescription)
             return
         }
         self.recorder = recorder
+        self.live = live
         recordingStartedAt = Date()
         holdCount += 1
         phase = .recording
-        rmDebug("🗣 Dictation recording (\(settings.provider.rawValue))")
+        indicator.listen()
+        rmDebug("🗣 Dictation recording (\(settings.provider.rawValue)\(live == nil ? "" : ", streaming"))")
     }
+
+    private func startStream(_ settings: DictationSettings) -> DictationLiveHold? {
+        guard let key = DictationKeychain.key(for: .seedASR) else { return nil }
+        let liveHold = DictationLiveHold(typewriter: DictationTypewriter(after: lastTypewriter))
+        let session = SeedStreamingSession { [weak liveHold] event in
+            Task { @MainActor in liveHold?.handle(event) }
+        }
+        liveHold.session = session
+        liveHold.typewriter.onEmit = { [weak self] in self?.followCaret() }
+        session.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
+                                                   resourceID: settings.seedStreamResourceID),
+                      appID: settings.seedAppID)
+        lastTypewriter = liveHold.typewriter
+        return liveHold
+    }
+
+    /// Caret reads at most every 30 ms, each a moment after the keystroke that asked for it:
+    /// Chromium updates its accessibility tree asynchronously, so a read made in the same
+    /// instant still sees the caret where it was. Every emit is covered by a read that starts
+    /// after it, so the bubble ends where the words do.
+    private func followCaret() {
+        lastEmit = ProcessInfo.processInfo.systemUptime
+        guard !followPending else { return }
+        followPending = true
+        let delay = max(Self.followSettle, Self.followInterval - (lastEmit - lastFollow))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.followPending = false
+                self.lastFollow = ProcessInfo.processInfo.systemUptime
+                self.indicator.follow()
+                // A keystroke that landed just before this read may not be visible to it yet.
+                if self.lastFollow - self.lastEmit < Self.followSettle { self.followCaret() }
+            }
+        }
+    }
+
+    /// The reader already coalesces (one read in flight, latest waiting), so this only keeps
+    /// a fast typist from queueing a read per keystroke.
+    private static let followInterval: TimeInterval = 0.03
+    private static let followSettle: TimeInterval = 0.02
 
     func end() {
         guard let recorder else { return }
         self.recorder = nil
         let hold = holdCount
+        let live = self.live
+        self.live = nil
         let settings = DictationSettings.load()
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: Self.drainGrace)
             let audio = recorder.stop()
-            await self.finish(audio, settings: settings, hold: hold)
+            live?.session?.finish()
+            await self.finish(audio, settings: settings, hold: hold, live: live)
         }
     }
 
-    private func finish(_ audio: DictationAudio, settings: DictationSettings, hold: Int) async {
+    private func finish(_ audio: DictationAudio, settings: DictationSettings, hold: Int,
+                        live: DictationLiveHold?) async {
+        // A later hold owns the indicator once it has begun; only the current hold moves it.
         guard audio.duration >= Self.minimumDuration else {
-            if hold == holdCount { phase = .idle }
+            live?.cancel()
+            live?.typewriter.stop("hold too short")
+            if hold == holdCount { indicator.hide(); phase = .idle }
             return
         }
         guard audio.rms > 0.000_1 else {
+            live?.cancel()
+            live?.typewriter.stop("no audio")
             if hold == holdCount { fail("No audio arrived. Check that the voice bridge is running.") }
             return
         }
-        if hold == holdCount { phase = .transcribing }
+        if hold == holdCount { phase = .transcribing; indicator.recognize() }
+        if let live {
+            await finishStreaming(live, audio: audio, settings: settings, hold: hold)
+            return
+        }
         let started = Date()
         do {
             let engine = try await Self.engine(for: settings)
             let text = DictationTyper.normalized(try await engine.transcribe(audio, language: settings.language))
             let elapsed = Date().timeIntervalSince(started)
-            rmDebug(String(format: "🗣 Dictation %@: %.1f s audio → %d chars in %.2f s",
-                           settings.provider.rawValue, audio.duration, text.count, elapsed))
+            rmDebug(String(format: "🗣 Dictation %@: %.1f s audio (peak %.0f dBFS) → %d chars in %.2f s",
+                           settings.provider.rawValue, audio.duration,
+                           DictationLevelMeter.peakDecibels(audio.samples), text.count, elapsed))
+            if hold == holdCount { indicator.hide() }
             guard !text.isEmpty else {
                 if hold == holdCount { phase = .finished("No speech recognized.") }
                 return
@@ -361,7 +583,49 @@ final class DictationController: ObservableObject {
         }
     }
 
+    /// The stream's final result wins; if the stream failed or never answered, the recorded
+    /// clip goes through the one-shot flash API instead. Either way the typewriter reconciles
+    /// what is already on screen with the answer, so a fallback only replaces the tail that
+    /// differs.
+    private func finishStreaming(_ live: DictationLiveHold, audio: DictationAudio,
+                                 settings: DictationSettings, hold: Int) async {
+        let released = Date()
+        await live.waitForEnd(timeout: 4)
+        var text = live.succeeded ? (live.latest?.text ?? "") : nil
+        let route = text == nil ? "flash fallback (\(live.failure ?? "unknown"))" : "stream"
+        if text == nil {
+            do {
+                text = try await Self.engine(for: settings).transcribe(audio, language: settings.language)
+            } catch {
+                rmDebug("⚠️ Dictation seedASR fallback failed: \(error.localizedDescription)")
+                await live.typewriter.finish(nil)
+                if hold == holdCount { fail(error.localizedDescription) }
+                return
+            }
+        }
+        let final = DictationTyper.normalized(text ?? "")
+        await live.typewriter.finish(final)
+        let elapsed = Date().timeIntervalSince(released)
+        let firstText = live.firstTextAt.map { String(format: "%.2f s", $0.timeIntervalSince(live.startedAt)) } ?? "none"
+        let stopped = live.typewriter.stoppedReason
+        rmDebug(String(format: "🗣 Dictation seedASR %@: %.1f s audio (peak %.0f dBFS), %d updates, first text %@ → %d chars, %d corrected, settled %.2f s after release%@",
+                       route, audio.duration, DictationLevelMeter.peakDecibels(audio.samples), live.partials,
+                       firstText, final.count, live.typewriter.deletedCharacters, elapsed,
+                       stopped.map { ", stopped: \($0)" } ?? ""))
+        guard hold == holdCount else { return }
+        indicator.hide()
+        if let stopped {
+            phase = .finished("Stopped typing because \(stopped).")
+        } else if final.isEmpty {
+            phase = .finished("No speech recognized.")
+        } else {
+            phase = .finished(String(format: "Typed %d characters as you spoke; settled %.1f s after release.",
+                                     final.count, elapsed))
+        }
+    }
+
     private func fail(_ message: String) {
+        indicator.hide()
         phase = .failed(message)
         NSSound.beep()
     }

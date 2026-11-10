@@ -50,7 +50,7 @@ enum RemoteButtonMapping {
         else { return nil }
         let menu: [ButtonAction] = [.enterKey, .shiftEnter, .commandEnter, .backspace, .escKey, .ctrlC,
                                     .undo, .redo, .bulletIndent, .bulletOutdent, .skillPicker,
-                                    .launchAgentClient, .none]
+                                    .slashSkill, .dollarSkill, .launchAgentClient, .none]
         let baseline = defaultAction(button: button, generation: generation, siriAction: .spaceKey)
         let offered = button == "tv" ? menu.filter(\.isInstant) : menu
         return [baseline] + offered.filter { $0 != baseline }

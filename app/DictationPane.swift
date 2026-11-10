@@ -66,32 +66,26 @@ final class DictationSettingsStore: ObservableObject {
 }
 
 struct DictationPane: View {
-    let siriAction: ButtonAction
-    let setSiriAction: (ButtonAction) -> Void
+    /// Read only: the profiles whose Siri is set to Dictation. The Siri button's own choice in
+    /// Settings › Remote is the one switch (per profile), so this pane carries no second toggle.
+    let profiles: [String]
+    /// Every profile resolves Siri to Dictation, so naming them adds nothing.
+    var everywhere = false
     @StateObject private var store = DictationSettingsStore()
     @ObservedObject private var controller = DictationController.shared
     @State private var keyDraft = ""
 
-    private var enabled: Binding<Bool> {
-        Binding(
-            get: { siriAction == .vibeDictation },
-            set: { on in
-                let fallback = remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction ?? .spaceKey
-                setSiriAction(on ? .vibeDictation : fallback)
-                if on, store.microphone == .notDetermined { store.requestMicrophone() }
-            }
-        )
+    private var usage: String {
+        guard !profiles.isEmpty else {
+            return "Siri holds the key your own dictation app listens for. To have VibeRemote transcribe instead, choose Dictation for the Siri button in the Remote pane."
+        }
+        let scope = everywhere ? "" : " Siri uses it in: \(ListFormatter.localizedString(byJoining: profiles))."
+        return "Hold Siri and speak. VibeRemote turns what you say into text and types it where your cursor is.\(scope)"
     }
 
     var body: some View {
         SettingsPane(title: "Dictation") {
             Section {
-                SettingsRow(title: "VibeRemote Dictation") {
-                    Toggle("", isOn: enabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .accessibilityIdentifier("settings.dictation.enabled")
-                }
                 if store.microphone != .authorized {
                     SettingsRow(title: "Microphone Access",
                                 subtitle: "VibeRemote records the remote's microphone from its own audio device.",
@@ -101,9 +95,7 @@ struct DictationPane: View {
                     }
                 }
             } footer: {
-                Text(enabled.wrappedValue
-                     ? "Hold Siri and speak. When you let go, VibeRemote turns what you said into text and types it where your cursor is."
-                     : "Siri holds the key your own dictation app listens for. Turn this on to let VibeRemote transcribe instead.")
+                Text(usage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -198,6 +190,12 @@ struct DictationPane: View {
         case .seedASR:
             Section {
                 keyRow(provider: .seedASR, prompt: "API key or Access Token")
+                SettingsRow(title: "Type While Speaking",
+                            subtitle: "Words appear as you talk and correct themselves as recognition firms up.") {
+                    Toggle("", isOn: $store.settings.seedStreaming)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
                 SettingsRow(title: "App ID") {
                     TextField("", text: $store.settings.seedAppID, prompt: Text("Older console only"))
                         .textFieldStyle(.roundedBorder)

@@ -122,6 +122,10 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case redo = "Redo"
     /// Siri only (2026-11-08): VibeRemote records the hold and types the transcript itself.
     case vibeDictation = "VibeRemote Dictation"
+    /// Per-app profiles (2026-11-10): the Skill trigger pinned to one host's character instead
+    /// of `skillPicker`'s detection of the frontmost app. Claude's seed uses `/`, ChatGPT's `$`.
+    case slashSkill = "Skill Picker: /"
+    case dollarSkill = "Skill Picker: $"
 
     var requiresHold: Bool {
         switch self {
@@ -146,7 +150,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
     var isInstant: Bool {
         switch self {
         case .enterKey, .shiftEnter, .commandEnter, .escKey, .ctrlC, .undo, .redo,
-             .launchAgentClient, .skillPicker, .bulletIndent, .bulletOutdent, .none:
+             .launchAgentClient, .skillPicker, .slashSkill, .dollarSkill, .bulletIndent, .bulletOutdent, .none:
             return true
         default:
             return false
@@ -163,6 +167,12 @@ enum ButtonAction: String, CaseIterable, Sendable {
             return "Outdent, or remove the current list item"
         case .vibeDictation:
             return "VibeRemote transcribes what you say while Siri is held and types it"
+        case .skillPicker:
+            return "Types the frontmost app's skill trigger: $ in ChatGPT / Codex, / elsewhere"
+        case .slashSkill:
+            return "Types / (Claude's skill and command menu)"
+        case .dollarSkill:
+            return "Types $ (Codex's skill menu)"
         default: return rawValue
         }
     }
@@ -250,18 +260,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private var onboardingWindowController: OnboardingWindowController?
     private let microphoneBridgeManager: MicrophoneBridgeManager
     private let remoteBatteryReader = RemoteBatteryReader()
-    private static let siriButtonKey = "siri"
-    private static let siriButtonDefaultsKey = "siriButtonAction"
-    private static let siriButtonDefaultAction: ButtonAction =
-        remoteButtonDescriptors.first { $0.key == siriButtonKey }?.defaultAction ?? .spaceKey
-    /// Siri is the only customizable physical button.
-    private var siriButtonAction: ButtonAction = MenuBarManager.loadSiriButtonAction()
+    /// General plus the per-app profiles; see `ButtonProfileSet`. Siri and the pills' choices
+    /// live here, per remote family because the two layouts differ.
+    private var profiles = ButtonProfileStore.load()
+    /// The profile Settings is showing and editing. Not saved: Settings opens on General.
+    private var editingProfileID = ButtonProfile.generalID
+    private var profileLatch = ButtonProfileLatch()
     var touchStatus = "Waiting for a remote touch surface"
     private var remoteConnected = false
     private var remoteGeneration: RemoteGeneration = .unknown
-    /// Settings' per-button choices, per remote family because the two layouts differ.
-    private var buttonOverrides: [RemoteGeneration: [String: ButtonAction]] = MenuBarManager.loadButtonOverrides()
-    private static let buttonOverridesDefaultsKey = "buttonActionOverrides"
     /// The remote's own Bluetooth name, shown under the connection state. nil falls back to
     /// the hardware family, which is all we know before any interface opens.
     private var remoteName: String?
@@ -484,19 +491,22 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         NSApp.windowsMenu = windowMenu
     }
 
-    private var settingsSnapshot: RemoteSettingsSnapshot {
+    private var settingsSnapshot: RemoteSettingsSnapshot { snapshot(profile: editingProfileID) }
+
+    /// Onboarding only ever sets General's Siri, so it reads General whatever Settings shows.
+    private func snapshot(profile id: String) -> RemoteSettingsSnapshot {
         RemoteSettingsSnapshot(
             connected: remoteConnected,
             batteryPercent: remoteBatteryPercent,
-            siriAction: siriButtonAction,
+            siriAction: profiles.siriAction(profile: id),
             generation: remoteGeneration,
             idleTimeout: remoteIdleTimeout,
             remoteName: remoteName,
-            buttonOverrides: buttonOverrides[remoteGeneration] ?? [:]
+            buttonOverrides: profiles.overrides(profile: id, generation: remoteGeneration),
+            profiles: profiles,
+            editingProfileID: id
         )
     }
-
-
 
     private var onboardingAccess: OnboardingAccess {
         let helperState = PrivilegedHelperClient.shared.state
@@ -517,14 +527,14 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         // A new guide starts from the current choice without changing it until Finish.
         if onboardingWindowController?.window?.isVisible != true && onboardingWindowController?.window?.isMiniaturized != true {
             onboardingWindowController = OnboardingWindowController(
-                snapshot: settingsSnapshot, access: onboardingAccess,
+                snapshot: snapshot(profile: ButtonProfile.generalID), access: onboardingAccess,
                 actions: OnboardingActions(
                     requestBluetooth: { [weak self] in self?.requestBluetoothAccessHandler?() },
                     requestInput: { [weak self] in self?.requestInputAccessHandler?() },
                     requestAccessibility: { [weak self] in self?.requestControlAccessHandler?() },
                     setUpHelper: { [weak self] in self?.setUpPrivilegedHelper() },
                     installAudio: { [weak self] in self?.installAudioDriver() }),
-                finish: { [weak self] action in self?.setSiriButtonAction(action) })
+                finish: { [weak self] action in self?.setSiriButtonAction(action, profile: ButtonProfile.generalID) })
         }
         onboardingWindowController?.show()
     }
@@ -532,7 +542,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     @objc func restartOnboarding() {
         rmDebug("🧭 Onboarding restart requested")
         showOnboarding()
-        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
+        onboardingWindowController?.update(snapshot: snapshot(profile: ButtonProfile.generalID), access: onboardingAccess)
         onboardingWindowController?.restart()
     }
 
@@ -543,17 +553,20 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(
                 snapshot: settingsSnapshot,
-                setSiriAction: { [weak self] action in self?.setSiriButtonAction(action) },
-                resetSiriAction: { [weak self] in
-                    self?.setRemoteIdleTimeout(.defaultValue)
-                    self?.resetButtonOverrides()
-                    self?.setSiriButtonAction(Self.siriButtonDefaultAction)
+                setSiriAction: { [weak self] action in
+                    guard let self else { return }
+                    self.setSiriButtonAction(action, profile: self.editingProfileID)
                 },
+                resetSiriAction: { [weak self] in self?.restoreEditingProfile() },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
                 actions: SettingsActions(
                     installAudioDriver: { [weak self] in self?.installAudioDriver() },
                     setUpHelper: { [weak self] in self?.setUpPrivilegedHelper() },
                     setButtonAction: { [weak self] button, action in self?.setButtonAction(action, for: button) },
+                    followGeneral: { [weak self] button in self?.followGeneral(button) },
+                    selectProfile: { [weak self] id in self?.selectProfile(id) },
+                    addProfile: { [weak self] bundleID, name in self?.addProfile(bundleID: bundleID, name: name) },
+                    removeProfile: { [weak self] id in self?.removeProfile(id) },
                     restartBridge: { [weak self] in self?.startMicrophoneBridge() },
                     copyDiagnostics: { [weak self] in self?.copyDiagnostics() },
                     openAppLog: { [weak self] in self?.openAppLog() },
@@ -565,7 +578,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
         settingsWindowController?.update(settingsSnapshot)
         publishDiagnostics(cachedDiagnostics)
-        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
+        onboardingWindowController?.update(snapshot: snapshot(profile: ButtonProfile.generalID), access: onboardingAccess)
         settingsWindowController?.show()
     }
 
@@ -722,7 +735,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         menu.removeAllItems()
         settingsWindowController?.update(settingsSnapshot)
         publishDiagnostics(cachedDiagnostics)
-        onboardingWindowController?.update(snapshot: settingsSnapshot, access: onboardingAccess)
+        onboardingWindowController?.update(snapshot: snapshot(profile: ButtonProfile.generalID), access: onboardingAccess)
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
         menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus))
@@ -1162,55 +1175,69 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     /// `generation` is the remote that produced the press, not necessarily the one the menu
     /// shows: a 1st-gen and a 2nd/3rd-gen remote can be paired at the same time and each must
-    /// keep its own profile.
-    func getMapping(for button: String, generation: RemoteGeneration? = nil) -> ButtonAction {
+    /// keep its own profile. `pressed` latches the frontmost app's profile at the press so the
+    /// release (and anything between) maps under the same one; nil just reads the current app.
+    func getMapping(for button: String, generation: RemoteGeneration? = nil, pressed: Bool? = nil) -> ButtonAction {
         let generation = generation ?? remoteGeneration
-        return RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriButtonAction,
-                                          overrides: buttonOverrides[generation] ?? [:])
-    }
-
-    /// Stored as `{generation: {button: action raw value}}`; unknown or no-longer-offered
-    /// entries are dropped on read so a stale choice can never reach the input path.
-    private static func loadButtonOverrides() -> [RemoteGeneration: [String: ButtonAction]] {
-        let stored = UserDefaults.standard.dictionary(forKey: buttonOverridesDefaultsKey) as? [String: [String: String]] ?? [:]
-        var result: [RemoteGeneration: [String: ButtonAction]] = [:]
-        for (rawGeneration, buttons) in stored {
-            guard let generation = RemoteGeneration(rawValue: rawGeneration) else { continue }
-            for (button, rawAction) in buttons {
-                guard let action = ButtonAction(rawValue: rawAction),
-                      RemoteButtonMapping.choices(button: button, generation: generation)?.contains(action) == true
-                else { continue }
-                result[generation, default: [:]][button] = action
-            }
+        let profiles = self.profiles
+        let id = profileLatch.profile(button: button, generation: generation, pressed: pressed) {
+            profiles.profileID(forFrontmost: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         }
-        return result
+        if pressed == true, id != ButtonProfile.generalID {
+            rmDebug("🗂 Profile \(profiles.profile(id: id)?.name ?? id) for \(button)")
+        }
+        return profiles.action(button: button, generation: generation, profile: id)
     }
 
-    /// Applies to the remote family Settings is showing. Choosing the default removes the entry.
+    /// Applies to the profile and remote family Settings is showing.
     private func setButtonAction(_ action: ButtonAction, for button: String) {
-        let generation = remoteGeneration
-        let key = RemoteButtonMapping.overrideKey(button)
-        guard let choices = RemoteButtonMapping.choices(button: key, generation: generation),
-              choices.contains(action) else { return }
-        if action == choices.first { buttonOverrides[generation]?[key] = nil }
-        else { buttonOverrides[generation, default: [:]][key] = action }
-        saveButtonOverrides()
+        profiles.set(action, for: button, generation: remoteGeneration, profile: editingProfileID)
+        saveProfiles()
+    }
+
+    /// An app profile's "Same as General" choice for one pill.
+    private func followGeneral(_ button: String) {
+        if button == "siri" {
+            profiles.setSiri(nil, profile: editingProfileID)
+        } else {
+            profiles.set(nil, for: button, generation: remoteGeneration, profile: editingProfileID)
+        }
+        saveProfiles()
+    }
+
+    private func selectProfile(_ id: String) {
+        guard profiles.profile(id: id) != nil, id != editingProfileID else { return }
+        editingProfileID = id
         rebuildMenu()
     }
 
-    private func resetButtonOverrides() {
-        buttonOverrides = [:]
-        saveButtonOverrides()
+    private func addProfile(bundleID: String, name: String) {
+        profiles.add(bundleID: bundleID, name: name)
+        editingProfileID = bundleID
+        rmDebug("🗂 Profile added: \(bundleID)")
+        saveProfiles()
     }
 
-    private func saveButtonOverrides() {
-        let stored = Dictionary(uniqueKeysWithValues: buttonOverrides.filter { !$0.value.isEmpty }.map {
-            ($0.key.rawValue, $0.value.mapValues(\.rawValue))
-        })
-        UserDefaults.standard.set(stored, forKey: Self.buttonOverridesDefaultsKey)
+    private func removeProfile(_ id: String) {
+        guard id != ButtonProfile.generalID else { return }
+        profiles.remove(id)
+        if editingProfileID == id { editingProfileID = ButtonProfile.generalID }
+        rmDebug("🗂 Profile removed: \(id)")
+        saveProfiles()
     }
 
+    /// Restore Defaults covers the profile Settings shows; Auto Disconnect is not per app, so
+    /// only General's restore resets it.
+    private func restoreEditingProfile() {
+        profiles.restore(editingProfileID)
+        if editingProfileID == ButtonProfile.generalID { setRemoteIdleTimeout(.defaultValue) }
+        saveProfiles()
+    }
 
+    private func saveProfiles() {
+        ButtonProfileStore.save(profiles)
+        rebuildMenu()
+    }
 
     func updateRemoteGeneration(_ generation: RemoteGeneration) {
         guard remoteGeneration != generation else { return }
@@ -1224,21 +1251,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         rebuildMenu()
     }
 
-    private static func loadSiriButtonAction() -> ButtonAction {
-        guard let raw = UserDefaults.standard.string(forKey: siriButtonDefaultsKey),
-              let action = ButtonAction(rawValue: raw),
-              // Profile-only composite actions are not valid user settings.
-              action.isAssignableToSiriButton else {
-            return siriButtonDefaultAction
-        }
-        return action
-    }
-
-    private func setSiriButtonAction(_ action: ButtonAction) {
-        guard action.isAssignableToSiriButton else { return }
-        siriButtonAction = action
-        UserDefaults.standard.set(action.rawValue, forKey: Self.siriButtonDefaultsKey)
-        rebuildMenu()
+    /// `nil` in an app profile follows General's Siri.
+    private func setSiriButtonAction(_ action: ButtonAction?, profile id: String) {
+        profiles.setSiri(action, profile: id)
+        saveProfiles()
     }
 
     private func setRemoteIdleTimeout(_ timeout: RemoteIdleTimeout) {

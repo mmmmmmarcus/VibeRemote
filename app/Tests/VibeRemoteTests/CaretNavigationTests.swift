@@ -904,4 +904,124 @@ final class CaretNavigationTests: XCTestCase {
                                   allowedLabels: ["Marcus Siri Remot"], now: now))
         XCTAssertTrue(parser.events(line: line, allowedLabels: ["Marcus Siri Remot"], now: now).isEmpty)
     }
+
+    /// An empty editor has no glyphs to calibrate against, but its caret can only be at the
+    /// start: the dictation indicator points there instead of not appearing at all.
+    func testEmptyEditorIndicatorSitsWhereTheFirstCharacterWillAppear() {
+        let field = CGRect(x: 100, y: 300, width: 400, height: 24)
+        let single = CaretInsertionPoint.editorStart(field)
+        XCTAssertEqual(single.minX, 103)
+        XCTAssertEqual(single.midY, field.midY, accuracy: 0.001, "centered in a single-line field")
+        XCTAssertEqual(single.height, 16)
+        let area = CGRect(x: 100, y: 300, width: 400, height: 160)
+        let multi = CaretInsertionPoint.editorStart(area)
+        XCTAssertEqual(multi.minY, 306, "near the top of a text area")
+        XCTAssertEqual(multi.height, 18)
+        for bounds in [field, area, CGRect(x: 0, y: 0, width: 50, height: 12)] {
+            let caret = CaretInsertionPoint.editorStart(bounds)
+            XCTAssertTrue(bounds.contains(CGPoint(x: caret.minX, y: caret.midY)))
+            XCTAssertEqual(caret.width, 2)
+        }
+        // Claude's empty composer reports "\n" with the caret at 0 (probed 2026-11-09).
+        XCTAssertTrue(CaretInsertionPoint.isEmptyEditor(text: "", caret: 0))
+        XCTAssertTrue(CaretInsertionPoint.isEmptyEditor(text: "\n", caret: 0))
+        XCTAssertTrue(CaretInsertionPoint.isEmptyEditor(text: "\n\n", caret: 0))
+        XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: "\n\n", caret: 1), "a later line is not the start")
+        XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: " ", caret: 0), "a space has a visible width")
+        XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: "a", caret: 0))
+    }
+
+    /// Dictation reuses the caret cursor, so the two must stay one shape in two colors:
+    /// identical artwork dimensions, and a clearly warmer body for the listening one.
+    @MainActor
+    func testDictationBubbleKeepsTheShapeAndTurnsOrange() throws {
+        let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+        func body(_ style: CaretBubbleStyle) throws -> (width: Int, height: Int, warmth: CGFloat) {
+            let image = try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, style: style))
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            var warmth: CGFloat = 0
+            var counted = 0
+            for x in 0..<bitmap.pixelsWide {
+                for y in 0..<bitmap.pixelsHigh {
+                    guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          pixel.alphaComponent > 0.9 else { continue }
+                    warmth += pixel.redComponent - pixel.blueComponent
+                    counted += 1
+                }
+            }
+            XCTAssertGreaterThan(counted, 0, "\(style) drew nothing opaque")
+            return (image.width, image.height, warmth / CGFloat(counted))
+        }
+        let positioning = try body(.positioning)
+        let dictation = try body(.dictation)
+        XCTAssertEqual(dictation.width, positioning.width)
+        XCTAssertEqual(dictation.height, positioning.height)
+        XCTAssertLessThan(abs(positioning.warmth), 0.05)
+        XCTAssertGreaterThan(dictation.warmth, 0.3)
+    }
+
+    /// The stem is drawn by the canvas rather than the artwork, so a style change has to
+    /// reach both — otherwise the orange bubble keeps sitting on a dark caret.
+    @MainActor
+    func testOverlayTintsTheStemAndRebuildsArtworkPerStyle() throws {
+        let overlay = CaretOverlay()
+        defer { overlay.hide(); overlay.panel?.close() }
+        let caret = CGRect(x: 220, y: 240, width: 0, height: 18)
+        let editor = CGRect(x: 100, y: 200, width: 320, height: 90)
+        overlay.show(caret: caret, editor: editor, progress: 1, present: false)
+        let canvas = try XCTUnwrap(overlay.canvas)
+        XCTAssertEqual(canvas.tint, NSColor.labelColor)
+        let positioning = try XCTUnwrap(canvas.artwork)
+        overlay.show(caret: caret, editor: editor, progress: 1, present: false, style: .dictation)
+        XCTAssertEqual(canvas.tint, NSColor.systemOrange)
+        XCTAssertFalse(try XCTUnwrap(canvas.artwork) === positioning)
+        XCTAssertEqual(canvas.stemRect.height, caret.height)
+    }
+
+    /// The live glyph has to actually change what is drawn: a silent mic, a loud mic and the
+    /// spinner must be three different pictures, all inside the same bubble.
+    @MainActor
+    func testDictationGlyphShowsLevelAndRecognizing() throws {
+        let overlay = CaretOverlay()
+        defer { overlay.hide(); overlay.panel?.close() }
+        let caret = CGRect(x: 220, y: 240, width: 0, height: 18)
+        overlay.show(caret: caret, editor: CGRect(x: 100, y: 200, width: 320, height: 90),
+                     progress: 1, present: false, style: .dictation)
+        let canvas = try XCTUnwrap(overlay.canvas)
+        canvas.appearance = NSAppearance(named: .aqua)
+        canvas.opacity = 1; canvas.expansion = 1; canvas.symbolOpacity = 1
+        func render() throws -> NSBitmapImageRep {
+            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+            canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+            return bitmap
+        }
+        func differing(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> Int {
+            var count = 0
+            for x in 0..<a.pixelsWide {
+                for y in 0..<a.pixelsHigh where a.colorAt(x: x, y: y) != b.colorAt(x: x, y: y) { count += 1 }
+            }
+            return count
+        }
+        overlay.setGlyph(.listening)
+        canvas.level = 0
+        let silent = try render()
+        canvas.level = 1
+        let loud = try render()
+        overlay.setGlyph(.recognizing)
+        XCTAssertEqual(canvas.level, 0, "switching glyphs restarts the meter")
+        let spinning = try render()
+        XCTAssertGreaterThan(differing(silent, loud), 20)
+        XCTAssertGreaterThan(differing(loud, spinning), 20)
+
+        // The spinner turns with time; the level eases toward its target.
+        let angle = canvas.spinnerAngle
+        XCTAssertTrue(overlay.advanceGlyph(elapsed: 0.1))
+        XCTAssertNotEqual(canvas.spinnerAngle, angle)
+        overlay.setGlyph(.listening)
+        overlay.setLevel(1)
+        overlay.advanceGlyph(elapsed: 0.05)
+        XCTAssertGreaterThan(canvas.level, 0.7)
+        overlay.hide()
+        XCTAssertFalse(overlay.advanceGlyph(elapsed: 0.05), "a hidden bubble stops its glyph clock")
+    }
 }
