@@ -13,46 +13,47 @@ Both Siri Remote hardware families are supported:
 | Buttons | Menu, TV, Play/Pause, Siri, Volume ± | adds Power and Mute |
 | Microphone | HID report sniffing (see below) | dedicated `0xFA` audio collection |
 
-The app detects which one is attached and switches profile automatically; both can be
+The app detects which one is attached and switches layout automatically; both can be
 paired at the same time and each keeps its own mapping.
 
 ## Features
 
-- A native settings window with a visual Siri Remote button guide, opened from
-  the menu bar's **Settings…** item (also available while the remote is disconnected).
-  Both physical layouts use the supplied STEP CAD assemblies (second/third generation share one model); drag to turn, release to restore the guide.
-- Settings has a 3D remote with read-only button callouts on the left, and controls
-  for Siri Button and auto disconnect on the right, with a text-cursor usage guide.
-  There is one working configuration: microphone and fixed buttons stay available.
-  Touch no longer moves the mouse, clicks, scrolls, or deletes text.
-  The menu bar retains status, Settings and Quit; Advanced Menu opens from the remote. Settings' ellipsis
-  includes Audio Output and Diagnostics. Only Siri's action is customizable.
-  Aluminum Play/Pause opens Skill ($ in Codex, / in other apps); Mute opens Advanced Menu.
-- Automatic per-generation button profiles. The 1st-gen remote has no Mute and
-  no Power key, so the mute button's two roles move to buttons that do exist:
-  holding TV arms the modifier chords (TV+Menu clears the input, TV+Play/Pause
-  sends Esc) while a TV tap still sends Shift+Enter, and holding Play/Pause
-  previously provided Skill/client actions; Play/Pause now opens Advanced Menu. On both generations,
-  **Siri Button Mapping** applies only to the physical Siri button; the touch
-  surface / clickpad center confirms text-cursor positioning after a slide enters it. The remote microphone transmits only
-  while the physical Siri button is held.
-- Press-and-hold mappings for Space, Right Command, and Right Option.
-- Back/Menu deletes a word immediately on every press, including rapid repeated
-  presses; holding repeats word deletion. Use Advanced Menu to clear the full input.
-- Tap the Skill / Modifier button to type `$` in the focused ChatGPT / Codex desktop
-  client or `/` in Claude and other apps. Focus is checked on release; holding the
-  button still enables modifier chords. This also applies when Siri is assigned this action.
+- A native settings window (System Settings style) opened from the menu bar's **Settings…**
+  item, also while the remote is disconnected. The Remote pane shows the remote as a 3D
+  model built from the supplied STEP CAD assemblies (second/third generation share one
+  model); drag to turn it, release to restore the guide pose.
+- Every button's function sits in a glass pill beside the remote. Click a pill to choose
+  what Back/Menu, TV, Play/Pause, Volume Up/Down, Power and Siri do; the Advanced Menu
+  opener, the clickpad / touch surface and the directions keep fixed roles.
+- **Per-app button profiles** (see [Button profiles](#button-profiles)): General for every
+  app, plus Claude and ChatGPT out of the box, and any installed app you add.
+- **VibeRemote Dictation** (see [Dictation](#dictation)): choose Dictation for Siri and the
+  app transcribes the remote's microphone itself — streaming text as you speak with Seed
+  ASR — with an orange cursor at the insertion point while you hold Siri.
+- Automatic per-generation layouts. The 1st-gen remote has no Mute and no Power key, so
+  the mute button's two roles move to buttons that do exist: holding TV arms the modifier
+  chords (TV+Menu clears the input, TV+Play/Pause sends Esc) while a TV tap still sends
+  Shift+Enter, and its Play/Pause opens Advanced Menu. On both generations Siri's mapping
+  applies only to the physical Siri button, and the remote microphone transmits only while
+  that button is held.
+- Press-and-hold Siri mappings for Space, Right Command and Right Option (for your own
+  dictation app), or VibeRemote Dictation.
+- Back/Menu deletes a word immediately on every press, including rapid repeated presses;
+  holding repeats word deletion. Use Advanced Menu to clear the full input.
+- Aluminum Play/Pause opens the Skill picker: `/` in Claude, `$` in ChatGPT / Codex (set
+  by their profiles), and the frontmost app's trigger in General. Mute opens Advanced Menu.
+- Slide on the touch surface / clickpad ring to position the text cursor; see
+  [Text-cursor positioning](#text-cursor-positioning).
 - Siri Remote connection and battery status in the menu bar.
-- Suppression of duplicate HID/media-key delivery without globally unloading
-  macOS's remote-control daemon.
-- Optional microphone bridge with diagnostics.
-- Computer-use agent: hold TV (half a second) to open the agent panel, hold Siri to
-  dictate a task into it with your usual dictation app, and press Select to run it.
-  See [Computer-use agent](#computer-use-agent).
+- Suppression of duplicate HID/media-key delivery without globally unloading macOS's
+  remote-control daemon.
+- Microphone bridge with diagnostics.
+- Computer Use: hold TV (half a second) to open the callout, dictate a task into it, and
+  run it. See [Computer-use agent](#computer-use-agent).
 
 ## Requirements
 
-- macOS 11 or newer.
+- macOS 27 or newer on Apple Silicon.
 - Xcode Command Line Tools.
 - A paired Siri Remote.
 - Accessibility, Input Monitoring, and Bluetooth permission for the built app.
@@ -331,22 +332,58 @@ mode sends one arrow key. Accumulating 1000 units of touch travel still enters c
 mode; lift then only settles its preview, and center click or idle confirms it.
 
 Siri directly performs its configured action on press and release. Advanced Menu and
-active caret positioning retain priority. The command assistant and computer-use
-backends have been removed.
+active caret positioning retain priority.
 
 ## Firmware research
 
 First-generation microphone-control findings, evidence, diagnostic tools and cross-machine handoff are indexed in [Design/Research/README.md](Design/Research/README.md). Software-only capture and a reliable unlock/restore workflow remain unverified; current button mappings are unchanged.
 
+## Button profiles
+
+The Remote pane edits one profile at a time, picked from the **Profile** row above the
+remote. **General** applies in every app that has no profile of its own. The menu lists
+every profile with its app icon, **Add App** offers every installed application, and an
+app profile can be removed from the same menu. Claude and ChatGPT come preinstalled; their
+only difference from General is the Skill trigger on Play/Pause (`/` and `$`).
+
+An app profile keeps only the buttons you change for it. Every other button does what
+General does, and keeps following later changes to General; a pill's **Same as General**
+choice undoes an app-specific change. Siri is per profile too, so Dictation can be on in
+one app and off in another. Restore Defaults restores the profile on screen (Claude and
+ChatGPT return to their Skill trigger); only General's also resets Auto Disconnect.
+
+The profile is chosen by the app in front when a button goes down and kept until it comes
+back up, so a press that switches apps — or a hold you carry into another app — releases
+the way it pressed.
+
+## Dictation
+
+Choose **Dictation** on the Siri pill (in any profile) to have VibeRemote transcribe the
+remote's microphone instead of holding a key for a third-party dictation app; Settings ›
+Dictation picks the service (Apple, WhisperKit on device, OpenAI, or Seed ASR from
+ByteDance/Volcengine) and the language, and stores your own API keys in the keychain.
+
+With Seed ASR and **Type While Speaking** on, the words stream into the focused editor as you
+speak and are corrected in place as the recognizer refines them; otherwise the clip is
+transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
+corrections only ever delete what the current hold typed.
+
+While you hold Siri, an orange copy of the caret-positioning cursor stands at the insertion
+point. Its mic fills with the live input level, so a stopped bridge reads visibly empty, it
+follows the words as they stream in, and a spinner replaces the mic while the last words are
+recognized. It works in native text views and in web editors such as Claude's and ChatGPT's
+composers; an editor that exposes no caret geometry shows no cursor, but dictation still types.
+
 ## First launch and Settings
 
-New users get a three-step introduction: basic controls, Bluetooth/permission setup,
-and Siri-button mapping. Finish saves the choice; closing leaves setup unfinished.
-Existing configured installations keep their mapping without a forced tour.
-Reopen the guide with **Settings → More → Getting Started…**.
+New users get a short introduction: features, Bluetooth/permission and helper setup, the
+Siri mapping, then the main gestures. Finish saves the choice; closing leaves setup
+unfinished. Existing configured installations keep their mapping without a forced tour.
+Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
+the menu bar.
 
-Settings keeps the remote diagram, Siri mapping, auto-disconnect and update controls.
-Audio Output, Diagnostics and Reset remain in More.
+Settings panes: Remote (profiles, the remote and its pills, Auto Disconnect, status), Text
+Cursor, Dictation, Computer Use, Diagnostics and About (version and updates).
 
 ## Automatic updates
 

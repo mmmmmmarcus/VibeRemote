@@ -338,14 +338,23 @@ final class DictationIndicator {
         }
         active = true
         generation += 1
-        let token = generation
+        firstRead(token: generation, attempt: 1)
+    }
+
+    /// Some apps drop an accessibility query now and then (ChatGPT answers most within a
+    /// millisecond but some take 40–120 ms or report no value), so a failed first read is
+    /// retried briefly before the hold is left without a cursor until its first words arrive.
+    private func firstRead(token: Int, attempt: Int) {
         insertion.read { [weak self] point in
-            guard let self, token == self.generation, self.active else { return }
-            guard let point else {
+            guard let self, token == self.generation, self.active, !self.shown else { return }
+            if let point { self.place(point); return }
+            guard attempt < 4 else {
                 rmDebug("🗣 Dictation indicator: no editable caret in the focused element")
                 return
             }
-            self.place(point)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                MainActor.assumeIsolated { self?.firstRead(token: token, attempt: attempt + 1) }
+            }
         }
     }
 

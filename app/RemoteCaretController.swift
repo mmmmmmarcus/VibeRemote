@@ -630,9 +630,18 @@ private final class CaretAXQuery {
         func blocked(_ reason: String) -> Editor? { entryDiagnostic(reason); return nil }
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.02)
-        guard let rawApplication = attribute(system, kAXFocusedApplicationAttribute),
-              CFGetTypeID(rawApplication) == AXUIElementGetTypeID() else { return nil }
-        let application = unsafeBitCast(rawApplication, to: AXUIElement.self)
+        let application: AXUIElement
+        if let rawApplication = attribute(system, kAXFocusedApplicationAttribute),
+           CFGetTypeID(rawApplication) == AXUIElementGetTypeID() {
+            application = unsafeBitCast(rawApplication, to: AXUIElement.self)
+        } else if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front > 0 {
+            // The system-wide focused-application query can fail outright (kAXErrorCannotComplete
+            // at once, whatever the timeout) while the app itself answers: observed with ChatGPT
+            // (com.openai.codex) in front on 2026-11-10, which left it with no dictation cursor.
+            application = AXUIElementCreateApplication(front)
+        } else {
+            return blocked("focused application unavailable")
+        }
         var pid: pid_t = 0
         guard AXUIElementGetPid(application, &pid) == .success, pid > 0 else { return nil }
         AXUIElementSetMessagingTimeout(application, 0.02)
@@ -998,6 +1007,25 @@ final class CaretInsertionPoint: @unchecked Sendable {
         let height = min(18, max(10, bounds.height - 8))
         let top = bounds.height <= 36 ? bounds.midY - height / 2 : bounds.minY + 6
         return CGRect(x: bounds.minX + 3, y: top, width: 2, height: height)
+    }
+}
+
+/// `VibeRemote --probe-caret`: one dictation-cursor read of whatever editor has focus, with the
+/// query's step-by-step diagnostics in the app log (`Caret entry:` lines). For finding why an app shows no
+/// cursor without holding Siri. Prints geometry and capabilities only, never editor text.
+enum CaretProbe {
+    static func run() -> Never {
+        let query = CaretAXQuery()
+        query.diagnosingEntry = true
+        if let editor = query.observe() {
+            print("editor bounds=\(editor.bounds) length=\(editor.text.utf16.count) caret=\(editor.selection.location) onlyNewlines=\(editor.text.allSatisfy(\.isNewline))")
+            print("caret:", query.caret(Int(editor.selection.location), in: editor).map { "\($0)" } ?? "nil")
+        } else {
+            print("observe failed")
+        }
+        // The diagnostics go to the app log on its own queue; let them land.
+        Thread.sleep(forTimeInterval: 0.5)
+        exit(0)
     }
 }
 

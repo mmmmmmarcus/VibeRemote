@@ -13,6 +13,11 @@ if let index = CommandLine.arguments.firstIndex(of: "--verify-seed-stream"),
     SeedStreamVerifier.run(path: CommandLine.arguments[index + 1])
 }
 
+// Developer check of where the dictation cursor would stand in the focused editor; see CaretProbe.
+if CommandLine.arguments.contains("--probe-caret") {
+    CaretProbe.run()
+}
+
 // A macOS application's entry point runs on the process main thread. Make that
 // executor contract explicit so the AppKit delegate remains main-actor isolated.
 MainActor.assumeIsolated {

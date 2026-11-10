@@ -188,8 +188,9 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 
 ## Button mappings and hold behavior
 
-`remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. The Siri
-button is the only customizable button (`siriButtonAction`). `RemoteButtonMapping` is the
+`remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. Settings'
+pills customize Siri and the ordinary buttons per profile (`ButtonProfileSet`; see Per-app
+button profiles). `RemoteButtonMapping` is the
 shared source of truth for runtime and Settings callouts. Aluminum Play/Pause opens Skill outside Advanced Menu (`.skillPicker`), using the
 focused app trigger. Its native media event remains consumed. Within the menu it stops the current task.
 The aluminum menu TV slot is now inactive and consumes both edges without a newline;
@@ -268,9 +269,10 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes: **Remote** (the CAD
-remote with a clickable glass pill per button, Auto Disconnect, Restore Defaults for the
-Siri choice, every pill choice and Auto Disconnect, and a **Status** section:
+disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes: **Remote** (a Profile
+row choosing which profile is edited, the CAD remote with a clickable glass pill per button,
+Auto Disconnect, Restore Defaults for that profile's choices — General's also resets Auto
+Disconnect — and a **Status** section:
 Bluetooth connection with the remote's name, battery (connected only) and bridge
 start/restart; Helper and Audio Driver rows appear only while
 `SettingsDiagnostics.setupIssues` names them, using the same rules as the status-menu
@@ -1170,7 +1172,7 @@ held. It is Siri-only; no other button's `choices` may include it.
   editor, else its leading edge (3 pt in). "Empty" means only line breaks with the caret at 0:
   Claude's ProseMirror composer reports an empty document as "\n", and Chromium answers every
   caret-rect query there with a zero rect at (0, y), so it always takes the leading-edge path.
-  The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
+  ChatGPT (com.openai.codex, Chromium-based) showed no cursor on 2026-11-10: the system-wide `AXFocusedApplication` query fails at once there (-25204, any timeout), so `CaretAXQuery.observe` falls back to `AXUIElementCreateApplication(frontmost pid)`. Its composer reports its placeholder as the value ("Work with Codex\n"), which calibrates as glyphs at the field start, and it drops an occasional query (40–120 ms or no value), so the indicator retries its first read up to four times 100 ms apart. The user confirmed the cursor in ChatGPT's input bar the same day. `VibeRemote --probe-caret` runs one read of the focused editor and logs `Caret entry:` steps (geometry only). The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
   on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 20 ms after the keystroke that asked for it (at most one per 30 ms) because Chromium's AX tree lags. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding only when that yields no insertion geometry. The indicator logs read count, mean and slowest read per hold. A non-empty
   editor without usable geometry still gets no indicator. The log records which accuracy was used. It hides before the transcript is typed, because the caret
   moves as the words land. Seen on screen from a real aluminum-remote hold on 2026-11-09.
