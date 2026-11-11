@@ -284,20 +284,23 @@ struct SettingsActions {
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     /// `agent` keeps its raw value so saved accessibility identifiers and any stored
-    /// selection survive the renames of its visible title (now "Computer Use").
-    case remote, cursor, dictation, agent, diagnostics, about
+    /// selection survive the renames of its visible title (now "Computer Use"); `remote`
+    /// likewise keeps its raw value after becoming "Controls" (2026-11-11).
+    case remote, device, dictation, agent, diagnostics, about
     var id: String { rawValue }
 
-    /// The remote itself and what it drives. Buttons and Microphone used to be panes of
-    /// their own; both now live on the Remote pane, so no single-row group is left behind.
-    static let remoteTabs: [SettingsTab] = [.remote, .cursor, .dictation, .agent]
+    /// The remote and what it drives. Controls is everything about what the buttons and the
+    /// touch surface do (button assignment, profiles, the text-cursor gesture); Device is the
+    /// physical remote itself (its connection, battery, bridge and Auto Disconnect). Split at the
+    /// user's request on 2026-11-11, when Text Cursor also merged into Controls.
+    static let remoteTabs: [SettingsTab] = [.remote, .device, .dictation, .agent]
     /// About the app rather than the remote, so they close the sidebar in their own group.
     static let appTabs: [SettingsTab] = [.diagnostics, .about]
 
     var title: String {
         switch self {
-        case .remote: return "Remote"
-        case .cursor: return "Text Cursor"
+        case .remote: return "Controls"
+        case .device: return "Device"
         case .dictation: return "Dictation"
         case .agent: return "Computer Use"
         case .diagnostics: return "Diagnostics"
@@ -307,8 +310,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .remote: return "appletvremote.gen4"
-        case .cursor: return "character.cursor.ibeam"
+        case .remote: return "button.programmable"
+        case .device: return "appletvremote.gen4"
         case .dictation: return "waveform"
         case .agent: return "cursorarrow.motionlines"
         case .diagnostics: return "stethoscope"
@@ -318,12 +321,12 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 }
 
 extension RemoteSettingsSnapshot {
-    /// Restore Defaults covers the edited profile's choices (and, for General, Auto Disconnect).
+    /// Restore Defaults (on Controls) covers the edited profile's button choices only; Auto
+    /// Disconnect lives on the Device pane with its own picker.
     var isAtDefaults: Bool {
-        // Auto Disconnect is not per app, so only General's Restore Defaults covers it. For
-        // General the effective values above are its own choices.
+        // For General the effective values above are its own choices.
         guard editingProfileID == ButtonProfile.generalID else { return profiles.isAtDefaults(editingProfileID) }
-        return siriAction == ButtonProfileSet.siriDefault && idleTimeout == .defaultValue && buttonOverrides.isEmpty
+        return siriAction == ButtonProfileSet.siriDefault && buttonOverrides.isEmpty
     }
 }
 

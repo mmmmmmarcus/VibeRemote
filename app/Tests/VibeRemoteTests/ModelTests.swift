@@ -1069,6 +1069,15 @@ final class ModelTests: XCTestCase {
                 try png.write(to: URL(fileURLWithPath: "\(output)-\(generation == .glassTouchSurface ? "first" : "new")-\(name).png"))
             }
             }
+            // The Device pane has no 3D view, so AppKit's cached display captures all of it.
+            controller.model.tab = .device
+            frame.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            let device = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+            window.effectiveAppearance.performAsCurrentDrawingAppearance { frame.cacheDisplay(in: frame.bounds, to: device) }
+            try XCTUnwrap(device.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: "\(output)-device.png"))
+            controller.model.tab = .remote
         }
         window.close()
         XCTAssertTrue(controller.window === window)
@@ -1185,9 +1194,11 @@ final class ModelTests: XCTestCase {
         // groups must still account for every tab.
         XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.appTabs, SettingsTab.allCases)
         XCTAssertEqual(SettingsTab.agent.title, "Computer Use")
-        // Settings is also the manual, so the one gesture that is not a button is a pane
-        // of its own, grouped with the remote rather than with the app's own settings.
-        XCTAssertEqual(SettingsTab.cursor.title, "Text Cursor")
+        // Controls holds what the buttons and the touch surface do (the text-cursor guide merged
+        // into it); Device holds the physical remote's own settings and status (2026-11-11).
+        XCTAssertEqual(SettingsTab.remote.title, "Controls")
+        XCTAssertEqual(SettingsTab.device.title, "Device")
+        XCTAssertEqual(SettingsTab.remote.rawValue, "remote", "the raw value survives the rename")
         // Computer Use's demo runs on one loop: the instruction types out, the agent
         // acts, the result rests. Each phase has to land inside the loop, in order.
         XCTAssertEqual(AgentDemo.phase(0.05, from: 0.12, to: 0.40), 0, accuracy: 1e-9)
@@ -1198,8 +1209,7 @@ final class ModelTests: XCTestCase {
             let progress = AgentDemo.progress(at: Date(timeIntervalSinceReferenceDate: date))
             XCTAssertTrue((0..<1).contains(progress), "loop left 0..<1 at \(date)")
         }
-        XCTAssertTrue(SettingsTab.remoteTabs.contains(.cursor))
-        XCTAssertFalse(SettingsTab.appTabs.contains(.cursor))
+        XCTAssertEqual(SettingsTab.remoteTabs, [.remote, .device, .dictation, .agent])
     }
 
     func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {

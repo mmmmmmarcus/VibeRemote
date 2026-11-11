@@ -19,7 +19,7 @@ paired at the same time and each keeps its own mapping.
 ## Features
 
 - A native settings window (System Settings style) opened from the menu bar's **Settings…**
-  item, also while the remote is disconnected. The Remote pane shows the remote as a 3D
+  item, also while the remote is disconnected. The Controls pane shows the remote as a 3D
   model built from the supplied STEP CAD assemblies (second/third generation share one
   model); drag to turn it, release to restore the guide pose.
 - Every button's function sits in a glass pill beside the remote. Click a pill to choose
@@ -340,8 +340,8 @@ First-generation microphone-control findings, evidence, diagnostic tools and cro
 
 ## Button profiles
 
-The Remote pane edits one profile at a time, picked from the **Profile** row above the
-remote. **General** applies in every app that has no profile of its own. The menu lists
+The Controls pane edits one profile at a time, picked from the profile switcher in the
+window's top-right corner. **General** applies in every app that has no profile of its own. The menu lists
 every profile with its app icon, **Add App** offers every installed application, and an
 app profile can be removed from the same menu. Claude and ChatGPT come preinstalled; their
 only difference from General is the Skill trigger on Play/Pause (`/` and `$`).
@@ -350,7 +350,7 @@ An app profile keeps only the buttons you change for it. Every other button does
 General does, and keeps following later changes to General; a pill's **Same as General**
 choice undoes an app-specific change. Siri is per profile too, so Dictation can be on in
 one app and off in another. Restore Defaults restores the profile on screen (Claude and
-ChatGPT return to their Skill trigger); only General's also resets Auto Disconnect.
+ChatGPT return to their Skill trigger); Auto Disconnect lives on the Device pane.
 
 The profile is chosen by the app in front when a button goes down and kept until it comes
 back up, so a press that switches apps — or a hold you carry into another app — releases
@@ -382,8 +382,9 @@ unfinished. Existing configured installations keep their mapping without a force
 Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
 the menu bar.
 
-Settings panes: Remote (profiles, the remote and its pills, Auto Disconnect, status), Text
-Cursor, Dictation, Computer Use, Diagnostics and About (version and updates).
+Settings panes: Controls (the profile switcher, the remote and its pills, and the text-cursor
+guide), Device (Auto Disconnect and status), Dictation, Computer Use, Diagnostics and About
+(version and updates).
 
 ## Automatic updates
 

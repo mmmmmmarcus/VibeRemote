@@ -1226,11 +1226,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         saveProfiles()
     }
 
-    /// Restore Defaults covers the profile Settings shows; Auto Disconnect is not per app, so
-    /// only General's restore resets it.
+    /// Restore Defaults covers the button choices of the profile Settings shows. Auto Disconnect
+    /// moved to the Device pane (2026-11-11) and is not part of it.
     private func restoreEditingProfile() {
         profiles.restore(editingProfileID)
-        if editingProfileID == ButtonProfile.generalID { setRemoteIdleTimeout(.defaultValue) }
         saveProfiles()
     }
 

@@ -59,9 +59,9 @@ struct SettingsRootView: View {
                 switch model.tab {
                 case .remote:
                     RemotePane(model: model, setSiriAction: setSiriAction,
-                               restoreDefaults: restoreDefaults, setIdleTimeout: setIdleTimeout,
-                               actions: actions)
-                case .cursor: TextCursorPane(generation: model.snapshot.generation)
+                               restoreDefaults: restoreDefaults, actions: actions)
+                case .device:
+                    DevicePane(model: model, setIdleTimeout: setIdleTimeout, actions: actions)
                 case .dictation:
                     let using = model.snapshot.profiles.profiles(withSiri: .vibeDictation)
                     DictationPane(profiles: using.map(\.name),
@@ -77,9 +77,19 @@ struct SettingsRootView: View {
             // column joins them so the pill below can line up with that title.
             .ignoresSafeArea(edges: .top)
             .overlay(alignment: .topTrailing) {
-                SetupIssuePill(diagnostics: model.diagnostics, actions: actions)
-                    .padding(.top, SettingsMetrics.xxl - 2)
-                    .padding(.trailing, SettingsMetrics.xxl)
+                // The title-bar band's corner: the setup fix on every pane, and the Controls pane's
+                // profile switcher (user's request, 2026-11-11), both Liquid Glass capsules.
+                HStack(spacing: SettingsMetrics.sm) {
+                    SetupIssuePill(diagnostics: model.diagnostics, actions: actions)
+                    if model.tab == .remote {
+                        ProfilePicker(snapshot: model.snapshot, actions: actions)
+                    }
+                }
+                .padding(.top, SettingsMetrics.xxl - 2)
+                .padding(.trailing, SettingsMetrics.xxl)
+                // Same band as the pane title, which also ignores the title-bar safe area;
+                // without this the capsules sat a title bar's height below the title.
+                .ignoresSafeArea(edges: .top)
             }
             .background(SettingsVisualEffect(material: .contentBackground).ignoresSafeArea())
         }
@@ -415,33 +425,55 @@ struct SettingsListActions<Content: View>: View {
 
 // MARK: - Remote
 
-/// Everything about the paired remote on one pane: the CAD hero with a glass pill beside
-/// every button (click one to choose what that button does), Auto Disconnect, and one Status
-/// section for the link, battery and microphone bridge. The Siri pop-up row and the read-only
-/// Buttons list were replaced by the pills (2026-11-08).
+/// Controls: what the remote's buttons and touch surface do. The profile switcher sits in the
+/// window's top-right corner; below, the CAD remote with a glass pill beside every button (click
+/// one to choose what that button does) and Restore Defaults for the edited profile, then the
+/// text-cursor gesture, which is the one control that is no button (formerly its own Text Cursor
+/// pane; merged on 2026-11-11 at the user's request, with the device settings moved to Device).
 private struct RemotePane: View {
     @ObservedObject var model: RemoteSettingsModel
     let setSiriAction: (ButtonAction) -> Void
     let restoreDefaults: () -> Void
-    let setIdleTimeout: (RemoteIdleTimeout) -> Void
     let actions: SettingsActions
 
     var body: some View {
-        SettingsPane(title: "Remote") {
-            Section {
-                SettingsRow(title: "Profile", subtitle: profileSubtitle) {
-                    ProfilePicker(snapshot: model.snapshot, actions: actions)
-                }
-            }
+        SettingsPane(title: "Controls") {
             Section {
                 RemoteHero(snapshot: model.snapshot, setSiriAction: setSiriAction,
                            setButtonAction: actions.setButtonAction, followGeneral: actions.followGeneral)
             } footer: {
-                Text(heroFooter)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                VStack(spacing: SettingsMetrics.sm) {
+                    Text(heroFooter)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    SettingsListActions {
+                        Button("Restore Defaults", action: restoreDefaults)
+                            .disabled(model.snapshot.isAtDefaults)
+                            .accessibilityIdentifier("settings.restoreDefaults")
+                    }
+                }
             }
+            TextCursorGuide(generation: model.snapshot.generation)
+        }
+    }
+
+    private var heroFooter: String {
+        model.snapshot.editingProfile.isGeneral
+            ? "General applies in every app without a profile of its own. Click a label to choose what its button does."
+            : "Click a label to change it for \(model.snapshot.editingProfile.name) only. Buttons you leave alone do what General says."
+    }
+}
+
+/// Device: the physical remote itself rather than what its buttons do — Auto Disconnect and one
+/// Status section for the link, battery, microphone bridge and any setup step still open.
+private struct DevicePane: View {
+    @ObservedObject var model: RemoteSettingsModel
+    let setIdleTimeout: (RemoteIdleTimeout) -> Void
+    let actions: SettingsActions
+
+    var body: some View {
+        SettingsPane(title: "Device") {
             Section {
                 SettingsRow(title: "Auto Disconnect") {
                     Picker("", selection: Binding(get: { model.snapshot.idleTimeout }, set: setIdleTimeout)) {
@@ -451,31 +483,16 @@ private struct RemotePane: View {
                     .fixedSize()
                     .accessibilityIdentifier("settings.idleTimeout")
                 }
-            } header: {
-                Text("Controls")
             } footer: {
-                SettingsListActions {
-                    Button("Restore Defaults", action: restoreDefaults)
-                        .disabled(model.snapshot.isAtDefaults)
-                        .accessibilityIdentifier("settings.restoreDefaults")
-                }
+                Text("Closes the remote's Bluetooth link after it sits unused this long, to save its battery. Press any button to wake it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Status") { status }
         }
         // The bridge and setup rows read the same async snapshot the Diagnostics pane does.
         .onAppear(perform: actions.refreshDiagnostics)
-    }
-
-    private var profileSubtitle: String {
-        let profile = model.snapshot.editingProfile
-        return profile.isGeneral ? "Used in every app without a profile of its own."
-            : "Used while \(profile.name) is in front."
-    }
-
-    private var heroFooter: String {
-        model.snapshot.editingProfile.isGeneral
-            ? "Click a label to choose what its button does. Siri takes the held keys dictation apps listen for."
-            : "Click a label to change it for \(model.snapshot.editingProfile.name) only. Buttons you leave alone do what General says."
     }
 
     /// Connection, battery and the voice bridge always show. Helper and Audio Driver appear
@@ -754,9 +771,10 @@ enum ButtonActionMenu {
     }
 }
 
-/// The Remote pane's profile menu: every profile with its app icon (the edited one checked),
-/// then Add App, a submenu of every installed app that has no profile yet, and Remove for an
-/// app profile. A native menu like the pills', so it reads as a macOS pop-up.
+/// The Controls pane's profile switcher, a Liquid Glass capsule in the window's top-right corner:
+/// the edited profile's app icon and name (General has no icon). Its native menu lists every
+/// profile (the edited one checked), then Add App, a submenu of every installed app that has no
+/// profile yet, and Remove for an app profile.
 private struct ProfilePicker: View {
     let snapshot: RemoteSettingsSnapshot
     let actions: SettingsActions
@@ -764,16 +782,20 @@ private struct ProfilePicker: View {
     var body: some View {
         let profile = snapshot.editingProfile
         Button(action: present) {
-            HStack(spacing: 6) {
-                Image(nsImage: InstalledApp.icon(bundleID: profile.bundleID))
-                    .resizable()
-                    .frame(width: 16, height: 16)
+            HStack(spacing: SettingsMetrics.sm) {
+                if profile.bundleID != nil {
+                    Image(nsImage: InstalledApp.icon(bundleID: profile.bundleID))
+                        .resizable()
+                        .frame(width: 16, height: 16)
+                }
                 Text(profile.name)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
         }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.capsule)
         .fixedSize()
         .accessibilityLabel("Profile: \(profile.name)")
         .accessibilityIdentifier("settings.profile")
@@ -788,7 +810,7 @@ private struct ProfilePicker: View {
             let item = NSMenuItem(title: profile.name, action: #selector(ProfileMenuTarget.select(_:)), keyEquivalent: "")
             item.target = target
             item.representedObject = profile.id
-            item.image = InstalledApp.icon(bundleID: profile.bundleID)
+            item.attributedTitle = Self.menuTitle(profile.name, bundleID: profile.bundleID)
             if profile.id == snapshot.editingProfileID { item.state = .on; checked = item }
             menu.addItem(item)
         }
@@ -801,7 +823,7 @@ private struct ProfilePicker: View {
             let item = NSMenuItem(title: app.name, action: #selector(ProfileMenuTarget.add(_:)), keyEquivalent: "")
             item.target = target
             item.representedObject = [app.bundleID, app.name]
-            item.image = InstalledApp.icon(bundleID: app.bundleID)
+            item.attributedTitle = Self.menuTitle(app.name, bundleID: app.bundleID)
             apps.addItem(item)
         }
         add.submenu = apps
@@ -817,6 +839,25 @@ private struct ProfilePicker: View {
         // popUp tracks synchronously, so `target` outlives the selection.
         menu.popUp(positioning: checked, at: NSEvent.mouseLocation, in: nil)
         withExtendedLifetime(target) {}
+    }
+}
+
+extension ProfilePicker {
+    /// The app's icon, then its name. On macOS 27 this pop-up menu does not draw
+    /// `NSMenuItem.image` at all (verified 2026-11-11 with enabled and disabled items), so the
+    /// icon rides in the title as a text attachment. General has no icon; an invisible spacer
+    /// of the same width keeps every name on one left edge.
+    @MainActor
+    static func menuTitle(_ name: String, bundleID: String?) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: 0)
+        let attachment = NSTextAttachment()
+        attachment.image = bundleID == nil ? NSImage(size: NSSize(width: 16, height: 16))
+            : InstalledApp.icon(bundleID: bundleID)
+        // Centre the 16 pt icon on the text's cap height rather than sitting it on the baseline.
+        attachment.bounds = CGRect(x: 0, y: (font.capHeight - 16) / 2, width: 16, height: 16)
+        let title = NSMutableAttributedString(attachment: attachment)
+        title.append(NSAttributedString(string: "  " + name, attributes: [.font: font]))
+        return title
     }
 }
 
@@ -889,7 +930,7 @@ private final class AgentSettingsStore: ObservableObject {
 /// System Settings shows a gesture as the abstract input on the left and what it produces
 /// on the right; Computer Use is harder to picture than a button, so it gets the same
 /// treatment. The remote is the technical drawing the first-run guide uses, which keeps this
-/// pane and Text Cursor in one visual family.
+/// pane and the Controls pane's text-cursor guide in one visual family.
 struct AgentDemo: View {
     let generation: RemoteGeneration
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1105,7 +1146,9 @@ private struct AgentPane: View {
 /// Settings doubles as the manual, so the one gesture that is not a button gets a pane of
 /// its own. The looping demo is the same one the first-run guide draws; it is the whole
 /// point of the pane, and it pauses itself under Reduce Motion.
-private struct TextCursorPane: View {
+/// The text-cursor gesture, as sections of the Controls pane: the animated demo, then
+/// start/move/confirm/cancel steps that name the family's own parts.
+private struct TextCursorGuide: View {
     let generation: RemoteGeneration
 
     /// The 1st-gen remote has no Power key, and its flat glass is a touch surface rather
@@ -1114,13 +1157,15 @@ private struct TextCursorPane: View {
     private var surface: String { glass ? "touch surface" : "clickpad" }
 
     var body: some View {
-        SettingsPane(title: "Text Cursor") {
+        Group {
             Section {
                 CursorDemo(generation: generation)
                     .frame(height: 96)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, SettingsMetrics.md)
                     .accessibilityHidden(true)
+            } header: {
+                Text("Text Cursor")
             }
             Section {
                 step("hand.point.up.left", "Start",

@@ -269,19 +269,19 @@ is no separate stopped-bridge banner and no pause badge. Do not repeat Bluetooth
 or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
-disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes: **Remote** (a Profile
-row choosing which profile is edited, the CAD remote with a clickable glass pill per button,
-Auto Disconnect, Restore Defaults for that profile's choices — General's also resets Auto
-Disconnect — and a **Status** section:
-Bluetooth connection with the remote's name, battery (connected only) and bridge
-start/restart; Helper and Audio Driver rows appear only while
+disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes (split and renamed 2026-11-11 at the user's request; the `.remote` raw value is kept for
+saved state): **Controls** (`SettingsTab.remote`: everything about what the buttons and touch
+surface do — the profile switcher as a Liquid Glass capsule in the window's top-right corner beside
+the Fix pill, with app icons and none for General — macOS 27 does not draw `NSMenuItem.image` in this pop-up menu, so each item's icon is a text attachment in its `attributedTitle` (`ProfilePicker.menuTitle`), with an invisible 16 pt spacer for General so names share one edge, verified by screenshot 2026-11-11; the CAD remote with a clickable glass pill per
+button; Restore Defaults for the edited profile's button choices only; then the text-cursor guide,
+formerly its own Text Cursor pane: the onboarding `CursorDemo` loop and start/move/confirm/cancel
+steps that name the family's own parts — touch surface versus clickpad, and no Power key on the
+1st-gen remote), **Device** (the physical remote: Auto Disconnect with its own picker, and a
+**Status** section: Bluetooth connection with the remote's name, battery (connected only) and
+bridge start/restart; Helper and Audio Driver rows appear only while
 `SettingsDiagnostics.setupIssues` names them, using the same rules as the status-menu
 banners and onboarding — helper not approved, or no supported output device at all. There is
-no Output Device row), **Text Cursor**
-(Settings is also the manual, so the one gesture that is no button gets its own pane:
-the onboarding `CursorDemo` loop, then start/move/confirm/cancel steps that name the
-family's own parts — touch surface versus clickpad, and no Power key on the 1st-gen
-remote), **Computer Use**
+no Output Device row), **Computer Use**
 (an `AgentDemo` illustration in System Settings' shape — abstract input on the left, what
 it produces on the right: the TV hold on the blueprint remote, then the instruction typing
 into the Computer Use callout and the pointer pressing a control in the front window — then backend,
@@ -877,7 +877,7 @@ Settings callouts show function text only, never a second line repeating physica
 names. RemoteSettingsLayout selects the physical generation. Center = caret positioning;
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
-Sidebar groups are Remote (Remote, Text Cursor, Dictation, Computer Use) and VibeRemote
+Sidebar groups are Remote (Controls, Device, Dictation, Computer Use) and VibeRemote
 (Diagnostics, About); `remoteTabs + appTabs` must stay equal to `allCases`.
 While any setup issue exists, every pane shows a Liquid Glass capsule in the window's top-right
 corner (red `exclamationmark.triangle.fill`, "Fix Helper", "Fix Audio Driver" or "Fix Setup")
@@ -885,7 +885,7 @@ whose popover is the step-by-step guide with the same actions as the rows. Setti
 diagnostics when its window becomes key, so approving the helper in System Settings clears it.
 
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
-configuration lives in Settings; the audio driver install lives in the Remote pane's
+configuration lives in Settings; the audio driver install lives in the Device pane's
 Status section (and the Fix guide) and diagnostics in the Diagnostics pane.
 Keep live status, Settings and Quit, plus actionable permission/setup
 errors when applicable. Row order below the status summary is Settings…, Check for Updates,
@@ -1043,8 +1043,8 @@ Historical benchmark reports are evidence only, not supported runtime features.
 
 ### Per-app button profiles (2026-11-10)
 
-At the user's request (modeled on Logitech's app-specific profiles) Settings › Remote edits one
-**profile** at a time, chosen from a Profile row above the remote. General is the fallback: an app
+At the user's request (modeled on Logitech's app-specific profiles) Settings › Controls edits one
+**profile** at a time, chosen from the glass profile switcher in the window's top-right corner. General is the fallback: an app
 without a profile, and every button an app profile leaves alone, does what General says. An app
 profile stores only the buttons the user changed for it (pill menu "Same as General (X)" goes back),
 so later General edits still reach the rest. Siri is per profile too (nil follows General), which
@@ -1065,8 +1065,8 @@ makes Dictation per app; the Dictation pane lists the profiles whose Siri resolv
   sends (Advanced Menu ownership, chords, guards and passive-capture ownership are untouched).
 - Add App lists `.app` bundles in /Applications (and one vendor folder level), /Applications/Utilities,
   /System/Applications(/Utilities) and ~/Applications, deduplicated by bundle ID (~44 ms here).
-  Restore Defaults restores the edited profile (an app profile returns to its seed); only General's
-  also resets Auto Disconnect. The user confirmed the Profile row, Add App and per-app buttons work
+  Restore Defaults restores the edited profile's button choices (an app profile returns to its seed);
+  Auto Disconnect is on the Device pane and is not part of it. The user confirmed the Profile row, Add App and per-app buttons work
   on 2026-11-10.
 
 ### Computer-use agent (2026-11-01)

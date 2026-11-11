@@ -67,7 +67,7 @@ final class DictationSettingsStore: ObservableObject {
 
 struct DictationPane: View {
     /// Read only: the profiles whose Siri is set to Dictation. The Siri button's own choice in
-    /// Settings › Remote is the one switch (per profile), so this pane carries no second toggle.
+    /// Settings › Controls is the one switch (per profile), so this pane carries no second toggle.
     let profiles: [String]
     /// Every profile resolves Siri to Dictation, so naming them adds nothing.
     var everywhere = false
@@ -77,7 +77,7 @@ struct DictationPane: View {
 
     private var usage: String {
         guard !profiles.isEmpty else {
-            return "Siri holds the key your own dictation app listens for. To have VibeRemote transcribe instead, choose Dictation for the Siri button in the Remote pane."
+            return "Siri holds the key your own dictation app listens for. To have VibeRemote transcribe instead, choose Dictation for the Siri button in the Controls pane."
         }
         let scope = everywhere ? "" : " Siri uses it in: \(ListFormatter.localizedString(byJoining: profiles))."
         return "Hold Siri and speak. VibeRemote turns what you say into text and types it where your cursor is.\(scope)"

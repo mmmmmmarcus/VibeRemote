@@ -498,7 +498,7 @@ final class DictationController: ObservableObject {
             return
         }
         guard let device = DictationAudioDevice.inputID() else {
-            fail("The VibeRemote audio device is missing. Install the audio driver in Settings › Remote.")
+            fail("The VibeRemote audio device is missing. Install the audio driver in Settings › Device.")
             return
         }
         let live = settings.provider == .seedASR && settings.seedStreaming ? startStream(settings) : nil
