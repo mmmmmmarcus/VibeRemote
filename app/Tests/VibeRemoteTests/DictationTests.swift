@@ -162,8 +162,12 @@ final class DictationTests: XCTestCase {
     /// Any sound fills the mic's stand at once; the capsule carries the volume.
     @MainActor
     func testMicFillsFromTheStandUp() {
+        // The quietest 50 ms window is the clip's noise floor.
+        let clip = [Float](repeating: 0.001, count: 1600) + [Float](repeating: 0.5, count: 1600)
+        XCTAssertEqual(DictationLevelMeter.floorDecibels(clip), -60, accuracy: 0.1)
+        XCTAssertEqual(DictationLevelMeter.peakDecibels(clip), DictationLevelMeter.decibels(rms: 0.5), accuracy: 0.1)
         XCTAssertEqual(CaretGlyphImages.fillFraction(level: 0), 0)
-        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 0.1), 0.37, accuracy: 0.001)
+        XCTAssertEqual(CaretGlyphImages.fillFraction(level: 0.1), 0.1, accuracy: 0.001, "no jump: the fill rises from empty")
         XCTAssertEqual(CaretGlyphImages.fillFraction(level: 1), 1)
         XCTAssertEqual(CaretGlyphImages.fillFraction(level: 3), 1)
     }

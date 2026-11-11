@@ -364,8 +364,8 @@ Dictation picks the service (Apple, WhisperKit on device, OpenAI, or Seed ASR fr
 ByteDance/Volcengine) and the language, and stores your own API keys in the keychain.
 
 With Seed ASR and **Type While Speaking** on, the words stream into the focused editor as you
-speak and are corrected in place as the recognizer refines them; otherwise the clip is
-transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
+speak. Text already typed is never deleted while you hold Siri; when you let go, the whole clip is recognized once more by the accurate recognizer and
+the text is refined in place. Without it the clip is transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
 corrections only ever delete what the current hold typed.
 
 While you hold Siri, an orange copy of the caret-positioning cursor stands at the insertion

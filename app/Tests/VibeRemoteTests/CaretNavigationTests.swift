@@ -929,6 +929,18 @@ final class CaretNavigationTests: XCTestCase {
         XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: "\n\n", caret: 1), "a later line is not the start")
         XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: " ", caret: 0), "a space has a visible width")
         XCTAssertFalse(CaretInsertionPoint.isEmptyEditor(text: "a", caret: 0))
+        // The text-end fallback: only line breaks may follow the caret.
+        XCTAssertTrue(CaretInsertionPoint.isAtTextEnd(text: "hello\n", caret: 5))
+        XCTAssertTrue(CaretInsertionPoint.isAtTextEnd(text: "你好", caret: 2))
+        XCTAssertFalse(CaretInsertionPoint.isAtTextEnd(text: "hello\n", caret: 3))
+        XCTAssertFalse(CaretInsertionPoint.isAtTextEnd(text: "\n", caret: 0), "empty takes the editor-start path")
+        let editor = CGRect(x: 400, y: 740, width: 640, height: 40)
+        XCTAssertEqual(CaretInsertionPoint.textEnd(leaf: CGRect(x: 424, y: 745, width: 49, height: 18), editor: editor),
+                       CGRect(x: 473, y: 745, width: 2, height: 18))
+        XCTAssertNil(CaretInsertionPoint.textEnd(leaf: CGRect(x: 424, y: 745, width: 600, height: 54), editor: editor),
+                     "a wrapped element's frame does not say where its last line ends")
+        XCTAssertNil(CaretInsertionPoint.textEnd(leaf: CGRect(x: 0, y: 33, width: 0, height: 0), editor: editor),
+                     "Chromium's unlaid-out 0×0 text gives no position")
     }
 
     /// Dictation reuses the caret cursor, so the two must stay one shape in two colors:

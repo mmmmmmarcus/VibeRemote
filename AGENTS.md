@@ -1173,14 +1173,15 @@ held. It is Siri-only; no other button's `choices` may include it.
   Claude's ProseMirror composer reports an empty document as "\n", and Chromium answers every
   caret-rect query there with a zero rect at (0, y), so it always takes the leading-edge path.
   ChatGPT (com.openai.codex, Chromium-based) showed no cursor on 2026-11-10: the system-wide `AXFocusedApplication` query fails at once there (-25204, any timeout), so `CaretAXQuery.observe` falls back to `AXUIElementCreateApplication(frontmost pid)`. Its composer reports its placeholder as the value ("Work with Codex\n"), which calibrates as glyphs at the field start, and it drops an occasional query (40–120 ms or no value), so the indicator retries its first read up to four times 100 ms apart. The user confirmed the cursor in ChatGPT's input bar the same day. `VibeRemote --probe-caret` runs one read of the focused editor and logs `Caret entry:` steps (geometry only). The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
-  on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 20 ms after the keystroke that asked for it (at most one per 30 ms) because Chromium's AX tree lags. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding only when that yields no insertion geometry. The indicator logs read count, mean and slowest read per hold. A non-empty
+  on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 8 ms after the keystroke that asked for it (at most one per 16 ms). Chromium's AX tree lags the keystroke, so a reading whose caret offset (`Reading.offset`) differs from `DictationTypewriter.expectedCaret` (anchor + typed UTF-16) is behind: it is still drawn (offset and rectangle come from the same tree, so it is an older position, not a wrong one) and the next read follows 30 ms later, up to 10 times after the last keystroke. An empty read retries the same way: right after a keystroke Chromium's value and text markers can disagree, which fails calibration, and before empty reads retried, the last keystroke's failed read was final and the bubble never followed in Claude or ChatGPT (2026-11-10). Do not hold such readings back: the first version did, every keystroke restarted its wait, and the bubble froze while words streamed ("off after the first word", 2026-11-10). The per-hold log counts readings behind the typewriter and empty reads with the query's last step (`CaretAXQuery.lastStep`), and the first-read failure line names that step too. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding when that yields no insertion geometry or no calibration. The calibration fallback matters in Claude: markers cached while the composer was empty carry no leaf anchors, so after the first streamed word every read failed with `calibration unavailable` (32 of 37 reads, 2026-11-10) until calibration also re-seeded fully. Empty-read reasons now separate `caret unavailable` from `caret outside editor (dx dy)`. The indicator logs read count, mean and slowest read per hold. Chromium computes per-character text geometry only in full accessibility mode; without it every text range and leaf marker measures 0×0 (or the whole editor), so calibration never succeeds once text is typed. On 2026-11-10 ChatGPT calibrated until it restarted at 08:43 UTC and never after; nothing in VibeRemote had enabled the mode. `CaretInsertionPoint.requestFullAccessibility` sets `AXManualAccessibility` once per process where the app exposes it (Electron, i.e. Claude). ChatGPT's shell refuses both that and `AXEnhancedUserInterface` (-25208), so the indicator (only, never caret positioning) falls back to `.textEnd`: with the caret after the last visible character, the right edge of the last AXStaticText frame (frames stay correct), if that frame is one line tall (8–30 pt). Wrapped text gives no position and the bubble keeps its last one. Probed in ChatGPT: textEnd (523, 805) for its placeholder. A non-empty
   editor without usable geometry still gets no indicator. The log records which accuracy was used. It hides before the transcript is typed, because the caret
   moves as the words land. Seen on screen from a real aluminum-remote hold on 2026-11-09.
   Live states (same day, user's request): while recording, the bubble's glyph is a `mic` outline
   that `mic.fill` fills from the bottom with the recorder's per-tap RMS (`DictationLevelMeter`:
   -45...-6 dBFS, recalibrated from real holds that peaked at -7 dBFS, where -14 pinned ordinary
-  speech at full; fast attack / slow release; any sound fills the stand, the capsule carries the
-  volume), so a stopped bridge reads visibly empty. While the clip is transcribed a spinner
+  speech at full; fast attack / slow release; the fill is proportional from empty — filling the
+  stand on any sound read as a jump and was dropped on 2026-11-10; the log's `floor` is each
+  clip's quietest 50 ms, for placing the meter floor just above the bridge's noise), so a stopped bridge reads visibly empty. While the clip is transcribed a spinner
   replaces the mic. `CaretGlyph` is drawn live by the canvas rather than baked into the cached
   artwork; nil keeps caret positioning's baked symbol. A 60 Hz glyph timer runs only while a
   glyph is shown and stops on hide. Only the current hold moves the indicator, so an aluminum
@@ -1214,11 +1215,18 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
   `volc.bigasr.sauc.duration` (流式语音识别大模型 1.0 小时版, enabled on the user's `default` app
   7967928849 with the same Access Token; 2.0 would be `volc.seedasr.sauc.duration`) and
   `X-Api-Connect-Id`. Frames: 4-byte header, big-endian sizes, server responses carry a sequence;
-  flags 0b0010 mark the last (negative) packet. Request `enable_nonstream: true` for Doubao's two
-  passes (`definite` only on the second), `result_type: full`, 16 kHz s16le PCM in 200 ms packets,
+  flags 0b0010 mark the last (negative) packet. `enable_nonstream` is **false** (2026-11-10, user's
+  request): Doubao's second pass re-recognized every pause-ended sentence while the user was still speaking, so a
+  long hold was rewritten several times before release. Refinement now happens once, after release, from the flash
+  API with the recorded clip; `result_type: full`, 16 kHz s16le PCM in 200 ms packets,
   no compression (the server answers in the client's; gzip is still decoded defensively).
 - `DictationTypewriter` is the only writer: partials, the final result and the flash fallback all
-  set its target, and it reconciles the screen by common prefix. Pace: one character per tick
+  set its target, and it reconciles the screen by common prefix. While Siri is held the target only grows
+  (`DictationTypewriterPlan.growth`, 2026-11-10, user's request: deleting and retyping partials looked unstable,
+  and the refined result replaces them after release anyway): it shows what two consecutive partials agree on,
+  and after a revision of shown text it continues after the shown text's last six characters, found again within
+  12 characters of the end of the agreed text, or pauses. Every correction happens in `finish`, toward the refined text. The user confirmed on 2026-11-11
+  that streaming now reads smooth and stable, with replacement only after release. Pace: one character per tick
   spread over ~0.18 s while nearly caught up (12–45 ms), more per tick as text backs up, ≤20
   UTF-16 units per key event; deletes up to 40 per tick then one settling tick. A later hold's
   typewriter waits for the previous one, so keystrokes never interleave.
@@ -1228,9 +1236,11 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
   length (a lagging editor gets six 30 ms retries). Any failure stops typing for that hold and
   leaves what is on screen; nothing is ever deleted beyond what the hold typed. Unreadable
   selection or focus proceeds on the remaining checks.
-- After release: drain grace, last packet, wait ≤4 s for the final; on failure or timeout the
-  recorded clip goes to the flash API and the typewriter reconciles toward that answer. The
-  orange bubble follows the caret (≤8 reads/s, trailing read) while text streams, spins after
+- After release: drain grace, last packet, wait ≤4 s for the stream's final, then send the recorded clip once to
+  the flash API and let the typewriter reconcile toward that refined answer (route `stream + refined`; a failed or
+  empty refinement keeps the streamed text). If the stream itself failed or timed out, the same flash call is the
+  fallback. The
+  orange bubble follows the caret (stale-checked reads, see the indicator notes) while text streams, spins after
   release, and hides once the typewriter has settled. The log line records route, update count,
   time to first text, characters, corrected characters and settle time — never text.
 - `VibeRemote --verify-seed-stream <audio file>` streams a file through the same session in real

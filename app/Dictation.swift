@@ -295,6 +295,19 @@ enum DictationLevelMeter {
         return current + (target - current) * CGFloat(1 - exp(-max(0, elapsed) / time))
     }
 
+    /// The quietest 50 ms window of a finished clip: the bridge's background noise, which is
+    /// what the meter's floor should sit just above.
+    static func floorDecibels(_ samples: [Float], window: Int = 800) -> Float {
+        guard samples.count >= window else { return decibels(rms: rms(samples[...])) }
+        var floor = Float.greatestFiniteMagnitude
+        var start = 0
+        while start + window <= samples.count {
+            floor = min(floor, rms(samples[start..<(start + window)]))
+            start += window
+        }
+        return decibels(rms: floor)
+    }
+
     /// The loudest 50 ms window of a finished clip, for calibrating the meter from the log.
     static func peakDecibels(_ samples: [Float], window: Int = 800) -> Float {
         guard !samples.isEmpty else { return decibels(rms: 0) }
@@ -326,6 +339,8 @@ final class DictationIndicator {
     /// Bumped by every `listen` and `hide`, so a read that lands after the hold moved on is
     /// dropped instead of resurrecting the bubble.
     private var generation = 0
+    /// Readings dropped this hold because the editor had not caught up with the typewriter.
+    private var staleReads = 0
 
     /// Also used by an aluminum re-press that arrives while the previous hold is still being
     /// transcribed: the bubble is already up, so it only turns back into a listening mic.
@@ -349,7 +364,7 @@ final class DictationIndicator {
             guard let self, token == self.generation, self.active, !self.shown else { return }
             if let point { self.place(point); return }
             guard attempt < 4 else {
-                rmDebug("🗣 Dictation indicator: no editable caret in the focused element")
+                rmDebug("🗣 Dictation indicator: no editable caret in the focused element (\(self.insertion.lastFailure ?? "unknown"))")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -372,12 +387,28 @@ final class DictationIndicator {
     /// Streaming types while the bubble is up, so it moves with the caret to the end of the
     /// words. If the first read found no caret, the first words can still bring the bubble up.
     /// A failed read keeps the last good position rather than guessing.
-    func follow() {
+    ///
+    /// `expected` is where the typewriter has put the caret (UTF-16). Chromium updates its
+    /// accessibility tree a little after each keystroke, so a reading can still be at an older
+    /// caret. That position is consistent (offset and rectangle from the same tree), so it is
+    /// drawn, and `behind` asks the caller to read again at once until it catches up. (Holding
+    /// such readings back, as tried first, froze the bubble while words streamed continuously,
+    /// because every keystroke restarted the wait: "off after the first word", 2026-11-10.)
+    func follow(expected: Int?, behind: @escaping @MainActor @Sendable () -> Void) {
         guard active else { return }
         let token = generation
         insertion.read { [weak self] point in
-            guard let self, token == self.generation, self.active, let point else { return }
+            guard let self, token == self.generation, self.active else { return }
+            // An empty read is retried like a lagging one: right after a keystroke Chromium's
+            // value and text markers can disagree, which fails calibration (and calibration is
+            // what every later read needs). Without a retry the last keystroke's failed read
+            // was final, and the bubble never followed in Claude or ChatGPT (2026-11-10).
+            guard let point else { behind(); return }
             self.place(point)
+            if let expected, [.glyph, .textEnd].contains(point.accuracy), point.offset != expected {
+                self.staleReads += 1
+                behind()
+            }
         }
     }
 
@@ -397,9 +428,11 @@ final class DictationIndicator {
         generation += 1
         let timing = insertion.takeTimings()
         if timing.count > 1 {
-            rmDebug(String(format: "🗣 Dictation indicator: %d caret reads, mean %.0f ms, slowest %.0f ms",
-                           timing.count, timing.mean, timing.slowest))
+            let failed = timing.failed > 0 ? ", \(timing.failed) empty (last: \(insertion.lastFailure ?? "unknown"))" : ""
+            rmDebug(String(format: "🗣 Dictation indicator: %d caret reads (%d behind the typewriter%@), mean %.0f ms, slowest %.0f ms",
+                           timing.count, staleReads, failed, timing.mean, timing.slowest))
         }
+        staleReads = 0
         guard shown else { return }
         shown = false
         overlay.hide()
@@ -431,7 +464,7 @@ final class DictationController: ObservableObject {
     private var lastTypewriter: DictationTypewriter?
     private var lastFollow: TimeInterval = 0
     private var followPending = false
-    private var lastEmit: TimeInterval = 0
+    private var staleRetries = 0
     private var recordingStartedAt = Date.distantPast
     /// Increments per hold so a slow transcript from an older hold never overwrites a newer
     /// hold's status. Its text is still typed: the user spoke it.
@@ -507,31 +540,42 @@ final class DictationController: ObservableObject {
         return liveHold
     }
 
-    /// Caret reads at most every 30 ms, each a moment after the keystroke that asked for it:
-    /// Chromium updates its accessibility tree asynchronously, so a read made in the same
-    /// instant still sees the caret where it was. Every emit is covered by a read that starts
-    /// after it, so the bubble ends where the words do.
+    /// Reads follow each keystroke as soon as the editor can have seen it, at most one per
+    /// frame (the reader also keeps only one read in flight and the latest waiting). While a
+    /// reading is still behind the typewriter the next read follows a frame later, for up to
+    /// ~160 ms after the last keystroke, so the bubble catches up instead of waiting for one.
     private func followCaret() {
-        lastEmit = ProcessInfo.processInfo.systemUptime
+        staleRetries = 0
+        requestFollow(after: Self.followSettle)
+    }
+
+    private func requestFollow(after minimum: TimeInterval) {
         guard !followPending else { return }
         followPending = true
-        let delay = max(Self.followSettle, Self.followInterval - (lastEmit - lastFollow))
+        let sinceLast = ProcessInfo.processInfo.systemUptime - lastFollow
+        let delay = max(minimum, Self.followInterval - sinceLast)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.followPending = false
                 self.lastFollow = ProcessInfo.processInfo.systemUptime
-                self.indicator.follow()
-                // A keystroke that landed just before this read may not be visible to it yet.
-                if self.lastFollow - self.lastEmit < Self.followSettle { self.followCaret() }
+                self.indicator.follow(expected: self.lastTypewriter?.expectedCaret) { [weak self] in
+                    guard let self, self.staleRetries < Self.maximumStaleRetries else { return }
+                    self.staleRetries += 1
+                    self.requestFollow(after: Self.retryInterval)
+                }
             }
         }
     }
 
-    /// The reader already coalesces (one read in flight, latest waiting), so this only keeps
-    /// a fast typist from queueing a read per keystroke.
-    private static let followInterval: TimeInterval = 0.03
-    private static let followSettle: TimeInterval = 0.02
+    private static let followInterval: TimeInterval = 0.016
+    /// Long enough for the posted keystroke to reach the editor, so the first read is usually
+    /// already current.
+    private static let followSettle: TimeInterval = 0.008
+    private static let maximumStaleRetries = 10
+    /// Retries after an empty or lagging read wait a little longer than a frame, so the editor
+    /// can finish updating its accessibility tree in between (10 retries ≈ 300 ms).
+    private static let retryInterval: TimeInterval = 0.03
 
     func end() {
         guard let recorder else { return }
@@ -601,7 +645,25 @@ final class DictationController: ObservableObject {
         let released = Date()
         await live.waitForEnd(timeout: 4)
         var text = live.succeeded ? (live.latest?.text ?? "") : nil
-        let route = text == nil ? "flash fallback (\(live.failure ?? "unknown"))" : "stream"
+        var route = text == nil ? "flash fallback (\(live.failure ?? "unknown"))" : "stream"
+        if text != nil {
+            // The one refinement, after release: the stream ran its fast pass only, so the whole
+            // clip goes once to the accurate flash recognizer and the typewriter corrects what
+            // differs. A failed or empty refinement keeps the streamed text already on screen.
+            let streamed = text ?? ""
+            do {
+                let refined = try await Self.engine(for: settings).transcribe(audio, language: settings.language)
+                if refined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    route = "stream (refinement empty)"
+                } else {
+                    text = refined
+                    route = DictationTyper.normalized(refined) == DictationTyper.normalized(streamed)
+                        ? "stream + refined (unchanged)" : "stream + refined"
+                }
+            } catch {
+                route = "stream (refinement failed: \(error.localizedDescription))"
+            }
+        }
         if text == nil {
             do {
                 text = try await Self.engine(for: settings).transcribe(audio, language: settings.language)
@@ -617,8 +679,9 @@ final class DictationController: ObservableObject {
         let elapsed = Date().timeIntervalSince(released)
         let firstText = live.firstTextAt.map { String(format: "%.2f s", $0.timeIntervalSince(live.startedAt)) } ?? "none"
         let stopped = live.typewriter.stoppedReason
-        rmDebug(String(format: "🗣 Dictation seedASR %@: %.1f s audio (peak %.0f dBFS), %d updates, first text %@ → %d chars, %d corrected, settled %.2f s after release%@",
-                       route, audio.duration, DictationLevelMeter.peakDecibels(audio.samples), live.partials,
+        rmDebug(String(format: "🗣 Dictation seedASR %@: %.1f s audio (peak %.0f dBFS, floor %.0f dBFS), %d updates, first text %@ → %d chars, %d corrected, settled %.2f s after release%@",
+                       route, audio.duration, DictationLevelMeter.peakDecibels(audio.samples),
+                       DictationLevelMeter.floorDecibels(audio.samples), live.partials,
                        firstText, final.count, live.typewriter.deletedCharacters, elapsed,
                        stopped.map { ", stopped: \($0)" } ?? ""))
         guard hold == holdCount else { return }

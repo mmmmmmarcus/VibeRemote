@@ -664,6 +664,39 @@ private final class CaretAXQuery {
               position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite else { return blocked("selection or editor bounds unavailable") }
         return Editor(element: element, pid: pid, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
     }
+    /// The frame of the editor's last nonempty AXStaticText descendant, bounded like leaf
+    /// seeding (96 nodes, depth 10, 60 ms) and never leaving this editor.
+    func lastTextLeafFrame(in editor: Editor) -> CGRect? {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.06
+        var pending: [(AXUIElement, Int)] = [(editor.element, 0)]
+        var visited = 0
+        var last: CGRect?
+        while let (node, depth) = pending.popLast(), visited < 96,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            visited += 1
+            AXUIElementSetMessagingTimeout(node, 0.015)
+            let role = attribute(node, kAXRoleAttribute) as? String
+            if role == kAXStaticTextRole {
+                var frame = CGRect.zero, position = CGPoint.zero, size = CGSize.zero
+                if unpack(attribute(node, "AXFrame"), .cgRect, &frame) || (unpack(attribute(node, kAXPositionAttribute), .cgPoint, &position)
+                    && unpack(attribute(node, kAXSizeAttribute), .cgSize, &size)) {
+                    if frame == .zero { frame = CGRect(origin: position, size: size) }
+                    // Document order: a later leaf ends lower, or on the same line further right.
+                    if frame.width > 0, frame.height > 0,
+                       last.map({ frame.minY > $0.minY + 1 || (abs(frame.minY - $0.minY) <= 1 && frame.maxX >= $0.maxX) }) ?? true {
+                        last = frame
+                    }
+                }
+                continue
+            }
+            guard depth < 10, depth == 0 || ![kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole].contains(role ?? ""),
+                  let children = attribute(node, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+            for child in children.reversed() { pending.append((child, depth + 1)) }
+        }
+        if last == nil { entryDiagnostic("no text element frame") }
+        return last
+    }
+
     /// The editor's own collapsed-range rectangle, accepted only when it is caret-shaped and
     /// inside the editor. Used for an empty editor, where there are no glyphs to calibrate
     /// against: the native one-line-above quirk would put it above the editor and fail here.
@@ -706,7 +739,11 @@ private final class CaretAXQuery {
         }
         if geometryCorrection.map({ !CFEqual($0.element, editor.element) }) ?? true {
             var mode = CaretRangeGeometry.correction(text: editor.text, near: offset, bounds: bounds)
-            if mode == nil, markerGeometry == nil {
+            // Also re-seed fully when only the quick refresh ran: markers cached while the editor
+            // was empty (or before its text changed) carry no leaf anchors, and calibration needs
+            // them in Claude's composer, which otherwise never calibrated once words arrived.
+            if mode == nil, markerGeometry == nil || lightlyRefreshed {
+                lightlyRefreshed = false
                 markerGeometry = makeMarkerGeometry(editor)
                 if markerGeometry != nil {
                     mode = CaretRangeGeometry.correction(text: editor.text, near: offset, bounds: bounds)
@@ -727,14 +764,22 @@ private final class CaretAXQuery {
             markerGeometry = makeMarkerGeometry(editor)
             insertion = bounds(NSRange(location: offset, length: 0))
         }
-        guard let raw = insertion,
-              let rect = geometryCorrection?.mode.apply(to: raw),
-              editor.bounds.insetBy(dx: -1, dy: 0).contains(CGPoint(x: rect.minX, y: rect.midY)) else { entryDiagnostic("caret outside editor or unavailable"); return nil }
+        guard let raw = insertion else { entryDiagnostic("caret unavailable"); return nil }
+        guard let rect = geometryCorrection?.mode.apply(to: raw),
+              editor.bounds.insetBy(dx: -1, dy: 0).contains(CGPoint(x: rect.minX, y: rect.midY)) else {
+            entryDiagnostic(String(format: "caret outside editor (dx=%.0f dy=%.0f)",
+                                   raw.minX - editor.bounds.minX, raw.midY - editor.bounds.minY))
+            return nil
+        }
         // Keep the native caret anchor even for a partially visible line; clipping
         // the stem must not change the underlying insertion geometry.
         return CGRect(x: rect.minX, y: rect.minY, width: 2, height: rect.height)
     }
+    /// The last step this query reported, kept even when not diagnosing, so a caller whose read
+    /// came back empty can say why (geometry and capabilities only, never text).
+    var lastStep: String?
     private func entryDiagnostic(_ reason: String) {
+        lastStep = reason
         guard diagnosingEntry else { return }
         rmDebug("Caret entry: \(reason)")
     }
@@ -930,12 +975,20 @@ final class CaretInsertionPoint: @unchecked Sendable {
         /// An empty editor that reports no caret rectangle: its leading edge, where the
         /// first character will appear.
         case editorStart
+        /// No per-character geometry (Chromium without inline text boxes reports 0×0 text
+        /// ranges, observed in ChatGPT on 2026-11-10), the caret at the end of the text: the
+        /// right edge of the last text element's frame, which Chromium still reports.
+        case textEnd
     }
 
     struct Reading: Sendable {
         let caret: CGRect
         let editor: CGRect
         let accuracy: Accuracy
+        /// The editor's caret as a UTF-16 offset when the rectangle was measured, so a caller
+        /// that knows where the caret should be can tell a stale accessibility tree from a
+        /// current one.
+        let offset: Int
     }
 
     private let queue = DispatchQueue(label: "com.viberemote.caret-insertion", qos: .userInitiated)
@@ -944,13 +997,16 @@ final class CaretInsertionPoint: @unchecked Sendable {
     private var pending: (@MainActor @Sendable (Reading?) -> Void)?
     /// Main-confined read timings since the last `takeTimings`, for the indicator's log line.
     private var timings: [TimeInterval] = []
+    /// Main-confined: why the latest empty read came back empty, and how many did.
+    private(set) var lastFailure: String?
+    private var failures = 0
 
     /// Read count, mean and slowest read in milliseconds, then starts a fresh tally.
     @MainActor
-    func takeTimings() -> (count: Int, mean: Double, slowest: Double) {
-        defer { timings.removeAll() }
-        guard !timings.isEmpty else { return (0, 0, 0) }
-        return (timings.count, timings.reduce(0, +) / Double(timings.count) * 1000, (timings.max() ?? 0) * 1000)
+    func takeTimings() -> (count: Int, failed: Int, mean: Double, slowest: Double) {
+        defer { timings.removeAll(); failures = 0 }
+        guard !timings.isEmpty else { return (0, 0, 0, 0) }
+        return (timings.count, failures, timings.reduce(0, +) / Double(timings.count) * 1000, (timings.max() ?? 0) * 1000)
     }
 
     /// Measures off the main thread and answers on it. A request made while one is in flight
@@ -963,10 +1019,12 @@ final class CaretInsertionPoint: @unchecked Sendable {
             let started = ProcessInfo.processInfo.systemUptime
             let reading = measure()
             let elapsed = ProcessInfo.processInfo.systemUptime - started
+            let failure = reading == nil ? (query.lastStep ?? "no focused editor") : nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.inFlight = false
                     self.timings.append(elapsed)
+                    if let failure { self.lastFailure = failure; self.failures += 1 }
                     completion(reading)
                     if let next = self.pending {
                         self.pending = nil
@@ -980,17 +1038,62 @@ final class CaretInsertionPoint: @unchecked Sendable {
     /// Caret positioning never guesses, because a wrong caret would move the user's text.
     /// An indicator only points: in an empty editor the caret can only be at the start, and
     /// the first streamed words replace this with measured glyph geometry.
+    /// Apps already asked for full accessibility, by pid (queue-confined).
+    private var accessibilityRequested: Set<pid_t> = []
+
     private func measure() -> Reading? {
+        query.lastStep = nil
         guard let editor = query.observe() else { return nil }
+        requestFullAccessibility(editor.pid)
         if let caret = query.caret(Int(editor.selection.location), in: editor) {
-            return Reading(caret: caret, editor: editor.bounds, accuracy: .glyph)
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .glyph, offset: Int(editor.selection.location))
         }
-        guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else { return nil }
+        guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else {
+            // Dictation types at the caret, so the caret is usually at the end of the text.
+            guard Self.isAtTextEnd(text: editor.text, caret: Int(editor.selection.location)),
+                  let leaf = query.lastTextLeafFrame(in: editor),
+                  let caret = Self.textEnd(leaf: leaf, editor: editor.bounds) else { return nil }
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .textEnd, offset: Int(editor.selection.location))
+        }
         if let raw = query.uncalibratedInsertion(0, in: editor) {
             return Reading(caret: CGRect(x: raw.minX, y: raw.minY, width: 2, height: raw.height),
-                           editor: editor.bounds, accuracy: .emptyEditor)
+                           editor: editor.bounds, accuracy: .emptyEditor, offset: 0)
         }
-        return Reading(caret: Self.editorStart(editor.bounds), editor: editor.bounds, accuracy: .editorStart)
+        return Reading(caret: Self.editorStart(editor.bounds), editor: editor.bounds, accuracy: .editorStart, offset: 0)
+    }
+
+    /// Electron apps (Claude) build per-character text geometry only for an assistive client
+    /// that sets `AXManualAccessibility`, as screen readers and window managers do. Without it,
+    /// typed text in Claude's composer measured as 0×0 and the cursor never followed
+    /// (2026-11-10). Asked once per process and only where the app exposes the attribute, so
+    /// native apps are untouched; ChatGPT's shell refuses it (and `AXEnhancedUserInterface`),
+    /// which is what `textEnd` is for.
+    private func requestFullAccessibility(_ pid: pid_t) {
+        guard accessibilityRequested.insert(pid).inserted else { return }
+        let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, 0.05)
+        var current: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, "AXManualAccessibility" as CFString, &current) == .success,
+              (current as? Bool) != true else { return }
+        let status = AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        rmDebug("🗣 Dictation indicator: asked pid \(pid) for full accessibility (status \(status.rawValue))")
+    }
+
+    /// The caret sits after the last visible character: only line breaks follow it (web
+    /// composers end their value with "\n").
+    static func isAtTextEnd(text: String, caret: Int) -> Bool {
+        let utf16 = Array(text.utf16)
+        guard caret > 0, caret <= utf16.count else { return false }
+        return String(utf16CodeUnits: Array(utf16[caret...]), count: utf16.count - caret).allSatisfy(\.isNewline)
+    }
+
+    /// The caret after a text element whose frame is one line tall: its right edge, full line
+    /// height. A wrapped element's frame says nothing about where its last line ends, so it
+    /// gives no position (the indicator then keeps its last one).
+    static func textEnd(leaf: CGRect, editor: CGRect) -> CGRect? {
+        guard leaf.width > 0, leaf.height >= 8, leaf.height <= 30,
+              editor.insetBy(dx: -1, dy: -1).contains(CGPoint(x: leaf.maxX, y: leaf.midY)) else { return nil }
+        return CGRect(x: leaf.maxX, y: leaf.minY, width: 2, height: leaf.height)
     }
 
     /// Web editors (Claude's and Codex's ProseMirror composers) report an empty document as a
@@ -1022,6 +1125,16 @@ enum CaretProbe {
             print("caret:", query.caret(Int(editor.selection.location), in: editor).map { "\($0)" } ?? "nil")
         } else {
             print("observe failed")
+        }
+        // The dictation indicator's own read, end to end (worker queue, fallbacks included).
+        MainActor.assumeIsolated {
+            var done = false
+            CaretInsertionPoint().read { reading in
+                print("indicator:", reading.map { "\($0.accuracy.rawValue) \($0.caret) offset=\($0.offset)" } ?? "nil")
+                done = true
+            }
+            let deadline = Date().addingTimeInterval(2)
+            while !done, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
         }
         // The diagnostics go to the app log on its own queue; let them land.
         Thread.sleep(forTimeInterval: 0.5)
@@ -1435,11 +1548,12 @@ enum CaretGlyphImages {
     static let micFill = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
         .withSymbolConfiguration(configuration)
 
-    /// How much of the mic glyph, from the bottom, a level fills. The stand is the lowest
-    /// ~30% of the glyph; filling it on any sound and letting the capsule carry the volume
-    /// keeps quiet speech from reading as silence.
+    /// How much of the mic glyph, from the bottom, a level fills: in proportion from empty at
+    /// the meter's floor, so the mic starts at nothing and rises with the voice. (Filling the
+    /// stand on any sound, as first built, made the first syllable jump to 30%; the user found
+    /// that unnatural on 2026-11-10.)
     static func fillFraction(level: CGFloat) -> CGFloat {
-        level <= 0.02 ? 0 : 0.3 + 0.7 * min(1, level)
+        min(1, max(0, level))
     }
 }
 

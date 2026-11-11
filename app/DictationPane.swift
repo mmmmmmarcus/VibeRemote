@@ -191,7 +191,7 @@ struct DictationPane: View {
             Section {
                 keyRow(provider: .seedASR, prompt: "API key or Access Token")
                 SettingsRow(title: "Type While Speaking",
-                            subtitle: "Words appear as you talk and correct themselves as recognition firms up.") {
+                            subtitle: "Words appear as you talk without being rewritten; when you let go, the whole clip is recognized once more and the text is refined.") {
                     Toggle("", isOn: $store.settings.seedStreaming)
                         .labelsHidden()
                         .toggleStyle(.switch)

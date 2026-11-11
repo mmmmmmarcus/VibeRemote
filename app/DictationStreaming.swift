@@ -29,15 +29,17 @@ enum SeedStreamFrame {
         return data
     }
 
-    /// The first request: audio format plus the Doubao-style two-pass mode. `enable_nonstream`
-    /// streams per-character partials, then re-recognizes each pause-ended sentence with the
-    /// more accurate non-streaming model; only that second pass marks `definite`.
+    /// The first request: audio format and streaming recognition only. Doubao's two-pass mode
+    /// (`enable_nonstream`) re-recognizes every pause-ended sentence with the accurate model while
+    /// the user is still speaking, so a long hold was rewritten several times before release; the
+    /// user asked (2026-11-10) for one refinement after release instead, which
+    /// `DictationController.finishStreaming` gets from the flash API with the recorded clip.
     static func requestJSON(appID: String) -> Data {
         let body: [String: Any] = [
             "user": ["uid": appID.isEmpty ? "viberemote" : appID],
             "audio": ["format": "pcm", "codec": "raw", "rate": 16_000, "bits": 16, "channel": 1],
             "request": ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true,
-                        "enable_nonstream": true, "show_utterances": true, "result_type": "full"],
+                        "enable_nonstream": false, "show_utterances": true, "result_type": "full"],
         ]
         return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
     }
@@ -271,6 +273,34 @@ enum DictationTypewriterPlan {
         return (displayed.distance(from: shown, to: displayed.endIndex), String(target[wanted...]))
     }
 
+    /// While Siri is held the screen only grows (user's request, 2026-11-10: deleting and
+    /// retyping partials looked unstable, and the refined result after release replaces them
+    /// anyway). It shows what two consecutive partials agree on, so the recognizer's still-moving
+    /// tail stays off screen. When a revision changes text already shown, typing carries on after
+    /// the shown text's last few characters, found again near the end of the agreed text; if those
+    /// were revised away too, nothing is added until release.
+    static func growth(shown target: String, previous: String, latest: String) -> String {
+        let agreed = commonPrefix(previous, latest)
+        if agreed.hasPrefix(target) { return agreed.count > target.count ? agreed : target }
+        guard !target.isEmpty else { return agreed }
+        let anchor = String(target.suffix(min(6, target.count)))
+        guard let found = agreed.range(of: anchor, options: .backwards),
+              // The anchor's real place is about where the shown text ends; an earlier repeat of
+              // the same characters would type a duplicate.
+              abs(agreed.distance(from: agreed.startIndex, to: found.upperBound) - target.count) <= 12
+        else { return target }
+        let rest = agreed[found.upperBound...]
+        return rest.isEmpty ? target : target + rest
+    }
+
+    static func commonPrefix(_ a: String, _ b: String) -> String {
+        var end = a.startIndex, other = b.startIndex
+        while end < a.endIndex, other < b.endIndex, a[end] == b[other] {
+            end = a.index(after: end); other = b.index(after: other)
+        }
+        return String(a[..<end])
+    }
+
     /// One character at a time while the screen is nearly caught up, so speech reads as typing;
     /// more per tick as text backs up, so the screen never trails recognition by much.
     static func pace(backlog: Int) -> (characters: Int, interval: TimeInterval) {
@@ -315,12 +345,16 @@ final class DictationTypewriter {
     }
 
     private(set) var displayed = ""
+    /// Where the editor's caret should be once the screen has caught up: the hold's anchor plus
+    /// what it has typed. nil before the first keystroke or when the selection was unreadable.
+    var expectedCaret: Int? { focus?.anchor.map { $0 + displayed.utf16.count } }
     private(set) var isDone = false
     private(set) var stoppedReason: String?
     private(set) var deletedCharacters = 0
     var onEmit: (() -> Void)?
 
     private var target = ""
+    private var previousPartial = ""
     private var finishing = false
     private var completion: (() -> Void)?
     private var timer: Timer?
@@ -334,9 +368,13 @@ final class DictationTypewriter {
         self.previous = previous?.isDone == false ? previous : nil
     }
 
+    /// A partial while Siri is held: the screen only grows (`DictationTypewriterPlan.growth`).
+    /// Deletions wait for `finish`, which reconciles toward the refined result in one pass.
     func update(_ text: String) {
         guard !finishing, !isDone else { return }
-        target = DictationTyper.normalized(text)
+        let latest = DictationTyper.normalized(text)
+        target = DictationTypewriterPlan.growth(shown: target, previous: previousPartial, latest: latest)
+        previousPartial = latest
         schedule(0)
     }
 

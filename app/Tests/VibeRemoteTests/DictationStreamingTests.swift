@@ -47,13 +47,13 @@ final class DictationStreamingTests: XCTestCase {
         XCTAssertNil(SeedStreamResult.parse(Data(#"{"audio_info":{"duration":200}}"#.utf8)))
     }
 
-    func testRequestAsksForTwoPassStreamingOf16kPCM() throws {
+    func testRequestAsksForStreamingOf16kPCMWithoutASecondPass() throws {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: SeedStreamFrame.requestJSON(appID: "42")) as? [String: Any])
         let audio = try XCTUnwrap(json["audio"] as? [String: Any])
         let request = try XCTUnwrap(json["request"] as? [String: Any])
         XCTAssertEqual(audio["format"] as? String, "pcm")
         XCTAssertEqual(audio["rate"] as? Int, 16_000)
-        XCTAssertEqual(request["enable_nonstream"] as? Bool, true)
+        XCTAssertEqual(request["enable_nonstream"] as? Bool, false, "no second pass while speaking; refined once after release")
         XCTAssertEqual(request["result_type"] as? String, "full")
         XCTAssertEqual((json["user"] as? [String: Any])?["uid"] as? String, "42")
         XCTAssertEqual(SeedStreamFrame.audioPacketBytes, 16_000 / 5 * 2, "200 ms of 16-bit mono")
@@ -90,6 +90,25 @@ final class DictationStreamingTests: XCTestCase {
     }
 
     /// Smooth while nearly caught up, never far behind when text backs up.
+    func testHeldTextOnlyGrowsWithWhatTwoPartialsAgreeOn() {
+        let grow = DictationTypewriterPlan.growth
+        // The first partial has nothing to agree with yet; the moving tail stays off screen.
+        XCTAssertEqual(grow("", "", "I want to by"), "")
+        XCTAssertEqual(grow("", "I want to by", "I want to buy a"), "I want to b")
+        XCTAssertEqual(grow("I want to b", "I want to buy a", "I want to buy a car"), "I want to buy a")
+        // A shorter agreement never takes text back off the screen.
+        XCTAssertEqual(grow("I want to buy a", "I want to buy a car", "I want to"), "I want to buy a")
+        // A revision earlier in the text (capitalization, punctuation) does not stop typing: it
+        // continues after the shown text's last characters, found again near the end.
+        XCTAssertEqual(grow("i want to buy a", "I want to buy a car.", "I want to buy a car. Today"),
+                       "i want to buy a car.")
+        // If those characters were revised away too, nothing is added until release.
+        XCTAssertEqual(grow("I want to buy a", "I wanted to try it", "I wanted to try it now"), "I want to buy a")
+        // An earlier repeat of the anchor far from the end is not mistaken for it.
+        XCTAssertEqual(grow("ab ab ab", "AB xx yy zz ab ab ab", "AB xx yy zz ab ab ab ab"), "ab ab ab")
+        XCTAssertEqual(DictationTypewriterPlan.commonPrefix("你好世界", "你好吗"), "你好")
+    }
+
     func testTypewriterPaceScalesWithBacklog() {
         XCTAssertTrue(DictationTypewriterPlan.pace(backlog: 0) == (0, DictationTypewriterPlan.tick))
         XCTAssertTrue(DictationTypewriterPlan.pace(backlog: 1) == (1, 0.045))
