@@ -138,25 +138,15 @@ struct ButtonProfileSet: Equatable, Sendable {
     static let siriDefault: ButtonAction =
         remoteButtonDescriptors.first { $0.key == "siri" }?.defaultAction ?? .spaceKey
 
-    /// The Skill trigger is the one thing that differs by host: `/` opens Claude's skill and
-    /// command menu, `$` opens Codex's. Each seed pins it on every button whose default is the
-    /// app-detecting Skill action, so the split is visible and editable as profile choices.
+    /// A new app profile starts empty: every button follows General until the user changes it.
+    /// (Claude's and ChatGPT's seeds used to pin the Skill trigger on Play/Pause; Play/Pause
+    /// defaults to Esc since 2026-11-11, and `ButtonProfileStore` removed those seeds once.)
     static func seed(bundleID: String, name: String) -> ButtonProfile {
-        var profile = ButtonProfile(bundleID: bundleID, name: name, siriAction: nil)
-        let trigger: ButtonAction? = switch bundleID {
-        case claudeBundleID: .slashSkill
-        case chatGPTBundleID: .dollarSkill
-        default: nil
-        }
-        guard let trigger else { return profile }
-        for generation in RemoteGeneration.allCases {
-            for button in ["back", "tv", "playPause", "volumeUp", "volumeDown", "power"]
-            where RemoteButtonMapping.choices(button: button, generation: generation)?.first == .skillPicker {
-                profile.overrides[generation, default: [:]][button] = trigger
-            }
-        }
-        return profile
+        ButtonProfile(bundleID: bundleID, name: name, siriAction: nil)
     }
+
+    /// The Skill triggers the original Claude/ChatGPT seeds pinned on aluminum Play/Pause.
+    static let retiredPlayPauseSeeds: [String: ButtonAction] = [claudeBundleID: .slashSkill, chatGPTBundleID: .dollarSkill]
 
     static func defaults(generalSiri: ButtonAction = siriDefault,
                          generalOverrides: [RemoteGeneration: [String: ButtonAction]] = [:]) -> ButtonProfileSet {
@@ -178,7 +168,31 @@ enum ButtonProfileStore {
     static let generalOverridesKey = "buttonActionOverrides"
     static let appsKey = "buttonProfiles"
 
+    /// Set once the retired Play/Pause Skill seeds have been removed from saved profiles, so a
+    /// later deliberate Skill choice on Play/Pause is kept.
+    static let playPauseMigrationKey = "buttonProfilesPlayPauseEscMigrated"
+
     static func load(_ defaults: UserDefaults = .standard) -> ButtonProfileSet {
+        var set = loadStored(defaults)
+        if !defaults.bool(forKey: playPauseMigrationKey) {
+            defaults.set(true, forKey: playPauseMigrationKey)
+            var changed = false
+            for index in set.apps.indices {
+                guard let bundleID = set.apps[index].bundleID,
+                      let seeded = ButtonProfileSet.retiredPlayPauseSeeds[bundleID] else { continue }
+                for generation in RemoteGeneration.allCases
+                where set.apps[index].overrides[generation]?["playPause"] == seeded {
+                    set.apps[index].overrides[generation]?["playPause"] = nil
+                    if set.apps[index].overrides[generation]?.isEmpty == true { set.apps[index].overrides[generation] = nil }
+                    changed = true
+                }
+            }
+            if changed, defaults.array(forKey: appsKey) != nil { save(set, defaults) }
+        }
+        return set
+    }
+
+    private static func loadStored(_ defaults: UserDefaults) -> ButtonProfileSet {
         let siri = defaults.string(forKey: siriKey).flatMap(ButtonAction.init(rawValue:))
             .flatMap { $0.isAssignableToSiriButton ? $0 : nil } ?? ButtonProfileSet.siriDefault
         let general = decodeOverrides(defaults.dictionary(forKey: generalOverridesKey))

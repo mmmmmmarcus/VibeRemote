@@ -137,8 +137,11 @@ final class DictationTests: XCTestCase {
         XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.001), 0)          // -60 dBFS
         XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.5), 1, accuracy: 0.01) // -6 dBFS
         XCTAssertEqual(DictationLevelMeter.normalized(rms: 1), 1)
-        // Ordinary speech (around -18 dBFS) must sit well below full, or the mic stops moving.
-        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.126), 0.69, accuracy: 0.02)
+        // Ordinary speech (around -18 dBFS) must sit below full, or the mic stops moving.
+        XCTAssertEqual(DictationLevelMeter.normalized(rms: 0.126), 0.78, accuracy: 0.02)
+        // A whisper (around -45 dBFS, with peaks near -33) must visibly fill (2026-11-13).
+        XCTAssertGreaterThan(DictationLevelMeter.normalized(rms: 0.0056), 0.25)
+        XCTAssertGreaterThan(DictationLevelMeter.normalized(rms: 0.0224), 0.45)
         let quiet = DictationLevelMeter.normalized(rms: 0.01), loud = DictationLevelMeter.normalized(rms: 0.05)
         XCTAssertGreaterThan(quiet, 0)
         XCTAssertGreaterThan(loud, quiet)

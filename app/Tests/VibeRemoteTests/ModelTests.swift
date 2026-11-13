@@ -344,11 +344,12 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(state.handle(button: "volumeUp", pressed: false, device: "a", generation: .aluminumClickpad).consumed)
     }
 
-    func testAdvancedMenuHoldClosesButTapLatchesUsingCaptureTime() {
+    func testAdvancedMenuLatchesOpenHoweverLongTheOpenerIsHeld() {
         var state = AdvancedMenuInputState()
-        // The callbacks may run in the same main-loop turn; physical timestamps own duration.
+        // Only Siri responds to a hold (2026-11-13): a long press latches like a tap.
         _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 10)
-        XCTAssertEqual(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 12).command, .dismissMenu)
+        XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 12).command)
+        XCTAssertTrue(state.isVisible)
         state.dismiss()
         _ = state.handle(button: "mute", pressed: true, device: "a", generation: .aluminumClickpad, time: 13)
         XCTAssertNil(state.handle(button: "mute", pressed: false, device: "a", generation: .aluminumClickpad, time: 13.1).command)
@@ -675,9 +676,9 @@ final class ModelTests: XCTestCase {
             XCTAssertNil(RemoteButtonMapping.choices(button: "select", generation: generation))
             XCTAssertNil(RemoteButtonMapping.choices(button: "navUp", generation: generation))
             XCTAssertNil(RemoteButtonMapping.choices(button: AdvancedMenuInputState.trigger(for: generation), generation: generation))
-            // TV's tap waits for release, so it only offers instant actions.
-            XCTAssertTrue(RemoteButtonMapping.choices(button: "tv", generation: generation)!.dropFirst().allSatisfy(\.isInstant))
-            XCTAssertFalse(RemoteButtonMapping.choices(button: "tv", generation: generation)!.contains(.backspace))
+            // No button but Siri has a hold action, so TV is offered the same list as the rest.
+            XCTAssertTrue(RemoteButtonMapping.choices(button: "tv", generation: generation)!.contains(.backspace))
+            XCTAssertTrue(RemoteButtonMapping.choices(button: "tv", generation: generation)!.contains(.computerUse))
         }
         // An override for a fixed-role control is ignored rather than trusted.
         XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .aluminumClickpad, siriAction: .spaceKey,
@@ -710,10 +711,10 @@ final class ModelTests: XCTestCase {
         }
     }
 
-    func testOnlySiriIsCustomizableAndPlayOpensSkill() {
+    func testPlayPauseDefaultsToComputerUseAndMuteOpensTheMenu() {
         for siri in ButtonAction.allCases.filter(\.isAssignableToSiriButton) {
             XCTAssertEqual(RemoteButtonMapping.action(button: "siri", generation: .aluminumClickpad, siriAction: siri), siri)
-            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .aluminumClickpad, siriAction: siri), .skillPicker)
+            XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .aluminumClickpad, siriAction: siri), .computerUse)
             XCTAssertEqual(RemoteButtonMapping.action(button: "mute", generation: .aluminumClickpad, siriAction: siri), .advancedMenu)
             XCTAssertEqual(RemoteButtonMapping.action(button: "power", generation: .aluminumClickpad, siriAction: siri), .enterKey)
             XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .glassTouchSurface, siriAction: siri), .advancedMenu)
@@ -1077,6 +1078,20 @@ final class ModelTests: XCTestCase {
             window.effectiveAppearance.performAsCurrentDrawingAppearance { frame.cacheDisplay(in: frame.bounds, to: device) }
             try XCTUnwrap(device.representation(using: .png, properties: [:]))
                 .write(to: URL(fileURLWithPath: "\(output)-device.png"))
+            controller.model.tab = .about
+            frame.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            let about = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+            window.effectiveAppearance.performAsCurrentDrawingAppearance { frame.cacheDisplay(in: frame.bounds, to: about) }
+            try XCTUnwrap(about.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: "\(output)-about.png"))
+            controller.model.tab = .dictation
+            frame.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            let dictation = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+            window.effectiveAppearance.performAsCurrentDrawingAppearance { frame.cacheDisplay(in: frame.bounds, to: dictation) }
+            try XCTUnwrap(dictation.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: "\(output)-dictation.png"))
             controller.model.tab = .remote
         }
         window.close()
@@ -1210,6 +1225,9 @@ final class ModelTests: XCTestCase {
             XCTAssertTrue((0..<1).contains(progress), "loop left 0..<1 at \(date)")
         }
         XCTAssertEqual(SettingsTab.remoteTabs, [.remote, .device, .dictation, .agent])
+        // Diagnostics merged into About, which is pinned alone to the sidebar's bottom (2026-11-11).
+        XCTAssertEqual(SettingsTab.appTabs, [.about])
+        XCTAssertFalse(SettingsTab.allCases.map(\.title).contains("Diagnostics"))
     }
 
     func testSiriGuideShowsOnlyTheConfiguredMappingForBothGenerations() {
@@ -1760,24 +1778,15 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(byDevice["DJ7YK3PPJ90M"], .unknown)
     }
 
-    func testFirstGenerationProfileRehomesTheMissingMuteButton() {
-        // The mute button's two jobs move onto TV and Play/Pause.
-        let overrides = RemoteGeneration.glassTouchSurface.buttonActionOverrides
-        XCTAssertEqual(overrides["tv"], .shiftEnterOrModifier)
-        XCTAssertEqual(overrides["playPause"], .agentClientOrSlash)
-        XCTAssertNil(overrides["select"]) // Both generations keep the baseline Enter action.
+    func testFirstGenerationHasNoHoldActions() {
+        // Only Siri responds to a hold (2026-11-13): the glass TV is a plain Shift+Enter and its
+        // Play/Pause opens Advanced Menu, instead of the mute button's former hold jobs.
+        XCTAssertTrue(RemoteGeneration.glassTouchSurface.buttonActionOverrides.isEmpty)
+        XCTAssertEqual(RemoteButtonMapping.action(button: "tv", generation: .glassTouchSurface, siriAction: .spaceKey), .shiftEnter)
+        XCTAssertEqual(RemoteButtonMapping.action(button: "playPause", generation: .glassTouchSurface, siriAction: .spaceKey), .advancedMenu)
         XCTAssertEqual(RemoteGeneration.glassTouchSurface.absentButtonKeys, ["mute", "power"])
         XCTAssertTrue(RemoteGeneration.aluminumClickpad.buttonActionOverrides.isEmpty)
         XCTAssertTrue(RemoteGeneration.unknown.buttonActionOverrides.isEmpty)
-
-        // The chords the mute button armed must still resolve, now from the TV button.
-        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "menu"), .clearInput)
-        XCTAssertEqual(RemoteInputHandler.modifierChord(for: "playPause"), .escape)
-        XCTAssertNil(RemoteInputHandler.modifierChord(for: "tv"))
-
-        // None of the replacements may become a held-key action; all resolve on release.
-        XCTAssertFalse(ButtonAction.shiftEnterOrModifier.requiresHold)
-        XCTAssertFalse(ButtonAction.agentClientOrSlash.requiresHold)
     }
 
     func testOnlyPhysicalSiriButtonFollowsTheSiriSettingOnBothGenerations() {
@@ -1796,10 +1805,6 @@ final class ModelTests: XCTestCase {
     func testCompositeActionsAreNeverOfferedForTheSiriButton() {
         // The Siri submenu lists every ButtonAction case. A composite action must not appear
         // there: they are assigned by the generation profile.
-        for action in ButtonAction.allCases where action.isAssignableToSiriButton {
-            XCTAssertNotEqual(action, .shiftEnterOrModifier)
-            XCTAssertNotEqual(action, .agentClientOrSlash)
-        }
         // Siri drives the microphone while held, so it only takes the held dictation keys and
         // VibeRemote's own dictation.
         XCTAssertEqual(ButtonAction.allCases.filter(\.isAssignableToSiriButton), [.spaceKey, .rightCmd, .rightOpt, .vibeDictation])

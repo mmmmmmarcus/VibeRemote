@@ -85,9 +85,9 @@ final class RemoteInputHandler {
     /// Which remote family is currently attached. Drives the button profile and the
     /// microphone path; `.unknown` until at least one interface is open.
     var onAdvancedButton: ((String, Bool, String, RemoteGeneration) -> Bool)?
-    /// Long-press TV (`AgentButtonGate`) asks for the computer-use agent panel.
+    /// A button mapped to Computer Use asks for the agent panel. (Holding TV did too until
+    /// 2026-11-13, when every hold action but Siri's was removed at the user's request.)
     var onAgentRequested: (() -> Void)?
-    private var agentButtonGate = AgentButtonGate()
     /// Observe the native HID edge before menu/AX/bridge work can re-enter the event loop.
     var onHIDMediaButton: ((String, Bool, UInt64, UInt64) -> Void)?
     var usesPassiveButtonCapture: ((RemoteGeneration) -> Bool)?
@@ -863,8 +863,6 @@ final class RemoteInputHandler {
     func resetCapturedButtons() {
         for button in AdvancedMenuInputState.auxiliaryButtons {
             stopRepeat(for: button)
-            longPressTimers.removeValue(forKey: button)?.invalidate()
-            pendingTapActions.removeValue(forKey: button)
             buttonState.removeValue(forKey: button)
         }
     }
@@ -938,26 +936,6 @@ final class RemoteInputHandler {
             print("🔘 Button pressed: \(buttonName) → \(action.rawValue)")
         }
         rmDebug("🎛 Button \(buttonName) \(isPressed ? "down" : "up") source=\(sourceGeneration.shortName) action=\(action.rawValue)")
-        if buttonName == AgentButtonGate.button, let onAgentRequested {
-            let now = ProcessInfo.processInfo.systemUptime
-            if isPressed {
-                // Any instant action can wait for release, so a remapped TV still opens
-                // Computer Use on a hold without also firing its tap.
-                if agentButtonGate.press(at: now, defersTap: action.isInstant && action != .none) { return }
-            } else {
-                switch agentButtonGate.release(at: now, chorded: modifierChordFired.contains(buttonName)) {
-                case .passThrough:
-                    break
-                case .tap:
-                    executeAction(action, button: buttonName, pressed: true, generation: sourceGeneration)
-                case .openAgent(let passThrough):
-                    if passThrough { executeAction(action, button: buttonName, pressed: false, generation: sourceGeneration) }
-                    rmDebug("🤖 TV long-press: agent requested")
-                    onAgentRequested()
-                    return
-                }
-            }
-        }
         executeAction(
             action,
             button: buttonName,
@@ -1034,10 +1012,9 @@ final class RemoteInputHandler {
         generation: RemoteGeneration
     ) {
         guard pressed else {
-            // Release: stop any auto-repeat, resolve a pending tap/long-press or modifier,
-            // and release any physically held key captured for this button.
+            // Release: stop any auto-repeat, resolve a pending modifier, and release any
+            // physically held key captured for this button.
             stopRepeat(for: button)
-            resolveRelease(for: button)
             resolveModifierRelease(for: button)
             if microphoneBridgeManager?.menuStatus().running == true, let timeout = Self.voiceTailReleaseTimeout(
                 action: action,
@@ -1100,6 +1077,10 @@ final class RemoteInputHandler {
             sendKey(kVK_ANSI_C, flags: .maskControl)
         case .launchAgentClient:
             toggleAgentClient()
+        case .computerUse:
+            // Same entry as the TV hold: opens the bar, or closes it / stops a running command.
+            rmDebug("🤖 \(button) press: agent requested")
+            onAgentRequested?()
         case .skillPicker:
             sendSkillPickerTrigger()
         case .slashSkill:
@@ -1118,38 +1099,23 @@ final class RemoteInputHandler {
             // Quick tap types the focused app's skill-picker trigger; holding
             // arms the button as a modifier for the chords in `modifierChord(for:)`.
             beginModifierHold(button: button) { [weak self] in self?.sendSkillPickerTrigger() }
-        case .shiftEnterOrModifier:
-            // 1st-gen remote: TV takes over the missing mute button's modifier role while
-            // keeping its own tap action.
-            beginModifierHold(button: button) { [weak self] in
-                self?.sendKey(kVK_Return, flags: .maskShift)
-            }
-        case .agentClientOrSlash:
-            // 1st-gen remote: Play/Pause takes over the missing mute button's "/" tap.
-            beginTapOrLongPress(
-                button: button,
-                tap: { [weak self] in self?.toggleAgentClient() },
-                longPress: { [weak self] in self?.sendSkillPickerTrigger() }
-            )
         case .spaceKey, .rightCmd, .rightOpt, .vibeDictation:
             break // handled above
         }
     }
 
-    // MARK: - Hold behavior (auto-repeat & tap/long-press)
+    // MARK: - Hold behavior (auto-repeat)
 
     // The remote reports one press and one release with no repeats in between, so we
-    // synthesize key repeat ourselves and time the press to tell a tap from a long-press.
+    // synthesize key repeat ourselves. (Tap-or-long-press actions were removed on 2026-11-13:
+    // no button but Siri does something different when held.)
     private var repeatTimers: [String: Timer] = [:]
-    private var longPressTimers: [String: Timer] = [:]
-    private var pendingTapActions: [String: () -> Void] = [:]
 
     private let repeatInitialDelay: TimeInterval = 0.4
     private let repeatInterval: TimeInterval = 0.05
     /// Word-wise deletion erases far more per tick than a character, so it repeats slower.
     private let wordRepeatInterval: TimeInterval = 0.09
     private let repeatMaxTicks = 400   // ~20s safety cap in case a release is ever dropped
-    private let longPressThreshold: TimeInterval = 0.4
 
     /// The old remote's protocol end marker arrived 2.09 seconds after physical Siri-up in
     /// the measured capture. Prefer that real marker; this is only the lost-marker ceiling.
@@ -1205,36 +1171,6 @@ final class RemoteInputHandler {
     private func stopRepeat(for button: String) {
         repeatTimers[button]?.invalidate()
         repeatTimers[button] = nil
-    }
-
-    /// Distinguish a short tap from a hold: the long-press action fires once the threshold
-    /// elapses; a release before then runs the tap action instead.
-    private func beginTapOrLongPress(button: String, tap: @escaping @MainActor @Sendable () -> Void, longPress: @escaping @MainActor @Sendable () -> Void) {
-        cancelLongPress(for: button)
-        pendingTapActions[button] = tap
-        let timer = scheduleInputTimer(interval: longPressThreshold, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.longPressTimers[button] = nil
-            self.pendingTapActions[button] = nil
-            longPress()
-        }
-        longPressTimers[button] = timer
-    }
-
-    /// On release, if a long-press timer is still pending it was a tap — run the tap action.
-    private func resolveRelease(for button: String) {
-        guard let timer = longPressTimers[button] else { return }
-        timer.invalidate()
-        longPressTimers[button] = nil
-        let tap = pendingTapActions[button]
-        pendingTapActions[button] = nil
-        tap?()
-    }
-
-    private func cancelLongPress(for button: String) {
-        longPressTimers[button]?.invalidate()
-        longPressTimers[button] = nil
-        pendingTapActions[button] = nil
     }
 
     // MARK: Tap-or-modifier (mute button)
@@ -1387,14 +1323,10 @@ final class RemoteInputHandler {
         VolumeRevertGuard.shared.releaseRemoteButtons()
         repeatTimers.values.forEach { $0.invalidate() }
         repeatTimers.removeAll()
-        longPressTimers.values.forEach { $0.invalidate() }
-        longPressTimers.removeAll()
-        pendingTapActions.removeAll()
         heldModifierButtons.removeAll()
         modifierChordFired.removeAll()
         modifierPressStart.removeAll()
         modifierTapActions.removeAll()
-        agentButtonGate.reset()
     }
 
     private func performListAction(_ direction: ListEditingDirection) {

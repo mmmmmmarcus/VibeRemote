@@ -128,6 +128,8 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     private(set) var holdsDock = false
 
     var isVisible: Bool { panel?.isVisible == true }
+    /// The bar is up, focused and waiting for a command: Auto Computer Use dictates straight into it.
+    var isComposing: Bool { panel?.isVisible == true && panel?.isKeyWindow == true && agent.phase == .composing }
 
     override init() {
         super.init()
@@ -138,8 +140,9 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     /// The menu-bar item: open a fresh command, or put the callout away.
     func toggle() { isVisible ? dismiss() : show(fresh: true) }
 
-    /// Long-press TV: stop a running command, close an open callout, or open a fresh one.
-    func remoteLongPress() {
+    /// A remote button set to Computer Use: stop a running command, close an open callout, or
+    /// open a fresh one.
+    func remotePress() {
         if agent.isRunning { agent.stop() }
         else if isVisible { dismiss() }
         else { show(fresh: true) }

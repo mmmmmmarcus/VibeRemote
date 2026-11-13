@@ -5,6 +5,31 @@ import XCTest
 @testable import VibeRemote
 
 final class RemoteModelTests: XCTestCase {
+    /// A highlight lights the whole button, including symbols that are CAD solids of their own
+    /// (aluminum TV kept a dark symbol on a blue button, 2026-11-13), and no part is lit for two.
+    @MainActor
+    func testHighlightIncludesSymbolSolidsOnTheButton() throws {
+        for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
+            let scene = try RemoteModelScene.make(generation: generation)
+            let root = try XCTUnwrap(scene.rootNode.childNode(withName: "remote", recursively: false))
+            var owners: [String: String] = [:]
+            var report: [String] = []
+            for key in ["siri", "power", "back", "tv", "playPause", "mute", "volume", "clickpad-center", "clickpad-ring"] {
+                let parts = RemoteModelNSView.highlightParts(key, in: root)
+                report.append("\(key)=\(parts.count)")
+                for part in parts.dropFirst() {
+                    let name = try XCTUnwrap(part.name)
+                    XCTAssertNil(owners[name], "\(name) lit for both \(owners[name] ?? "") and \(key)")
+                    owners[name] = key
+                }
+            }
+            print("highlight parts \(generation.shortName): \(report.joined(separator: " "))")
+            if generation == .aluminumClickpad {
+                XCTAssertGreaterThan(RemoteModelNSView.highlightParts("tv", in: root).count, 1, "the TV symbol is lit with its button")
+            }
+        }
+    }
+
     @MainActor
     func testBothModelsHaveDepthDistinctControlsAndIdleRenderer() throws {
         let view = RemoteModelNSView()

@@ -67,7 +67,11 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `Dictation.swift`, `DictationEngines.swift`, `DictationPane.swift` | VibeRemote Dictation: recorder, typer, controller; Apple/WhisperKit/OpenAI/Seed ASR engines; Settings pane. |
-| `DictationStreaming.swift` | Streaming dictation: Volcengine SAUC frame codec and WebSocket session, the typewriter that types and corrects partials, the per-hold live state, and the `--verify-seed-stream` check. |
+| `DictationStreaming.swift` | Streaming dictation: Volcengine SAUC frame codec and WebSocket session, the `bigmodel_nostream` refinement session, the typewriter that types and corrects partials, the per-hold live state, and the `--verify-seed-stream` check. |
+| `DictationDictionary.swift` | The dictation dictionary: entries (one word each), storage, Seed hotword budget/context, OpenAI prompt, and the local replacement pass. |
+| `DictationFillers.swift` | Local filler-word cleanup of Seed's final text (hesitations, clause fillers, stutters), applied when Remove Filler Words is on. |
+| `DictationHotkey.swift` | The alternative dictation hotkey: modifier choices, `DictationHotkeyGate` (hold/chord logic), and the global+local event monitor driving `DictationController` with the Mac's microphone. |
+| `AutoComputerUse.swift` | Auto Computer Use: its switch, the focused-text-field probe at Siri down, and `ComputerUseHandoff` (how a dictation hold fills and sends the Computer Use bar). |
 | `VibeRemote.entitlements` | `com.apple.security.device.bluetooth` and `com.apple.security.device.audio-input` (Dictation records the virtual device under the hardened runtime). |
 
 ## Build, run, test
@@ -148,14 +152,16 @@ it is not proof of generation. Classification uses the whole physical interface 
 - A remote plugged in over Lightning enumerates as a single vendor-page interface with a
   1-byte report and no buttons. It classifies as `.unknown` and must never become the
   active remote — otherwise charging the old remote hijacks the profile of the paired one.
-- The 1st-gen remote has **no Mute and no Power key**. The mute button's two jobs move
-  to the only buttons whose baseline action is a single instantaneous press: TV gains
-  the modifier hold, Play/Pause gains the "/" hold. That table lives in
-  `RemoteGeneration.buttonActionOverrides`.
+- The 1st-gen remote has **no Mute and no Power key**. Its TV used to take over the mute
+  button's modifier hold and Play/Pause its "/" hold; both were removed on 2026-11-13 (user's
+  request: **no button but Siri responds to a hold**). Its TV is a plain Shift+Enter and its
+  Play/Pause opens Advanced Menu; `RemoteGeneration.buttonActionOverrides` is now empty for
+  every family. Do not add hold-to-do-something-else actions back: auto-repeat (Back, arrows)
+  repeats the same action and stays.
 - Both generations use the physical Siri button for **Siri Button Mapping** and
   firmware-gated microphone capture. The old touch surface and new clickpad center
   confirm active caret positioning; outside it, old surface press is Enter and aluminum center is reserved. Do not remap the old surface to Siri again.
-- **Composite actions are profile-assigned, never user-chosen.** Siri only takes the held
+- **Siri takes only dictation actions.** Siri only takes the held
   dictation keys (Space, Right Command, Right Option; user's choice 2026-11-08) plus
   `vibeDictation` (`isAssignableToSiriButton` = `requiresHold || vibeDictation`), and `loadSiriButtonAction` re-checks it on read, so an
   older saved Siri choice outside that set falls back to Space.
@@ -191,8 +197,10 @@ vendored legacy helper decoded at 16 kHz purely because that was its output rate
 `remoteButtonDescriptors` in `MenuBarManager.swift` defines the default mappings. Settings'
 pills customize Siri and the ordinary buttons per profile (`ButtonProfileSet`; see Per-app
 button profiles). `RemoteButtonMapping` is the
-shared source of truth for runtime and Settings callouts. Aluminum Play/Pause opens Skill outside Advanced Menu (`.skillPicker`), using the
-focused app trigger. Its native media event remains consumed. Within the menu it stops the current task.
+shared source of truth for runtime and Settings callouts. Aluminum Play/Pause opens Computer Use outside Advanced Menu (`.computerUse`,
+2026-11-13, user's request; it was Esc from 2026-11-11, when per-app profiles made the app-detecting `.skillPicker`
+default unnecessary; Esc and Skill remain choices).
+Its native media event remains consumed. Within the menu it stops the current task.
 The aluminum menu TV slot is now inactive and consumes both edges without a newline;
 old-remote TV retains Skill because its Play/Pause is the menu opener. Power sends
 Cmd+Enter in the menu and ordinary Enter outside it. Power remains HID-owned: never
@@ -236,14 +244,13 @@ Original PNGs remain bundled references. Every control shows its function at onc
 one-line Liquid Glass pill beside the remote (left-column controls on the left, right-column
 on the right) with an arrow toward its button; `RemotePillLayout` pushes a pill off its row
 only as far as needed to clear its neighbour, and the arrow still aims at the button.
-Hovering a pill highlights its CAD button blue (`RemoteModelView.highlighted`) and hovering
+Hovering a pill highlights its CAD button blue (`RemoteModelView.highlighted`), together with the unnamed CAD solids lying on its face (`highlightParts`: each belongs to the smallest named control containing it; dark pieces turn blue, light symbol strokes white — the aluminum symbols are separate solids and stayed unlit until 2026-11-13) and hovering
 the button highlights the pill; pills fade out while the remote is dragged. Clicking an
 editable pill pops up a native `NSMenu` of `RemoteSettingsGuide.pillOptions` (current one
 checked, default marked); fixed-role pills show no chevron and do nothing on click.
 Preserve and restore original materials without tinting shared materials on other parts.
 Split the volume rocker into upper/lower regions. Do not display the remote generation as a
 visible heading; keep connection state and battery.
-Preserve first-generation composite defaults except its fixed Advanced Menu opener.
 
 Opening Settings switches the app's activation policy to `.regular` so its Dock icon
 appears. Closing the window restores `.accessory`; minimizing keeps the Dock icon so
@@ -273,22 +280,31 @@ disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes (split and re
 saved state): **Controls** (`SettingsTab.remote`: everything about what the buttons and touch
 surface do — the profile switcher as a Liquid Glass capsule in the window's top-right corner beside
 the Fix pill, with app icons and none for General — macOS 27 does not draw `NSMenuItem.image` in this pop-up menu, so each item's icon is a text attachment in its `attributedTitle` (`ProfilePicker.menuTitle`), with an invisible 16 pt spacer for General so names share one edge, verified by screenshot 2026-11-11; the CAD remote with a clickable glass pill per
-button; Restore Defaults for the edited profile's button choices only; then the text-cursor guide,
+button; Restore Defaults for the edited profile's button choices only, inside the remote's card at its
+bottom-right (no explanation text under the card, 2026-11-11); then the text-cursor guide,
 formerly its own Text Cursor pane: the onboarding `CursorDemo` loop and start/move/confirm/cancel
 steps that name the family's own parts — touch surface versus clickpad, and no Power key on the
-1st-gen remote), **Device** (the physical remote: Auto Disconnect with its own picker, and a
-**Status** section: Bluetooth connection with the remote's name, battery (connected only) and
-bridge start/restart; Helper and Audio Driver rows appear only while
+1st-gen remote), **Device** (the physical remote: an untitled status group in the user's left/right layout
+(2026-11-11; no "Status" header and Auto Disconnect moved below it as its own untitled group with its
+footer, 2026-11-12): Bluetooth → the remote's name (or
+Disconnected) with a green/gray light on the right, Battery → plain percentage (connected only, no ring),
+Vibe Remote Daemon → Running/Stopped (the voice bridge), and a Restart Daemon / Start Daemon button pinned
+to the pane's bottom-right corner (an overlay, not the section footer); Helper and Audio Driver rows appear only while
 `SettingsDiagnostics.setupIssues` names them, using the same rules as the status-menu
-banners and onboarding — helper not approved, or no supported output device at all. There is
-no Output Device row), **Computer Use**
+banners and onboarding — helper not approved, or no supported output device at all. The status
+group has no Output Device row; last comes **Diagnostics**, moved from About on 2026-11-13 at the
+user's request: fields from the async `MicrophoneBridgeDiagnostics` (Output Device among them), Helper,
+the app log, Refresh and Copy Diagnostics, then Blocking Issues when there are any. Its Needs Attention
+section was dropped there because the Vibe Remote Daemon row already shows that text as its subtitle;
+the pane's Form has extra bottom scroll margin so the last buttons clear the pinned Restart Daemon), **Computer Use**
 (an `AgentDemo` illustration in System Settings' shape — abstract input on the left, what
-it produces on the right: the TV hold on the blueprint remote, then the instruction typing
+it produces on the right: the Computer Use button (aluminum Play/Pause; none drawn on glass) on the blueprint remote, then the instruction typing
 into the Computer Use callout and the pointer pressing a control in the front window — then backend,
 per-backend model, OpenRouter key; same defaults/Keychain as the callout,
-which reloads them on open), **Diagnostics**
-(fields from the async `MicrophoneBridgeDiagnostics`, Copy Diagnostics, app log) and
-**About** (version, Check for Updates, Getting Started, links). Software Update lives in
+which reloads them on open) and **About**
+(version, Check for Updates, Getting Started, links; it held Diagnostics from 2026-11-11 until they
+moved to Device on 2026-11-13). About is pinned alone to the bottom of the sidebar (user confirmed
+the layout on 2026-11-11). Software Update lives in
 About; the sidebar's About row shows a dot only while Sparkle has a valid update session.
 Automatic checks are always enabled at updater startup, including for previously opted-out
 installs; do not expose an opt-out checkbox. No mode selector or pointer/scroll sliders.
@@ -309,8 +325,8 @@ Resolve focus on release, and preserve the legacy `slashOrModifier` raw value fo
 Siri assignments. Held, it is a modifier: Mute+Back clears all input (Cmd+A, Backspace) and
 Mute+Play/Pause sends Esc (stop the current task).
 
-**The remote reports one press and one release with no repeats in between.** Key repeat and
-tap/long-press are therefore synthesized in `RemoteInputHandler`:
+**The remote reports one press and one release with no repeats in between.** Key repeat is
+therefore synthesized in `RemoteInputHandler`:
 
 - `beginRepeating` drives auto-repeat (Backspace, arrows) with a safety tick cap in case a
   release event is ever dropped.
@@ -335,8 +351,8 @@ tap/long-press are therefore synthesized in `RemoteInputHandler`:
   indent it, and volume-down walks out/removes it. This fallback exists to keep short press
   functional. A tap and a hold both fire exactly once; long press must never be required
   for normal list use.
-- `beginTapOrLongPress` distinguishes a tap from a hold for the remaining composite
-  actions. Timers are torn down on release and on disconnect.
+- Tap-or-long-press actions (`beginTapOrLongPress`) and the TV hold that opened Computer Use
+  were removed on 2026-11-13: only Siri responds to a hold.
 - `beginModifierHold` / `resolveModifierRelease` make the mute button a tap-or-modifier
   key: a quick release types "/", a hold arms the chords in `modifierChord(for:)` (chorded
   buttons skip their normal action entirely, including auto-repeat). Concurrent presses are
@@ -848,13 +864,13 @@ Keep NSPanel.hasShadow false: a second WindowServer shadow can outline the custo
 shadow's translucent silhouette. Draw only the blurred shadow from an offscreen caster,
 without an aliased cutout or any opaque shape in the visible window. Match shadow
 offset/blur to the bitmap's backing scale; verify clear interiors and downward falloff.
-The opener shows the menu on down. A release before 250 ms latches it; a longer hold
-closes on release. During a hold, actions execute on down, then all remaining releases
+The opener shows the menu on down and every release latches it, however long the press
+(2026-11-13, user's request; a release after 250 ms used to close it). While the opener is
+still down, actions execute on down, then all remaining releases
 and subsequent auxiliary clicks while that physical opener stays down are consumed.
 Keep each suppressed click owned through its release, even if the opener releases first;
 never let a hidden menu turn a second Redo press into baseline Indent. Other devices and
-excluded keys remain independent; capture reset clears the held chord. Use captured
-physical timestamps for hold duration. Same-report Mute downs precede action edges and
+excluded keys remain independent; capture reset clears the held chord. Same-report Mute downs precede action edges and
 Mute ups follow them. Settings Mute/Power (and the old remote's Advanced Menu opener)
 remain visible but disabled, with no popup arrow or interactive glass response.
 VolumeRevertGuard also tracks the output mute property: confirmed remote Mute holds
@@ -877,8 +893,8 @@ Settings callouts show function text only, never a second line repeating physica
 names. RemoteSettingsLayout selects the physical generation. Center = caret positioning;
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
-Sidebar groups are Remote (Controls, Device, Dictation, Computer Use) and VibeRemote
-(Diagnostics, About); `remoteTabs + appTabs` must stay equal to `allCases`.
+Sidebar: the Remote group (Controls, Device, Dictation, Computer Use) from the top, and About
+(`appTabs`) pinned to the bottom; `remoteTabs + appTabs` must stay equal to `allCases`.
 While any setup issue exists, every pane shows a Liquid Glass capsule in the window's top-right
 corner (red `exclamationmark.triangle.fill`, "Fix Helper", "Fix Audio Driver" or "Fix Setup")
 whose popover is the step-by-step guide with the same actions as the rows. Settings refreshes
@@ -886,7 +902,7 @@ diagnostics when its window becomes key, so approving the helper in System Setti
 
 The status menu has no Mode, Audio Output, Auto Disconnect or Debug submenu. All
 configuration lives in Settings; the audio driver install lives in the Device pane's
-Status section (and the Fix guide) and diagnostics in the Diagnostics pane.
+Status section (and the Fix guide) and diagnostics at the end of the Device pane.
 Keep live status, Settings and Quit, plus actionable permission/setup
 errors when applicable. Row order below the status summary is Settings…, Check for Updates,
 Computer Use, Restart Onboarding, then a separator and Quit. Advanced Menu is opened from the remote only; do not expose
@@ -1050,10 +1066,12 @@ profile stores only the buttons the user changed for it (pill menu "Same as Gene
 so later General edits still reach the rest. Siri is per profile too (nil follows General), which
 makes Dictation per app; the Dictation pane lists the profiles whose Siri resolves to Dictation.
 - Defaults: General, Claude (`com.anthropic.claudefordesktop`) and ChatGPT (`com.openai.codex`, the
-  Codex app installed as ChatGPT.app). Their seeds pin the Skill trigger on every button whose
-  default is the app-detecting `.skillPicker` (aluminum Play/Pause): `.slashSkill` "/" for Claude,
-  `.dollarSkill` "$" for ChatGPT. General keeps `.skillPicker`'s detection, and Advanced Menu's Skill
-  is not profile-driven. Glass Play/Pause opens Advanced Menu, so glass seeds pin nothing.
+  Codex app installed as ChatGPT.app). Seeds are empty since 2026-11-11: Play/Pause defaulted to Esc (Computer Use since 2026-11-13),
+  so the old Claude/ChatGPT seeds that pinned `.slashSkill` "/" / `.dollarSkill` "$" on aluminum
+  Play/Pause were retired, and `ButtonProfileStore.load` removes exactly those untouched seed values from
+  saved profiles once (`buttonProfilesPlayPauseEscMigrated`), so a later deliberate Skill choice is kept.
+  `.skillPicker`, `.slashSkill` and `.dollarSkill` remain pill choices; Advanced Menu's Skill is not
+  profile-driven.
 - Storage: General keeps `siriButtonAction` / `buttonActionOverrides` (no migration). App profiles
   live in `buttonProfiles`; its absence means never seeded, so removed seeds stay removed. Nothing is
   written until the first edit. Choices are validated on read as before.
@@ -1097,12 +1115,13 @@ its view and the `ComputerUseAgent` model; `AgentDock.swift` holds the Dock piec
   with a spinner and Stop in place of Send. On finish the same line shows the outcome with a
   ✓/! icon and the tile gets a ✓/! badge; 8 s later both go away unless the callout is key.
   While Computer Use holds the Dock icon, clicking it focuses the bar (a fresh field after a
-  finish); otherwise reopen still shows Settings. Esc closes. Long-press TV stops a running
+  finish); otherwise reopen still shows Settings. Esc closes. A button set to Computer Use stops a running
   command, closes an open callout, or opens a fresh one. Backend and model live only in the
   Settings pane.
-- Trigger: `AgentButtonGate` (TV held ≥ 0.5 s). Aluminum TV (plain Shift+Enter) fires on
-  release so a hold can become the agent; 1st-gen TV stays a modifier, and a chorded hold
-  never opens it. The menu-bar item does the same without a remote.
+- Trigger: any button mapped to `.computerUse` (aluminum Play/Pause by default since 2026-11-13), which runs
+  `onAgentRequested` on press. The TV hold (`AgentButtonGate`, ≥ 0.5 s) was removed the same day: only Siri responds to a
+  hold. The glass remote has no default Computer Use button (its Play/Pause opens Advanced Menu); a pill can assign one.
+  The menu-bar item does the same without a remote.
 - Input: the user's own dictation app types into the focused callout (user's choice over
   built-in speech). Remote Select is consumed by the callout only while it is key.
   The callout must use `NSApp.activate(ignoringOtherApps: true)`: a remote press is no user
@@ -1172,16 +1191,16 @@ held. It is Siri-only; no other button's `choices` may include it.
   editor, else its leading edge (3 pt in). "Empty" means only line breaks with the caret at 0:
   Claude's ProseMirror composer reports an empty document as "\n", and Chromium answers every
   caret-rect query there with a zero rect at (0, y), so it always takes the leading-edge path.
-  ChatGPT (com.openai.codex, Chromium-based) showed no cursor on 2026-11-10: the system-wide `AXFocusedApplication` query fails at once there (-25204, any timeout), so `CaretAXQuery.observe` falls back to `AXUIElementCreateApplication(frontmost pid)`. Its composer reports its placeholder as the value ("Work with Codex\n"), which calibrates as glyphs at the field start, and it drops an occasional query (40–120 ms or no value), so the indicator retries its first read up to four times 100 ms apart. The user confirmed the cursor in ChatGPT's input bar the same day. `VibeRemote --probe-caret` runs one read of the focused editor and logs `Caret entry:` steps (geometry only). The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
-  on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 8 ms after the keystroke that asked for it (at most one per 16 ms). Chromium's AX tree lags the keystroke, so a reading whose caret offset (`Reading.offset`) differs from `DictationTypewriter.expectedCaret` (anchor + typed UTF-16) is behind: it is still drawn (offset and rectangle come from the same tree, so it is an older position, not a wrong one) and the next read follows 30 ms later, up to 10 times after the last keystroke. An empty read retries the same way: right after a keystroke Chromium's value and text markers can disagree, which fails calibration, and before empty reads retried, the last keystroke's failed read was final and the bubble never followed in Claude or ChatGPT (2026-11-10). Do not hold such readings back: the first version did, every keystroke restarted its wait, and the bubble froze while words streamed ("off after the first word", 2026-11-10). The per-hold log counts readings behind the typewriter and empty reads with the query's last step (`CaretAXQuery.lastStep`), and the first-read failure line names that step too. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding when that yields no insertion geometry or no calibration. The calibration fallback matters in Claude: markers cached while the composer was empty carry no leaf anchors, so after the first streamed word every read failed with `calibration unavailable` (32 of 37 reads, 2026-11-10) until calibration also re-seeded fully. Empty-read reasons now separate `caret unavailable` from `caret outside editor (dx dy)`. The indicator logs read count, mean and slowest read per hold. Chromium computes per-character text geometry only in full accessibility mode; without it every text range and leaf marker measures 0×0 (or the whole editor), so calibration never succeeds once text is typed. On 2026-11-10 ChatGPT calibrated until it restarted at 08:43 UTC and never after; nothing in VibeRemote had enabled the mode. `CaretInsertionPoint.requestFullAccessibility` sets `AXManualAccessibility` once per process where the app exposes it (Electron, i.e. Claude). ChatGPT's shell refuses both that and `AXEnhancedUserInterface` (-25208), so the indicator (only, never caret positioning) falls back to `.textEnd`: with the caret after the last visible character, the right edge of the last AXStaticText frame (frames stay correct), if that frame is one line tall (8–30 pt). Wrapped text gives no position and the bubble keeps its last one. Probed in ChatGPT: textEnd (523, 805) for its placeholder. A non-empty
+  ChatGPT (com.openai.codex, Chromium-based) showed no cursor on 2026-11-10: the system-wide `AXFocusedApplication` query fails at once there (-25204, any timeout), so `CaretAXQuery.observe` falls back to `AXUIElementCreateApplication(frontmost pid)`. Its composer reports its placeholder as the value ("Work with Codex\n"), which once calibrated as glyphs at the field start; once it stopped calibrating, the bubble waited ~3 s for the first streamed words while Claude's showed at once, so since 2026-11-13 a caret at 0 in a value equal to `AXPlaceholderValue` is read as an empty editor (emptyEditor/editorStart) before any glyph measuring, and it drops an occasional query (40–120 ms or no value), so the indicator retries its first read up to four times 100 ms apart. The user confirmed the cursor in ChatGPT's input bar the same day. `VibeRemote --probe-caret` runs one read of the focused editor and logs `Caret entry:` steps (geometry only). The user confirmed the bubble in TextEdit (glyph) and Claude's empty composer (editorStart)
+  on 2026-11-09; whether it follows streamed text in Claude has not been observed. Streamed words then move it to measured geometry. Web text markers are walked against a text snapshot, so `CaretAXQuery.caret` re-seeds them whenever the editor's text differs (dictation reads while it types; caret positioning never sees text change) — without that every read after the first streamed word failed and the bubble stayed put until release. `CaretInsertionPoint` reads on its own serial queue (one in flight, latest waiting) so marker walks never stall the typewriter on main, and each read starts 8 ms after the keystroke that asked for it (at most one per 16 ms). Chromium's AX tree lags the keystroke, so a reading whose caret offset (`Reading.offset`) differs from `DictationTypewriter.expectedCaret` (anchor + typed UTF-16) is behind: it is still drawn (offset and rectangle come from the same tree, so it is an older position, not a wrong one) and the next read follows 30 ms later, up to 10 times after the last keystroke. An empty read retries the same way: right after a keystroke Chromium's value and text markers can disagree, which fails calibration, and before empty reads retried, the last keystroke's failed read was final and the bubble never followed in Claude or ChatGPT (2026-11-10). Do not hold such readings back: the first version did, every keystroke restarted its wait, and the bubble froze while words streamed ("off after the first word", 2026-11-10). The per-hold log counts readings behind the typewriter and empty reads with the query's last step (`CaretAXQuery.lastStep`), and the first-read failure line names that step too. A text change first re-anchors through the already-verified provider (`refreshedMarkerGeometry`: same exact-text check, no ancestor walk or leaf seeding) and falls back to full seeding when that yields no insertion geometry or no calibration. The calibration fallback matters in Claude: markers cached while the composer was empty carry no leaf anchors, so after the first streamed word every read failed with `calibration unavailable` (32 of 37 reads, 2026-11-10) until calibration also re-seeded fully. Empty-read reasons now separate `caret unavailable` from `caret outside editor (dx dy)`. The indicator logs read count, mean and slowest read per hold. Chromium computes per-character text geometry only in full accessibility mode; without it every text range and leaf marker measures 0×0 (or the whole editor), so calibration never succeeds once text is typed. On 2026-11-10 ChatGPT calibrated until it restarted at 08:43 UTC and never after; nothing in VibeRemote had enabled the mode. `CaretInsertionPoint.requestFullAccessibility` sets `AXManualAccessibility` once per process where the app exposes it (Electron, i.e. Claude). ChatGPT's shell refuses both that and `AXEnhancedUserInterface` (-25208), so the indicator (only, never caret positioning) falls back to `.textEnd`: with the caret after the last visible character, the right edge of the last AXStaticText frame (frames stay correct), if that frame is one line tall (8–30 pt). Wrapped text gives no position and the bubble keeps its last one. In Claude the collapsed range at the end of the text also stops measuring once the text wraps onto a second line (2026-11-12, per-hold trace: the bubble stuck at the end of line 1), while nonempty glyph ranges still measure; so before `textEnd` the indicator (only) tries `afterGlyph`: the right edge of the character before the caret, on its own line, or the first glyph's left edge one line height lower per trailing line break. Caret positioning still never estimates X from a glyph. A read where the editor's text and its text markers disagree (Chromium, right after a keystroke) keeps the verified marker context and answers nothing; dropping it fell through to AXBoundsForRange, which Chromium does not answer, and an already calibrated editor never re-seeded, so one such read lost the bubble for the rest of a Claude hold and for good once the text wrapped (2026-11-13: 45 failed reads after a 98-character first line). Each hold's `Dictation indicator fallbacks:` line counts empty reads and `textEnd` readings by the reason the measured steps failed. Each hold logs `Dictation indicator reads:` — every change of line or accuracy with offset, length and line-break counts and the position relative to the editor, never text. `VibeRemote --probe-caret --all` prints the measured caret at every offset of the focused editor. Probed in ChatGPT: textEnd (523, 805) for its placeholder. A non-empty
   editor without usable geometry still gets no indicator. The log records which accuracy was used. It hides before the transcript is typed, because the caret
   moves as the words land. Seen on screen from a real aluminum-remote hold on 2026-11-09.
   Live states (same day, user's request): while recording, the bubble's glyph is a `mic` outline
   that `mic.fill` fills from the bottom with the recorder's per-tap RMS (`DictationLevelMeter`:
-  -45...-6 dBFS, recalibrated from real holds that peaked at -7 dBFS, where -14 pinned ordinary
-  speech at full; fast attack / slow release; the fill is proportional from empty — filling the
+  -60...-6 dBFS, recalibrated from real holds that peaked at -7 dBFS, where -14 pinned ordinary
+  speech at full; the floor moved from -45 on 2026-11-13 because whispered holds, peaking at -33 dBFS, barely filled it; fast attack / slow release; the fill is proportional from empty — filling the
   stand on any sound read as a jump and was dropped on 2026-11-10; the log's `floor` is each
-  clip's quietest 50 ms, for placing the meter floor just above the bridge's noise), so a stopped bridge reads visibly empty. While the clip is transcribed a spinner
+  clip's quietest 50 ms, for placing the meter floor just above the bridge's noise), so a stopped bridge reads visibly empty. While the clip is transcribed a spinner (an arc fading from an opaque head to a clear tail, 2026-11-13)
   replaces the mic. `CaretGlyph` is drawn live by the canvas rather than baked into the cached
   artwork; nil keeps caret positioning's baked symbol. A 60 Hz glyph timer runs only while a
   glyph is shown and stops on hide. Only the current hold moves the indicator, so an aluminum
@@ -1224,11 +1243,14 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
   set its target, and it reconciles the screen by common prefix. While Siri is held the target only grows
   (`DictationTypewriterPlan.growth`, 2026-11-10, user's request: deleting and retyping partials looked unstable,
   and the refined result replaces them after release anyway): it shows what two consecutive partials agree on,
-  and after a revision of shown text it continues after the shown text's last six characters, found again within
-  12 characters of the end of the agreed text, or pauses. Every correction happens in `finish`, toward the refined text. The user confirmed on 2026-11-11
+  and after a revision of shown text it continues from where the shown text's end falls in the agreed text
+  (`alignedEnd`): its last six characters within 12 of their expected place (last such occurrence), else a run of its
+  last 12 that occurs exactly once anywhere (revisions add up: a fixed window stalled a 15 s hold at 114 of 276
+  characters on 2026-11-13, and the bubble stopped with it, since reads follow keystrokes); if the last word itself was
+  revised, the characters just before it within that word stand in. Only when nothing aligns does it pause until release. Every correction happens in `finish`, toward the refined text. The user confirmed on 2026-11-11
   that streaming now reads smooth and stable, with replacement only after release. Pace: one character per tick
   spread over ~0.18 s while nearly caught up (12–45 ms), more per tick as text backs up, ≤20
-  UTF-16 units per key event; deletes up to 40 per tick then one settling tick. A later hold's
+  UTF-16 units per key event; deletes up to 40 per tick then one settling tick. After release (2026-11-12, user's request: "deleting like a real human", settled 1.6–2.1 s after release for ~100 corrected characters) the correction is one step: after the same caret check, `AXSelectedTextRange` is set to exactly the tail being replaced (`replacementRange`: common-prefix end to the end of this hold's text, never before the anchor), confirmed by reading it back (Chromium applies it asynchronously; up to 8 checks 15 ms apart), then the refined text is typed over it in back-to-back ≤20-unit key events (an empty replacement is one Backspace). Unconfirmed selection restores the caret to the hold's end and Backspace takes over for the rest of the hold. The hold's log line says `by selection` or `by Backspace`. Only the selection is written, never AXValue. A later hold's
   typewriter waits for the previous one, so keystrokes never interleave.
 - Corrections delete real characters, so they are guarded: focus (pid, then the AX focused
   element) is fixed at the hold's first edit and re-checked before every delete and at least every
@@ -1253,6 +1275,138 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
   after release). Still unverified: first-generation holds, a long continuous utterance (that
   hold's first text came late, which may only mean speech started late), correction flicker,
   and the caret guard in web editors.
+
+### Dictation dictionary (2026-11-11, user's request)
+
+Settings › Dictation › Dictionary holds words dictation should get right, one word per row. Stored as
+JSON in `dictationDictionary`, carried in `DictationSettings.dictionary`. An "often heard as" column
+(misspellings rewritten to the word) was removed on 2026-11-12 at the user's request: it was hard to
+know what to enter there. Old saved JSON with its `heardAs` key still decodes; do not bring the column
+back without asking.
+- **Case correction, every engine:** `DictationDictionary.apply` case-corrects each word,
+  case-insensitively, longest first. Words starting or ending with a Latin letter/digit match as whole
+  words with Latin-only boundaries (so "Codex" matches in "用Codex写" but not inside "Codexes"); CJK
+  words match anywhere. Applied to every streamed partial (before the typewriter), the final/refined
+  text and the one-shot path.
+- **Seed hints:** hotwords go as `request.corpus.context`, a JSON *string* `{"hotwords":[{"word":…}]}`
+  (Volcengine streaming ASR docs, 6561/1354869), punctuation stripped, budgeted to ~90 estimated tokens
+  (docs: ~100 tokens for two-way streaming). Measured 2026-11-11 with a synthetic clip via
+  `--verify-seed-stream <file> --hotwords a,b`: the flash refinement (`auc_turbo`, where the field is
+  undocumented) consistently did better with hotwords: three runs each, without them it garbled all four
+  rare names ("GestoDEX", "pros mirror", "Typeplus", "Viber mode"), with them it got ProseMirror exact and
+  "Gestalt X"/"TypeLess" close (one earlier run was exact on all four; it did not repeat); the two-way
+  stream with hotwords consistently drifted into Chinese ("open户型", "。") and got worse, three runs out
+  of three. So hotwords go **only to the refinement after release**, never to the live stream
+  (`--stream-hotwords` re-measures that).
+- **OpenAI:** the words as the transcription `prompt` ("Vocabulary: …"). Apple and WhisperKit take no
+  hints here; case correction still applies.
+- The Language setting is not sent to Seed at all (it auto-detects Chinese/English/mixed speech).
+
+### Filler removal and editor context (2026-11-12, user's request)
+
+Prompted by Doubao IME's accuracy and filler handling. Two Seed rows in the Service group, both
+default on: **Remove Filler Words** (`dictationSeedRemoveFillers`) and **Use Text Before the Cursor**
+(`dictationSeedEditorContext`). Measured the same day with synthetic `say` clips through
+`--verify-seed-stream` (`--no-ddc`, `--context "…"`, `--nostream` compare variants):
+- **`enable_ddc` (语义顺滑)** goes on the stream and on the refinement. On the two-way stream it removes
+  嗯/那个/um/uh and stutters ("我想我想", "and then and then") well; on the accurate model behind the
+  refinement (flash `auc_turbo` and `bigmodel_nostream` gave identical text) it only drops 呃/uh. The
+  refinement replaces the streamed text, so `DictationFillers.clean` runs on the final Seed text
+  (`DictationController.finalText`: cleanup → dictionary → one line). It is deliberately narrow: 嗯/呃
+  anywhere, 那个/就是/额 only as their own clause, Latin hesitations as whole words, and repeats only
+  when they are stutters — 2+ Latin words, Latin function words (not "that that"/"is is"), CJK phrases
+  starting with a pronoun/connective. Chinese reduplication (研究研究, 谢谢, 看看) must stay; tests pin
+  the measured outputs and these keepers. Partials are not cleaned (the stream's own ddc already is).
+- **Editor context:** at Siri down (or hotkey down) `DictationEditorContext.read` takes the frontmost
+  app's focused text element off the main thread — never a secure field, only AXTextArea/TextField/
+  ComboBox, not a value equal to its placeholder (ChatGPT) — and keeps the last 500 characters before
+  the selection. It goes only to the refinement, as `corpus.context` with `context_type` "dialog_ctx"
+  and one `context_data` text, combined in the same JSON string with the hotwords (accepted together).
+  Docs allow 800 tokens / 20 entries, newest first. Result: "Type less" → "TypeLess", "Just Oled X …
+  Cross Mirror" → "Gestalt X … ProseMirror", consistently. That text leaves the Mac with the audio,
+  which is why it is a switch; the log records only its length and the filler switch.
+- **Refinement via `bigmodel_nostream`** (same day, user's request): every Seed hold (streaming or not)
+  opens a second WebSocket, `DictationRefinementStream`, to the streaming-input endpoint and feeds it the
+  same samples during the hold. Its first request carries hotwords + editor context + ddc, so it starts
+  once `DictationEditorContext.read(then:)` has answered; `SeedStreamingSession` holds earlier audio in
+  `pending` until `start` (and a session cancelled before `start` never connects). On release its final
+  is the refinement (`DictationController.accurateText`, route `stream + refined via nostream`); a failed,
+  empty or 4 s-late answer falls back to flash with the same hints. Measured with synthetic clips: up to
+  16 s nostream matched flash word for word and answered 0.5–1.4 s after the last packet, while flash
+  took 1.2–19 s in the same runs. It serves every hold length: holds with 3–5 s thinking pauses
+  (user's report: "a period appears even if I stop for a few seconds") showed flash ending a sentence
+  at every pause over ~3 s ("I want is. A way to…", "我通常是 一边想"), on 15–27 s clips in both
+  languages, while nostream punctuated by meaning ("我觉得我们应该把光标跟随的方式改一下，因为它在打字…").
+  `vad_segment_duration` (documented 3000 ms sentence-split silence) changed nothing on stream, nostream
+  or flash at 8/10/30 s, so it is not sent (verifier `--vad <ms>` re-measures). Known nostream limits
+  past its 15 s window: one stray break per long clip (". Rather than", "加。而不是") and a misread final
+  word on 21/22 s clips ("arrive. here", "改动。用，") where flash was right; judged far smaller than
+  flash's pause breaks. The live two-way stream still shows "。" at pauses in Chinese while Siri is
+  held (no parameter changed it); the refinement replaces it on release. With the live stream on,
+  the stream's own final is awaited only when the refinement failed. `--nostream` in the verifier runs
+  the session in parallel and starts it two packets late to exercise the buffering.
+- Seed-ASR 2.0 (`volc.seedasr.sauc.duration`) returned 403 on the user's account (not enabled in the console).
+
+### Dictation pane layout and alternative hotkey (2026-11-11, user's request)
+
+Settings › Dictation: an optional top hint (only when Siri is not set to Dictation, or only some profiles
+use it), one **Service** group holding the service, its language and that service's own rows (Seed: key,
+Type While Speaking, Remove Filler Words, Use Text Before the Cursor, App ID; no Seed footer), the Dictionary, and **Alternative Dictation Hotkey**. The
+"Last Dictation" status section and the usage/console sentences were removed at the user's request.
+- The hotkey (`dictationHotkey`: none, Left/Right Option, Command, Control) dictates like a Siri hold:
+  `DictationHotkeyMonitor` (NSEvent global + local monitors for flagsChanged/keyDown, started at launch)
+  feeds `DictationHotkeyGate`; press alone → `DictationController.begin(source: .macMicrophone)`,
+  release → `end()`. The remote's microphone only streams while Siri is physically held, so the hotkey
+  records the Mac's own microphone (`DictationAudioDevice.macMicrophoneID`: the system input if it is a
+  real microphone, else the built-in one, else any non-virtual input) and never changes the system
+  input (input switching was rejected on 2026-10-31). No drain grace for that source.
+- A modifier is half of every shortcut: another modifier already down at the press, or any key or
+  modifier while held, cancels the hold (`DictationController.cancel`, nothing typed). Sides are told
+  apart by the device-dependent flag bits (NX_DEVICE…KEYMASK). Events whose source pid is VibeRemote's
+  own are ignored, so a Siri mapping that holds Right Option cannot trigger it, and the hotkey only ends
+  or cancels holds it started (`recordingSource == .macMicrophone`).
+- Not yet tried on hardware/with a real microphone at the time of writing.
+
+### Advanced Menu customization (2026-11-11, user's request)
+
+The Controls card's **Normal | Advanced** segmented control (top of the remote card) switches the pills
+between what each button does and what it does while the Advanced Menu is open; Restore Defaults resets
+the mode on screen. (A separate Advanced Menu section briefly existed the same day and was folded into
+this switch.) In Advanced mode the opener's pill always reads Advanced Menu and the clickpad keeps its
+fixed text. Advanced mode sets any `AdvancedMenuAction` or
+None, per remote family, global (not per profile). `AdvancedMenuMapping` holds the built-in layout
+(`defaultAction`), the offered buttons (glass: Siri, Menu, TV, Volume ±; aluminum adds Power and
+Play/Pause), and `advancedMenuOverrides` = {generation: {button: raw | "none"}}, validated on read;
+choosing a default removes the entry. The opener (Mute / glass Play/Pause) stays fixed. The controller
+re-reads overrides on every press into `AdvancedMenuInputState.overrides`, and the panel draws each slot
+from the button that owns it (Back top-left, glass TV top-right, Siri/aluminum Play/Pause middle-left,
+Volume ± in the history capsule; a None slot is an empty glass), so icons always match behaviour.
+Power and aluminum TV have no slot but still act.
+
+### Auto Computer Use (2026-11-13, user's request)
+
+Settings › Computer Use › **Auto Computer Use** (`autoComputerUse`, default off). With it on, a Siri
+hold whose action is VibeRemote Dictation decides by what has the focus:
+- `DictationController.begin` gives each hold a `HoldTarget`. If the Computer Use bar is already up,
+  key and composing, the hold goes there at once and adds to what the bar holds. Otherwise it is
+  `.pending` and `AutoComputerUse.probeFocusedTextInput` asks the frontmost app's focused element off
+  the main thread (0.1 s AX timeouts, app element rather than system-wide, as for ChatGPT). A
+  text area / text field / combo box with a readable selection keeps the hold an ordinary dictation;
+  anything else (or nothing focused) calls `ComputerUseHandoff.open` (the same `show(fresh: true)` as
+  a Computer Use button, after cancelling caret positioning and the Advanced Menu).
+- Recording starts at Siri down regardless; only the destination waits. `DictationLiveHold.Routing`
+  keeps partials while `.pending` and then delivers the latest one to the typewriter or the bar.
+  Routed to the bar, partials set `ComputerUseAgent.command` directly (no keystrokes, no AX), the
+  orange cursor is hidden, and nothing is typed into any app.
+- On release the polished transcript — the refinement (nostream/flash) after filler cleanup and the
+  dictionary, i.e. `finalText`, the same text dictation would type — replaces the bar's words and is
+  submitted as the command. An empty result leaves the bar open. A probe still unanswered at finish
+  falls back to ordinary dictation. A running command (`isBusy`) makes the hold an ordinary dictation.
+- It applies only to remote Siri holds set to Dictation (not the keyboard hotkey, not held-key Siri
+  mappings, whose third-party dictation app VibeRemote cannot steer). The glass remote reaches it
+  the same way. The user confirmed it works from a real aluminum hold on 2026-11-13 (log: two holds with
+  no text field in focus, `→ Computer Use`, 21 and 37 characters sent, nothing typed); the glass remote
+  and the in-text-field branch under the switch were not separately checked that day.
 
 ### Dictation trigger (2026-10-31)
 

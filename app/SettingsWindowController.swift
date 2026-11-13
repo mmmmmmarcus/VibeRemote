@@ -178,11 +178,9 @@ extension ButtonAction {
         case .rightCmd: return "Right Command"
         case .rightOpt: return "Right Option"
         case .launchAgentClient: return "Codex / Claude"
-        case .bulletIndent: return "New / Indent"
+        case .bulletIndent: return "Indent"
         case .bulletOutdent: return "Outdent"
         case .slashOrModifier: return "Skill / Modifier"
-        case .shiftEnterOrModifier: return "Newline / Modifier"
-        case .agentClientOrSlash: return "Client / Skill"
         case .advancedMenu: return "Advanced Menu"
         case .skillPicker: return "Skill"
         case .slashSkill: return "Skill (/)"
@@ -191,6 +189,7 @@ extension ButtonAction {
         case .undo: return "Undo"
         case .redo: return "Redo"
         case .vibeDictation: return "Dictation"
+        case .computerUse: return "Computer Use"
         case .none: return "None"
         }
     }
@@ -286,7 +285,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// `agent` keeps its raw value so saved accessibility identifiers and any stored
     /// selection survive the renames of its visible title (now "Computer Use"); `remote`
     /// likewise keeps its raw value after becoming "Controls" (2026-11-11).
-    case remote, device, dictation, agent, diagnostics, about
+    case remote, device, dictation, agent, about
     var id: String { rawValue }
 
     /// The remote and what it drives. Controls is everything about what the buttons and the
@@ -294,8 +293,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// physical remote itself (its connection, battery, bridge and Auto Disconnect). Split at the
     /// user's request on 2026-11-11, when Text Cursor also merged into Controls.
     static let remoteTabs: [SettingsTab] = [.remote, .device, .dictation, .agent]
-    /// About the app rather than the remote, so they close the sidebar in their own group.
-    static let appTabs: [SettingsTab] = [.diagnostics, .about]
+    /// About the app rather than the remote, pinned to the bottom of the sidebar. Diagnostics
+    /// merged into About on 2026-11-11 at the user's request.
+    static let appTabs: [SettingsTab] = [.about]
 
     var title: String {
         switch self {
@@ -303,7 +303,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .device: return "Device"
         case .dictation: return "Dictation"
         case .agent: return "Computer Use"
-        case .diagnostics: return "Diagnostics"
         case .about: return "About"
         }
     }
@@ -314,7 +313,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .device: return "appletvremote.gen4"
         case .dictation: return "waveform"
         case .agent: return "cursorarrow.motionlines"
-        case .diagnostics: return "stethoscope"
         case .about: return "info.circle"
         }
     }

@@ -23,7 +23,9 @@ enum RemoteButtonMapping {
     static func defaultAction(button: String, generation: RemoteGeneration, siriAction: ButtonAction) -> ButtonAction {
         guard !generation.absentButtonKeys.contains(button) else { return .none }
         if button == AdvancedMenuInputState.trigger(for: generation) { return .advancedMenu }
-        if button == "playPause" { return .skillPicker }
+        // Computer Use since 2026-11-13 (user's request), Esc from 2026-11-11, Skill before. The
+        // glass remote's Play/Pause is the Advanced Menu opener (above), so this is aluminum's.
+        if button == "playPause" { return .computerUse }
         if button == "select" {
             // During caret positioning the controller consumes this click to confirm.
             // Outside positioning only the old remote uses it as Enter (no Power key).
@@ -40,8 +42,8 @@ enum RemoteButtonMapping {
     /// Everything the user may pick for a non-Siri button, the button's own default first; nil
     /// for controls with a fixed role (Advanced Menu opener, caret confirmation, the clickpad
     /// ring, directions) and for buttons this remote does not have. Siri has its own list,
-    /// `isAssignableToSiriButton`. TV only takes instant actions: its tap waits for release so
-    /// a 0.5 s hold can open Computer Use, which would strand a repeat or a held key.
+    /// `isAssignableToSiriButton`. No button but Siri has a hold action (2026-11-13, user's
+    /// request), so every button is offered the same list.
     static func choices(button: String, generation: RemoteGeneration) -> [ButtonAction]? {
         let button = overrideKey(button)
         guard !generation.absentButtonKeys.contains(button),
@@ -50,10 +52,9 @@ enum RemoteButtonMapping {
         else { return nil }
         let menu: [ButtonAction] = [.enterKey, .shiftEnter, .commandEnter, .backspace, .escKey, .ctrlC,
                                     .undo, .redo, .bulletIndent, .bulletOutdent, .skillPicker,
-                                    .slashSkill, .dollarSkill, .launchAgentClient, .none]
+                                    .slashSkill, .dollarSkill, .launchAgentClient, .computerUse, .none]
         let baseline = defaultAction(button: button, generation: generation, siriAction: .spaceKey)
-        let offered = button == "tv" ? menu.filter(\.isInstant) : menu
-        return [baseline] + offered.filter { $0 != baseline }
+        return [baseline] + menu.filter { $0 != baseline }
     }
 }
 
@@ -99,40 +100,3 @@ struct RemoteMediaEventCorrelation {
     }
 }
 
-/// Long-pressing TV opens the computer-use agent; a tap keeps TV's own action. A plain
-/// Shift+Enter tap is deferred to release so the hold can become the agent instead. The
-/// 1st-gen TV doubles as a modifier, so its press passes through and a chorded hold never
-/// opens the agent.
-struct AgentButtonGate {
-    static let button = "tv"
-    static let holdDuration: TimeInterval = 0.5
-
-    enum Release: Equatable {
-        /// Run the button's normal release handling.
-        case passThrough
-        /// The deferred press was a tap: run the press and release now.
-        case tap
-        /// Open the agent; `passThrough` also runs the normal release first.
-        case openAgent(passThrough: Bool)
-    }
-
-    private var pressedAt: TimeInterval?
-    private var deferred = false
-
-    /// Returns true when the press must not run the button's action yet.
-    mutating func press(at time: TimeInterval, defersTap: Bool) -> Bool {
-        pressedAt = time
-        deferred = defersTap
-        return defersTap
-    }
-
-    mutating func release(at time: TimeInterval, chorded: Bool) -> Release {
-        guard let start = pressedAt else { return .passThrough }
-        pressedAt = nil
-        let held = time - start >= Self.holdDuration
-        if deferred { return held ? .openAgent(passThrough: false) : .tap }
-        return held && !chorded ? .openAgent(passThrough: true) : .passThrough
-    }
-
-    mutating func reset() { pressedAt = nil; deferred = false }
-}

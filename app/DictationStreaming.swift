@@ -14,6 +14,9 @@ import Foundation
 /// in the client's compression, and raw 16-bit PCM barely shrinks anyway.
 enum SeedStreamFrame {
     static let endpoint = URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async")!
+    /// Volcengine's streaming-input mode: the same protocol, but it answers only after the last
+    /// packet (or every 15 s of audio), with the more accurate non-streaming model.
+    static let nostreamEndpoint = URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream")!
     static let defaultResourceID = "volc.bigasr.sauc.duration"
     /// 200 ms of 16 kHz mono s16le, the packet size the documentation says performs best.
     static let audioPacketBytes = 6_400
@@ -34,12 +37,24 @@ enum SeedStreamFrame {
     /// the user is still speaking, so a long hold was rewritten several times before release; the
     /// user asked (2026-11-10) for one refinement after release instead, which
     /// `DictationController.finishStreaming` gets from the flash API with the recorded clip.
-    static func requestJSON(appID: String) -> Data {
+    /// `context` is hotwords as Volcengine's `request.corpus.context` JSON string. Dictation does
+    /// not send it on the stream (it degraded two-way recognition, see `startStream`); the
+    /// verifier's `--stream-hotwords` still can, to re-measure.
+    /// `removeFillers` is `enable_ddc` (语义顺滑), the same flag the refinement sends.
+    /// `sentenceSilence` is `vad_segment_duration` in ms, documented as the silence after which a
+    /// new sentence starts (default 3000). Measured 2026-11-12 it changed nothing on any endpoint,
+    /// so dictation leaves it unset; the verifier's `--vad` keeps it measurable.
+    static func requestJSON(appID: String, context: String? = nil, removeFillers: Bool = false,
+                            sentenceSilence: Int? = nil) -> Data {
+        var request: [String: Any] = ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true,
+                                      "enable_ddc": removeFillers,
+                                      "enable_nonstream": false, "show_utterances": true, "result_type": "full"]
+        if let context { request["corpus"] = ["context": context] }
+        if let sentenceSilence { request["vad_segment_duration"] = sentenceSilence }
         let body: [String: Any] = [
             "user": ["uid": appID.isEmpty ? "viberemote" : appID],
             "audio": ["format": "pcm", "codec": "raw", "rate": 16_000, "bits": 16, "channel": 1],
-            "request": ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true,
-                        "enable_nonstream": false, "show_utterances": true, "result_type": "full"],
+            "request": request,
         ]
         return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
     }
@@ -138,11 +153,15 @@ final class SeedStreamingSession: @unchecked Sendable {
     private var pending = Data()
     private var finished = false
     private var closed = false
+    /// Audio may arrive before `start` (the refinement session waits for the editor context):
+    /// it is held in `pending` and sent once the request has gone out.
+    private var started = false
 
     init(onEvent: @escaping @Sendable (Event) -> Void) { self.onEvent = onEvent }
 
-    static func request(accessKey: String, appID: String, resourceID: String) -> URLRequest {
-        var request = URLRequest(url: SeedStreamFrame.endpoint, timeoutInterval: 15)
+    static func request(accessKey: String, appID: String, resourceID: String,
+                        endpoint: URL = SeedStreamFrame.endpoint) -> URLRequest {
+        var request = URLRequest(url: endpoint, timeoutInterval: 15)
         if appID.isEmpty {
             request.setValue(accessKey, forHTTPHeaderField: "X-Api-Key")
         } else {
@@ -154,15 +173,35 @@ final class SeedStreamingSession: @unchecked Sendable {
         return request
     }
 
-    func start(_ request: URLRequest, appID: String) {
+    func start(_ request: URLRequest, appID: String, context: String? = nil, removeFillers: Bool = false,
+               sentenceSilence: Int? = nil) {
         queue.async {
+            // A refinement session can be cancelled (hold too short) before its context arrives.
+            guard !self.closed else { return }
             let session = URLSession(configuration: .ephemeral)
             let task = session.webSocketTask(with: request)
             self.session = session; self.task = task
             task.resume()
-            self.send(SeedStreamFrame.fullClientRequest(json: SeedStreamFrame.requestJSON(appID: appID)))
+            self.send(SeedStreamFrame.fullClientRequest(json: SeedStreamFrame.requestJSON(appID: appID, context: context,
+                                                                                     removeFillers: removeFillers,
+                                                                                     sentenceSilence: sentenceSilence)))
+            self.started = true
+            self.flushPackets()
+            if self.finished { self.sendLast() }
             self.receive()
         }
+    }
+
+    private func flushPackets() {
+        while pending.count >= SeedStreamFrame.audioPacketBytes {
+            send(SeedStreamFrame.audio(pending.prefix(SeedStreamFrame.audioPacketBytes), last: false))
+            pending.removeFirst(SeedStreamFrame.audioPacketBytes)
+        }
+    }
+
+    private func sendLast() {
+        send(SeedStreamFrame.audio(pending, last: true))
+        pending = Data()
     }
 
     /// Called from the recorder's render thread with 16 kHz mono samples.
@@ -170,10 +209,7 @@ final class SeedStreamingSession: @unchecked Sendable {
         queue.async {
             guard !self.finished, !self.closed else { return }
             self.pending.append(SeedStreamFrame.pcm16(samples))
-            while self.pending.count >= SeedStreamFrame.audioPacketBytes {
-                self.send(SeedStreamFrame.audio(self.pending.prefix(SeedStreamFrame.audioPacketBytes), last: false))
-                self.pending.removeFirst(SeedStreamFrame.audioPacketBytes)
-            }
+            if self.started { self.flushPackets() }
         }
     }
 
@@ -182,8 +218,7 @@ final class SeedStreamingSession: @unchecked Sendable {
         queue.async {
             guard !self.finished, !self.closed else { return }
             self.finished = true
-            self.send(SeedStreamFrame.audio(self.pending, last: true))
-            self.pending = Data()
+            if self.started { self.sendLast() }
         }
     }
 
@@ -276,21 +311,50 @@ enum DictationTypewriterPlan {
     /// While Siri is held the screen only grows (user's request, 2026-11-10: deleting and
     /// retyping partials looked unstable, and the refined result after release replaces them
     /// anyway). It shows what two consecutive partials agree on, so the recognizer's still-moving
-    /// tail stays off screen. When a revision changes text already shown, typing carries on after
-    /// the shown text's last few characters, found again near the end of the agreed text; if those
-    /// were revised away too, nothing is added until release.
+    /// tail stays off screen. When a revision changes text already shown, typing carries on from
+    /// where the shown text's end falls in the agreed text (`alignedEnd`); only when it cannot be
+    /// found at all is nothing added until release.
     static func growth(shown target: String, previous: String, latest: String) -> String {
         let agreed = commonPrefix(previous, latest)
         if agreed.hasPrefix(target) { return agreed.count > target.count ? agreed : target }
-        guard !target.isEmpty else { return agreed }
-        let anchor = String(target.suffix(min(6, target.count)))
-        guard let found = agreed.range(of: anchor, options: .backwards),
-              // The anchor's real place is about where the shown text ends; an earlier repeat of
-              // the same characters would type a duplicate.
-              abs(agreed.distance(from: agreed.startIndex, to: found.upperBound) - target.count) <= 12
-        else { return target }
-        let rest = agreed[found.upperBound...]
-        return rest.isEmpty ? target : target + rest
+        guard !target.isEmpty, let end = alignedEnd(of: target, in: agreed) else { return target.isEmpty ? agreed : target }
+        return target + agreed[agreed.index(agreed.startIndex, offsetBy: end)...]
+    }
+
+    /// Where the end of the shown text falls in the agreed text. Its last characters are found
+    /// again near where they ended; failing that, a longer run of them that occurs exactly once,
+    /// because revisions of earlier text add up: a 15 s hold on 2026-11-13 drifted past the
+    /// former fixed 12-character window and typing stopped at 114 of 276 characters. If the
+    /// last characters themselves were revised ("cafe" → "café"), the run a few characters
+    /// earlier stands in and as many agreed characters are skipped as follow it on screen.
+    /// A character offset into `agreed`.
+    static func alignedEnd(of shown: String, in agreed: String) -> Int? {
+        let shown = Array(shown), agreed = Array(agreed)
+        func endings(of anchor: ArraySlice<Character>) -> [Int] {
+            guard !anchor.isEmpty, anchor.count <= agreed.count else { return [] }
+            return (anchor.count...agreed.count).filter { agreed[($0 - anchor.count)..<$0].elementsEqual(anchor) }
+        }
+        for skip in 0...min(8, shown.count - 1) {
+            let end = shown.count - skip
+            // Skip only within the last word: a skipped space or punctuation means the anchor
+            // would come from an earlier word, which a repeat elsewhere can match.
+            if skip > 0, !(shown[(end - 1)...]).allSatisfy({ $0.isLetter || $0.isNumber }) { break }
+            var found: Int?
+            // Near its expected place, the last such occurrence (an earlier repeat of the same
+            // characters would type a duplicate).
+            let near = shown[max(0, end - 6)..<end]
+            if let last = endings(of: near).last(where: { abs($0 - end) <= 12 }) {
+                found = last
+            } else if end >= 12 {
+                // Anywhere, when a 12-character run is unambiguous.
+                let long = endings(of: shown[(end - 12)..<end])
+                if long.count == 1 { found = long[0] }
+            }
+            if let found {
+                return agreed.count >= found + skip ? found + skip : nil
+            }
+        }
+        return nil
     }
 
     static func commonPrefix(_ a: String, _ b: String) -> String {
@@ -319,6 +383,31 @@ enum DictationTypewriterPlan {
         }
         return result
     }
+
+    /// The final correction in one step (2026-11-12, user's request: backspacing the old tail
+    /// read like a person deleting): the UTF-16 range of what is replaced — from the end of the
+    /// common prefix to the end of what this hold typed, never before `anchor`.
+    static func replacementRange(anchor: Int, displayed: String, delete: Int) -> CFRange {
+        let kept = String(displayed.prefix(max(0, displayed.count - delete)))
+        let start = anchor + kept.utf16.count
+        return CFRange(location: start, length: anchor + displayed.utf16.count - start)
+    }
+
+    /// Splits text into key events of at most 20 UTF-16 units each, on character boundaries.
+    static func chunks(_ text: String) -> [String] {
+        var result: [String] = []
+        var rest = Substring(text)
+        while !rest.isEmpty {
+            let piece = chunk(String(rest), characters: rest.count)
+            result.append(piece)
+            rest = rest.dropFirst(piece.count)
+        }
+        return result
+    }
+
+    /// Selection checks after the replacement selection is written (Chromium applies it
+    /// asynchronously), 15 ms apart.
+    static let maximumSelectionWaits = 8
 
     enum CaretCheck: Equatable { case proceed, wait }
 
@@ -351,6 +440,10 @@ final class DictationTypewriter {
     private(set) var isDone = false
     private(set) var stoppedReason: String?
     private(set) var deletedCharacters = 0
+    /// How the corrections were made, for the hold's log line.
+    var correctionMethod: String {
+        deletedCharacters == 0 ? "" : selectionUnavailable ? " by Backspace" : " by selection"
+    }
     var onEmit: (() -> Void)?
 
     private var target = ""
@@ -362,6 +455,10 @@ final class DictationTypewriter {
     private var caretWaits = 0
     private var focus: Focus?
     private var lastElementCheck: TimeInterval = 0
+    /// The final replacement's selection, written and awaiting confirmation.
+    private var replacing: (range: CFRange, waits: Int)?
+    /// Selecting failed once in this editor: further corrections use Backspace.
+    private var selectionUnavailable = false
     private var previous: DictationTypewriter?
 
     init(after previous: DictationTypewriter?) {
@@ -429,6 +526,10 @@ final class DictationTypewriter {
             if finishing { complete() }
             return
         }
+        if let pending = replacing, let focus, let element = focus.element {
+            confirmReplacement(pending, element: element, focus: focus, plan: plan)
+            return
+        }
         if settleTicks > 0 { settleTicks -= 1; schedule(DictationTypewriterPlan.tick); return }
         if focus == nil { focus = Self.captureFocus() }
         guard let focus else { stop("no focused app"); return }
@@ -448,6 +549,17 @@ final class DictationTypewriter {
                 return
             }
             caretWaits = 0
+            // After release: select the tail being replaced and type over it, instead of
+            // backspacing it away one key at a time.
+            if finishing, !selectionUnavailable, let anchor = focus.anchor, let element = focus.element {
+                let range = DictationTypewriterPlan.replacementRange(anchor: anchor, displayed: displayed, delete: plan.delete)
+                if Self.select(element, range) {
+                    replacing = (range, 0)
+                    schedule(0.015)
+                    return
+                }
+                selectionUnavailable = true
+            }
             let count = min(plan.delete, DictationTypewriterPlan.maximumDeletesPerTick)
             for _ in 0..<count {
                 RemoteInputHandler.makeKeyEvent(keyCode: 51, flags: [], keyDown: true)?.post(tap: .cghidEventTap)
@@ -462,13 +574,73 @@ final class DictationTypewriter {
             schedule(DictationTypewriterPlan.tick)
             return
         }
+        // After release the refined text goes in at once; while Siri is held it is paced.
+        if finishing {
+            type(plan.insert)
+            displayed += plan.insert
+            onEmit?()
+            schedule(DictationTypewriterPlan.tick)
+            return
+        }
         let pace = DictationTypewriterPlan.pace(backlog: plan.insert.count)
         let chunk = DictationTypewriterPlan.chunk(plan.insert, characters: pace.characters)
-        RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: true, text: chunk)?.post(tap: .cghidEventTap)
-        RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: false, text: chunk)?.post(tap: .cghidEventTap)
+        type(chunk)
         displayed += chunk
         onEmit?()
         schedule(pace.interval)
+    }
+
+    private func type(_ text: String) {
+        for chunk in DictationTypewriterPlan.chunks(text) {
+            RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: true, text: chunk)?.post(tap: .cghidEventTap)
+            RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: false, text: chunk)?.post(tap: .cghidEventTap)
+        }
+    }
+
+    /// Types over the selection once the editor reports exactly the range written; typing
+    /// replaces a selection, and an empty replacement is one Backspace. If the editor never
+    /// confirms it, the caret goes back to the end of the hold's text and Backspace takes over.
+    private func confirmReplacement(_ pending: (range: CFRange, waits: Int), element: AXUIElement,
+                                    focus: Focus, plan: (delete: Int, insert: String)) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == focus.pid, Self.stillFocused(focus) else {
+            replacing = nil
+            stop("focus moved during the correction")
+            return
+        }
+        let observed = Self.selection(element)
+        guard let observed, observed.location == pending.range.location, observed.length == pending.range.length else {
+            if pending.waits + 1 >= DictationTypewriterPlan.maximumSelectionWaits {
+                replacing = nil
+                selectionUnavailable = true
+                if let anchor = focus.anchor {
+                    _ = Self.select(element, CFRange(location: anchor + displayed.utf16.count, length: 0))
+                }
+                schedule(0.03)
+            } else {
+                replacing = (pending.range, pending.waits + 1)
+                schedule(0.015)
+            }
+            return
+        }
+        replacing = nil
+        if plan.insert.isEmpty {
+            RemoteInputHandler.makeKeyEvent(keyCode: 51, flags: [], keyDown: true)?.post(tap: .cghidEventTap)
+            RemoteInputHandler.makeKeyEvent(keyCode: 51, flags: [], keyDown: false)?.post(tap: .cghidEventTap)
+        } else {
+            type(plan.insert)
+        }
+        displayed.removeLast(plan.delete)
+        displayed += plan.insert
+        deletedCharacters += plan.delete
+        onEmit?()
+        schedule(DictationTypewriterPlan.tick)
+    }
+
+    private static func select(_ element: AXUIElement, _ range: CFRange) -> Bool {
+        var range = range
+        guard let value = AXValueCreate(.cfRange, &range) else { return false }
+        AXUIElementSetMessagingTimeout(element, 0.05)
+        return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
     }
 
     private static func captureFocus() -> Focus? {
@@ -520,7 +692,28 @@ enum SeedStreamVerifier {
     }
 
     static func run(path: String) -> Never {
-        let settings = DictationSettings.load()
+        var settings = DictationSettings.load()
+        // `--hotwords a,b` checks the dictionary's hints without touching the saved dictionary;
+        // `--hotwords ""` runs without any.
+        if let index = CommandLine.arguments.firstIndex(of: "--hotwords"), CommandLine.arguments.indices.contains(index + 1) {
+            settings.dictionary = CommandLine.arguments[index + 1].split(separator: ",")
+                .map { DictationDictionaryEntry(word: $0.trimmingCharacters(in: .whitespaces)) }
+        }
+        // `--context "text"` stands in for the text before the caret; `--no-ddc` turns filler
+        // removal off, so both can be compared on the same clip.
+        var editorText: String?
+        if let index = CommandLine.arguments.firstIndex(of: "--context"), CommandLine.arguments.indices.contains(index + 1) {
+            editorText = CommandLine.arguments[index + 1]
+        }
+        if CommandLine.arguments.contains("--no-ddc") { settings.seedRemoveFillers = false }
+        // `--vad <ms>` sets `vad_segment_duration` on every request (Volcengine's default otherwise).
+        var sentenceSilence: Int?
+        if let index = CommandLine.arguments.firstIndex(of: "--vad"), CommandLine.arguments.indices.contains(index + 1) {
+            sentenceSilence = Int(CommandLine.arguments[index + 1])
+        }
+        print("sentence silence: \(sentenceSilence.map { "\($0) ms" } ?? "default")")
+        let context = DictationDictionary.seedContext(settings.dictionary, editorText: editorText)
+        print("hotwords: \(DictationDictionary.hotwords(settings.dictionary)), editor context: \(editorText?.count ?? 0) chars, remove fillers: \(settings.seedRemoveFillers)")
         guard let key = DictationKeychain.key(for: .seedASR) else { print("No Seed ASR key in the Keychain."); exit(2) }
         guard let samples = loadSamples(URL(fileURLWithPath: path)) else { print("Could not read \(path)."); exit(2) }
         let record = Record()
@@ -543,17 +736,49 @@ enum SeedStreamVerifier {
                 done.signal()
             }
         }
+        // `--nostream` feeds the same packets to the streaming-input mode in parallel, the way a
+        // hold would, to compare it with the flash refinement.
+        let nostream = Record()
+        let nostreamDone = DispatchSemaphore(value: 0)
+        let second: SeedStreamingSession? = CommandLine.arguments.contains("--nostream") ? SeedStreamingSession { event in
+            let now = ProcessInfo.processInfo.systemUptime - started
+            nostream.lock.lock(); defer { nostream.lock.unlock() }
+            switch event {
+            case .partial(let result): nostream.partials += 1; nostream.final = result.text
+            case .final(let result):
+                if let result { nostream.final = result.text }
+                nostream.finalAt = now
+                nostreamDone.signal()
+            case .failed(let reason): nostream.failure = reason; nostreamDone.signal()
+            }
+        } : nil
+        // Started after the first packets, as in a hold that waits for the editor context, so the
+        // session's buffering of early audio is exercised too.
+        let startSecond = {
+            second?.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
+                                                       resourceID: settings.seedStreamResourceID,
+                                                       endpoint: SeedStreamFrame.nostreamEndpoint),
+                          appID: settings.seedAppID, context: context, removeFillers: settings.seedRemoveFillers,
+                          sentenceSilence: sentenceSilence)
+        }
         session.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
-                                                   resourceID: settings.seedStreamResourceID), appID: settings.seedAppID)
+                                                   resourceID: settings.seedStreamResourceID), appID: settings.seedAppID,
+                      context: CommandLine.arguments.contains("--stream-hotwords") ? context : nil,
+                      removeFillers: settings.seedRemoveFillers, sentenceSilence: sentenceSilence)
         let packet = SeedStreamFrame.audioPacketBytes / 2
         var offset = 0
         while offset < samples.count {
-            session.append(Array(samples[offset..<min(samples.count, offset + packet)]))
+            let chunk = Array(samples[offset..<min(samples.count, offset + packet)])
+            session.append(chunk)
+            second?.append(chunk)
             offset += packet
+            if offset == 2 * packet { startSecond() }
             Thread.sleep(forTimeInterval: 0.2)
         }
         let lastSent = ProcessInfo.processInfo.systemUptime - started
+        if offset < 2 * packet { startSecond() }
         session.finish()
+        second?.finish()
         let answered = done.wait(timeout: .now() + 15) == .success
         record.lock.lock(); defer { record.lock.unlock() }
         print(String(format: "audio: %.1f s, partial updates: %d", Double(samples.count) / 16_000, record.partials))
@@ -561,7 +786,32 @@ enum SeedStreamVerifier {
         if let failure = record.failure { print("failed: \(failure)"); exit(1) }
         guard answered, let finalAt = record.finalAt else { print("no final result within 15 s"); exit(1) }
         print(String(format: "final: %.2f s after the last packet", finalAt - lastSent))
-        print("text: \(record.final ?? "")")
+        print("stream text: \(record.final ?? "")")
+        if second != nil {
+            _ = nostreamDone.wait(timeout: .now() + 15)
+            nostream.lock.lock()
+            if let failure = nostream.failure { print("nostream failed: \(failure)") }
+            else { print(String(format: "nostream text (%.2f s after the last packet): %@", (nostream.finalAt ?? 0) - lastSent, nostream.final ?? "")) }
+            nostream.lock.unlock()
+        }
+        let flashStarted = ProcessInfo.processInfo.systemUptime
+        // The refinement after release, with the same hotwords and editor context.
+        let refined = DispatchSemaphore(value: 0)
+        let engine = SeedASRDictationEngine(accessKey: key, appID: settings.seedAppID,
+                                            resourceID: settings.seedResourceID, context: context,
+                                            removeFillers: settings.seedRemoveFillers,
+                                            sentenceSilence: sentenceSilence)
+        let clip = DictationAudio(samples: samples)
+        Task.detached {
+            do {
+                let text = try await engine.transcribe(clip, language: "")
+                print(String(format: "flash text (%.2f s): %@", ProcessInfo.processInfo.systemUptime - flashStarted, text))
+                if settings.seedRemoveFillers { print("flash cleaned: \(DictationFillers.clean(text))") }
+            }
+            catch { print("flash failed: \(error.localizedDescription)") }
+            refined.signal()
+        }
+        _ = refined.wait(timeout: .now() + 30)
         exit(0)
     }
 
@@ -601,7 +851,34 @@ final class DictationLiveHold {
     private(set) var ended = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    init(typewriter: DictationTypewriter) { self.typewriter = typewriter }
+    /// Applied to every partial before it reaches the typewriter, so the screen shows the
+    /// dictionary's spellings while speaking too.
+    let dictionary: [DictationDictionaryEntry]
+
+    /// Where partials go. Auto Computer Use decides at Siri down whether the hold types into the
+    /// focused editor or fills the Computer Use bar; until that probe answers (a few ms, long
+    /// before the first partial) partials are only kept.
+    enum Routing { case pending, typewriter, handoff((String) -> Void) }
+    private(set) var routing: Routing = .typewriter
+
+    /// Sets where partials go and delivers the latest one there at once.
+    func route(_ routing: Routing) {
+        self.routing = routing
+        if let latest { deliver(DictationDictionary.apply(dictionary, to: latest.text)) }
+    }
+
+    private func deliver(_ text: String) {
+        switch routing {
+        case .pending: break
+        case .typewriter: typewriter.update(text)
+        case .handoff(let show): show(text)
+        }
+    }
+
+    init(typewriter: DictationTypewriter, dictionary: [DictationDictionaryEntry] = []) {
+        self.typewriter = typewriter
+        self.dictionary = dictionary
+    }
 
     /// A final result arrived, so its text (possibly empty) is the answer.
     var succeeded: Bool { ended && failure == nil }
@@ -613,7 +890,7 @@ final class DictationLiveHold {
             partials += 1
             if firstTextAt == nil, !result.text.isEmpty { firstTextAt = Date() }
             latest = result
-            typewriter.update(result.text)
+            deliver(DictationDictionary.apply(dictionary, to: result.text))
         case .final(let result):
             if let result { latest = result }
             end()
@@ -625,6 +902,83 @@ final class DictationLiveHold {
     }
 
     /// Returns once the server has answered the last packet, failed, or `timeout` passed.
+    func waitForEnd(timeout: TimeInterval) async {
+        guard !ended else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self, !self.ended else { return }
+                self.failure = "no final result within \(Int(timeout)) s"
+                self.session?.cancel()
+                self.end()
+            }
+        }
+    }
+
+    func cancel() {
+        session?.cancel()
+        if !ended { failure = "cancelled"; end() }
+    }
+
+    private func end() {
+        ended = true
+        let pending = waiters
+        waiters = []
+        pending.forEach { $0.resume() }
+    }
+}
+
+// MARK: - The refinement session
+
+/// The accurate pass of one Seed hold (2026-11-12, user's request): the same audio, fed during
+/// the hold to Volcengine's streaming-input mode (`bigmodel_nostream`), which answers only after
+/// the last packet, with the non-streaming model. Measured the same day on clips up to 16 s it
+/// gave the flash API's text word for word, 0.5–1.4 s after release instead of flash's 1.2–19 s,
+/// because the audio is already uploaded when Siri is released. It also punctuates by meaning
+/// across thinking pauses, where flash ends a sentence at every pause over ~3 s, so it serves
+/// every hold length; past 15 s it can misread a word or add a break near its window seam. It carries the hints the live stream does not take: the
+/// dictionary's hotwords and the text before the caret. Flash stays the fallback.
+@MainActor
+final class DictationRefinementStream {
+    var session: SeedStreamingSession?
+    private(set) var text: String?
+    private(set) var failure: String?
+    private(set) var ended = false
+    private var latest: String?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// A session whose events reach `stream`; the caller starts it once the hints are known.
+    static func make() -> DictationRefinementStream {
+        let stream = DictationRefinementStream()
+        stream.session = SeedStreamingSession { [weak stream] event in
+            Task { @MainActor in stream?.handle(event) }
+        }
+        return stream
+    }
+
+    /// The answer, or nil when the session failed, timed out or recognized nothing.
+    var answer: String? {
+        guard ended, failure == nil, let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
+    }
+
+    func handle(_ event: SeedStreamingSession.Event) {
+        guard !ended else { return }
+        switch event {
+        case .partial(let result):
+            // Every 15 s of audio the mode reports what it has; the final result is the answer.
+            latest = result.text
+        case .final(let result):
+            text = result?.text ?? latest
+            end()
+        case .failed(let reason):
+            failure = reason
+            rmDebug("⚠️ Dictation refinement stream failed: \(reason)")
+            end()
+        }
+    }
+
     func waitForEnd(timeout: TimeInterval) async {
         guard !ended else { return }
         await withCheckedContinuation { continuation in

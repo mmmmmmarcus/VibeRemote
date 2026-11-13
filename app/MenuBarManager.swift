@@ -108,10 +108,6 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case bulletOutdent = "Bullet: Outdent / Remove"
     // Keep the persisted raw value stable for existing Siri-button assignments.
     case slashOrModifier = "Slash: Skill Picker / Hold: Modifier"
-    /// 1st-gen stand-in for the mute button's modifier half (the remote has no mute key).
-    case shiftEnterOrModifier = "Shift + Enter: Newline / Hold: Modifier"
-    /// 1st-gen stand-in for the mute button's "/" half.
-    case agentClientOrSlash = "Toggle Codex / Claude Desktop / Hold: Slash"
     case none = "None"
     case advancedMenu = "Advanced Menu"
     case positionCaret = "Position text cursor"
@@ -126,6 +122,9 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// of `skillPicker`'s detection of the frontmost app. Claude's seed uses `/`, ChatGPT's `$`.
     case slashSkill = "Skill Picker: /"
     case dollarSkill = "Skill Picker: $"
+    /// Opens the Computer Use bar, or closes it / stops its command (2026-11-13, user's
+    /// request; aluminum Play/Pause's default, and the only remote entry since TV's hold went).
+    case computerUse = "Computer Use"
 
     var requiresHold: Bool {
         switch self {
@@ -145,18 +144,6 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// tail to drain, so the end of the sentence is not cut off.
     var holdsDictation: Bool { requiresHold || self == .vibeDictation }
 
-    /// One keystroke on press, nothing held or repeated: safe to defer to release, which the
-    /// TV button does so that holding it can open Computer Use instead.
-    var isInstant: Bool {
-        switch self {
-        case .enterKey, .shiftEnter, .commandEnter, .escKey, .ctrlC, .undo, .redo,
-             .launchAgentClient, .skillPicker, .slashSkill, .dollarSkill, .bulletIndent, .bulletOutdent, .none:
-            return true
-        default:
-            return false
-        }
-    }
-
     var actionDescription: String {
         switch self {
         case .slashOrModifier:
@@ -173,6 +160,8 @@ enum ButtonAction: String, CaseIterable, Sendable {
             return "Types / (Claude's skill and command menu)"
         case .dollarSkill:
             return "Types $ (Codex's skill menu)"
+        case .computerUse:
+            return "Opens Computer Use; pressed again, closes it or stops its command"
         default: return rawValue
         }
     }
@@ -193,8 +182,7 @@ struct RemoteButtonDescriptor: Equatable, Sendable {
 // - Volume Up/Down  → bullet-list control in AI prompt editors (new/indent, outdent/remove)
 // - Back / Menu     → word-wise Backspace (Option+Delete; the system tokenizer segments
 //                     Chinese, so 我爱北京天安门 deletes 天安门, then 北京, …)
-// - TV              → Shift+Enter (newline; the convention most agent apps use);
-//                     held 0.5 s it opens the computer-use agent panel instead
+// - TV              → Shift+Enter (newline; the convention most agent apps use)
 // - Play/Pause      → toggle the Codex / Claude desktop client to the front
 // - Power           → Enter
 // - Mute            → tap opens the focused app's skill picker ($ in Codex, / otherwise);
@@ -892,7 +880,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         return submenu
     }
 
-    /// Settings' Microphone and Diagnostics panes. The at-a-glance status (Bluetooth /
+    /// Settings' Device and About panes. The at-a-glance status (Bluetooth /
     /// Battery / Bridge) lives in the top-level menu; detail fields fill in once the async
     /// diagnostics snapshot arrives, and Copy Diagnostics exports the full report.
     private func publishDiagnostics(_ diagnostics: MicrophoneBridgeDiagnostics?) {

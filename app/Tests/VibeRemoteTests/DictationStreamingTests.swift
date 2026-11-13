@@ -104,6 +104,19 @@ final class DictationStreamingTests: XCTestCase {
                        "i want to buy a car.")
         // If those characters were revised away too, nothing is added until release.
         XCTAssertEqual(grow("I want to buy a", "I wanted to try it", "I wanted to try it now"), "I want to buy a")
+        // Revisions of earlier text add up: the shown end is still found, by a run of its last
+        // twelve characters that occurs once, past the near window (typing stalled, 2026-11-13).
+        XCTAssertEqual(grow("Well um so like you know I think we should go to the store",
+                            "Well I think we should go to the store and buy",
+                            "Well I think we should go to the store and buy milk"),
+                       "Well um so like you know I think we should go to the store and buy")
+        // A revised last word: the characters just before it stand in.
+        XCTAssertEqual(grow("We will meet at the cafe", "We will meet at the café tomorrow", "We will meet at the café tomorrow at"),
+                       "We will meet at the cafe tomorrow")
+        // A long run that occurs twice far from the end is not trusted.
+        XCTAssertEqual(grow("we said hello there friends ok", "hello there friends and then hello there friends again",
+                            "hello there friends and then hello there friends again now"),
+                       "we said hello there friends ok")
         // An earlier repeat of the anchor far from the end is not mistaken for it.
         XCTAssertEqual(grow("ab ab ab", "AB xx yy zz ab ab ab", "AB xx yy zz ab ab ab ab"), "ab ab ab")
         XCTAssertEqual(DictationTypewriterPlan.commonPrefix("你好世界", "你好吗"), "你好")
@@ -183,5 +196,31 @@ final class DictationStreamingTests: XCTestCase {
         await stopped.finish("ignored")
         XCTAssertEqual(stopped.displayed, "")
         XCTAssertEqual(stopped.stoppedReason, "test")
+    }
+}
+
+final class DictationReplacementTests: XCTestCase {
+    func testReplacementRangeCoversOnlyTheChangedTailOfThisHold() {
+        // "Hello wor" typed at offset 10; the refined text keeps "Hello " and replaces "wor".
+        let range = DictationTypewriterPlan.replacementRange(anchor: 10, displayed: "Hello wor", delete: 3)
+        XCTAssertEqual(range.location, 16)
+        XCTAssertEqual(range.length, 3)
+        // UTF-16 units, not characters: the emoji counts two.
+        let emoji = DictationTypewriterPlan.replacementRange(anchor: 0, displayed: "好👋了吗", delete: 2)
+        XCTAssertEqual(emoji.location, 3)
+        XCTAssertEqual(emoji.length, 2)
+        // Never reaches before the hold's own text.
+        let all = DictationTypewriterPlan.replacementRange(anchor: 5, displayed: "abc", delete: 9)
+        XCTAssertEqual(all.location, 5)
+        XCTAssertEqual(all.length, 3)
+    }
+
+    func testChunksSplitIntoKeyEventsOnCharacterBoundaries() {
+        let text = String(repeating: "字", count: 45) + "👋👋"
+        let pieces = DictationTypewriterPlan.chunks(text)
+        XCTAssertEqual(pieces.joined(), text)
+        XCTAssertTrue(pieces.allSatisfy { $0.utf16.count <= 20 && !$0.isEmpty })
+        XCTAssertEqual(pieces.count, 3)
+        XCTAssertEqual(DictationTypewriterPlan.chunks(""), [])
     }
 }

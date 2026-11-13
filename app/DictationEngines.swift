@@ -260,9 +260,11 @@ struct OpenAIDictationEngine: DictationEngine {
 
     var apiKey: String
     var model: String
+    /// The dictionary's vocabulary, as the endpoint's `prompt` (spellings it should prefer).
+    var prompt: String? = nil
 
     /// Multipart form exactly as the transcription endpoint documents it.
-    static func request(audio: DictationAudio, apiKey: String, model: String, language: String,
+    static func request(audio: DictationAudio, apiKey: String, model: String, language: String, prompt: String? = nil,
                         boundary: String = "VibeRemote-\(UUID().uuidString)") -> URLRequest {
         var request = URLRequest(url: endpoint, timeoutInterval: 60)
         request.httpMethod = "POST"
@@ -275,6 +277,7 @@ struct OpenAIDictationEngine: DictationEngine {
         field("model", model)
         field("response_format", "json")
         if let code = DictationLanguage.isoCode(language) { field("language", code) }
+        if let prompt, !prompt.isEmpty { field("prompt", prompt) }
         body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"dictation.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
         body.append(audio.wavData())
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
@@ -293,7 +296,8 @@ struct OpenAIDictationEngine: DictationEngine {
     }
 
     func transcribe(_ audio: DictationAudio, language: String) async throws -> String {
-        let request = Self.request(audio: audio, apiKey: apiKey, model: model.isEmpty ? Self.defaultModel : model, language: language)
+        let request = Self.request(audio: audio, apiKey: apiKey, model: model.isEmpty ? Self.defaultModel : model,
+                                   language: language, prompt: prompt)
         let (data, response) = try await URLSession.shared.data(for: request)
         return try Self.parse(data: data, status: (response as? HTTPURLResponse)?.statusCode ?? 0)
     }
@@ -314,8 +318,17 @@ struct SeedASRDictationEngine: DictationEngine {
     /// Empty for a new-console API key.
     var appID: String
     var resourceID: String = defaultResourceID
+    /// The dictionary's hotwords (`request.corpus.context`). Volcengine documents this field for its
+    /// streaming and standard recognizers, not explicitly for flash; see `AGENTS.md` for what the
+    /// flash endpoint did with it.
+    var context: String? = nil
+    /// `enable_ddc` (语义顺滑): drop filler words, stutters and repeated phrases.
+    var removeFillers = false
+    /// `vad_segment_duration` in ms, as on the stream (`SeedStreamFrame.requestJSON`).
+    var sentenceSilence: Int? = nil
 
     static func request(audio: DictationAudio, accessKey: String, appID: String, resourceID: String,
+                        context: String? = nil, removeFillers: Bool = false, sentenceSilence: Int? = nil,
                         requestID: String = UUID().uuidString) -> URLRequest {
         var request = URLRequest(url: endpoint, timeoutInterval: 60)
         request.httpMethod = "POST"
@@ -329,10 +342,14 @@ struct SeedASRDictationEngine: DictationEngine {
         request.setValue(resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
         request.setValue(requestID, forHTTPHeaderField: "X-Api-Request-Id")
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
+        var options: [String: Any] = ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true,
+                                      "enable_ddc": removeFillers]
+        if let context { options["corpus"] = ["context": context] }
+        if let sentenceSilence { options["vad_segment_duration"] = sentenceSilence }
         let body: [String: Any] = [
             "user": ["uid": appID.isEmpty ? "viberemote" : appID],
             "audio": ["data": audio.wavData().base64EncodedString()],
-            "request": ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true],
+            "request": options,
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return request
@@ -354,7 +371,8 @@ struct SeedASRDictationEngine: DictationEngine {
 
     func transcribe(_ audio: DictationAudio, language: String) async throws -> String {
         let request = Self.request(audio: audio, accessKey: accessKey, appID: appID,
-                                   resourceID: resourceID.isEmpty ? Self.defaultResourceID : resourceID)
+                                   resourceID: resourceID.isEmpty ? Self.defaultResourceID : resourceID, context: context,
+                                   removeFillers: removeFillers, sentenceSilence: sentenceSilence)
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         return try Self.parse(data: data,

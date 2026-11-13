@@ -40,27 +40,6 @@ final class ComputerUseAgentTests: XCTestCase {
         XCTAssertTrue(long.hasSuffix("…"))
     }
 
-    func testTVTapKeepsShiftEnterAndHoldOpensTheAgent() {
-        var gate = AgentButtonGate()
-        // 2nd/3rd gen: TV is a plain Shift+Enter, deferred to release.
-        XCTAssertTrue(gate.press(at: 10, defersTap: true))
-        XCTAssertEqual(gate.release(at: 10.2, chorded: false), .tap)
-        XCTAssertTrue(gate.press(at: 20, defersTap: true))
-        XCTAssertEqual(gate.release(at: 20.6, chorded: false), .openAgent(passThrough: false))
-        // 1st gen: TV is also a modifier; the press passes through and a chord wins.
-        XCTAssertFalse(gate.press(at: 30, defersTap: false))
-        XCTAssertEqual(gate.release(at: 30.1, chorded: false), .passThrough)
-        XCTAssertFalse(gate.press(at: 40, defersTap: false))
-        XCTAssertEqual(gate.release(at: 41, chorded: true), .passThrough)
-        XCTAssertFalse(gate.press(at: 50, defersTap: false))
-        XCTAssertEqual(gate.release(at: 51, chorded: false), .openAgent(passThrough: true))
-        // A release without a seen press (e.g. the press went to the Advanced Menu).
-        XCTAssertEqual(gate.release(at: 60, chorded: false), .passThrough)
-        XCTAssertTrue(gate.press(at: 70, defersTap: true))
-        gate.reset()
-        XCTAssertEqual(gate.release(at: 71, chorded: false), .passThrough)
-    }
-
     func testSettingsRoundTripAndModelFallback() {
         let name = "VibeRemote.ComputerUseAgentTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

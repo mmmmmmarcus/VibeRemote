@@ -87,7 +87,7 @@ let package = Package(
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
                 "SystemVolume.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
-                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift"
+                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "AutoComputerUse.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],

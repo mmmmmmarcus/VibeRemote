@@ -50,6 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
+        // The keyboard dictation hotkey; idle until one is chosen in Settings › Dictation.
+        DictationHotkeyMonitor.shared.start()
         
         // Create menu bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -133,8 +135,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteInputHandler?.onAgentRequested = { [weak self] in
             self?.caretController.cancel()
             self?.advancedMenu.dismiss()
-            self?.agentPanel.remoteLongPress()
+            self?.agentPanel.remotePress()
         }
+        // Auto Computer Use: a Siri dictation hold with no text field in focus fills this bar
+        // instead, and its polished transcript is sent as the command on release.
+        let agentPanel = self.agentPanel
+        DictationController.shared.computerUse = ComputerUseHandoff(
+            isComposing: { agentPanel.isComposing },
+            isBusy: { agentPanel.agent.isRunning },
+            text: { agentPanel.agent.command.trimmingCharacters(in: .whitespacesAndNewlines) },
+            open: { [weak self] in
+                self?.caretController.cancel()
+                self?.advancedMenu.dismiss()
+                agentPanel.show(fresh: true)
+            },
+            show: { agentPanel.agent.command = $0 },
+            submit: { text in
+                agentPanel.agent.command = text
+                agentPanel.agent.submit()
+            })
         menuBarManager.setRemoteIdleTimeoutHandler { [weak self] timeout in
             self?.remoteInputHandler?.updateRemoteIdleTimeout(timeout)
         }

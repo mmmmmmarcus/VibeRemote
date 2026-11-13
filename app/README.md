@@ -31,25 +31,26 @@ paired at the same time and each keeps its own mapping.
   app transcribes the remote's microphone itself — streaming text as you speak with Seed
   ASR — with an orange cursor at the insertion point while you hold Siri.
 - Automatic per-generation layouts. The 1st-gen remote has no Mute and no Power key, so
-  the mute button's two roles move to buttons that do exist: holding TV arms the modifier
-  chords (TV+Menu clears the input, TV+Play/Pause sends Esc) while a TV tap still sends
-  Shift+Enter, and its Play/Pause opens Advanced Menu. On both generations Siri's mapping
+  its Play/Pause opens Advanced Menu and its TV sends Shift+Enter. Only Siri does
+  something different when held; Back and the arrows just repeat. On both generations Siri's mapping
   applies only to the physical Siri button, and the remote microphone transmits only while
   that button is held.
 - Press-and-hold Siri mappings for Space, Right Command and Right Option (for your own
   dictation app), or VibeRemote Dictation.
 - Back/Menu deletes a word immediately on every press, including rapid repeated presses;
   holding repeats word deletion. Use Advanced Menu to clear the full input.
-- Aluminum Play/Pause opens the Skill picker: `/` in Claude, `$` in ChatGPT / Codex (set
-  by their profiles), and the frontmost app's trigger in General. Mute opens Advanced Menu.
+- Aluminum Play/Pause opens Computer Use (pressed again it closes the bar or stops its command);
+  Esc and Skill (`/`, `$` or the frontmost app's trigger) are choices for any button. Mute opens Advanced Menu.
 - Slide on the touch surface / clickpad ring to position the text cursor; see
   [Text-cursor positioning](#text-cursor-positioning).
 - Siri Remote connection and battery status in the menu bar.
 - Suppression of duplicate HID/media-key delivery without globally unloading macOS's
   remote-control daemon.
 - Microphone bridge with diagnostics.
-- Computer Use: hold TV (half a second) to open the callout, dictate a task into it, and
-  run it. See [Computer-use agent](#computer-use-agent).
+- Computer Use: press Play/Pause (aluminum remote) or any button set to Computer Use to
+  open the callout, dictate a task into it, and run it. With **Auto Computer Use** on
+  (Settings › Computer Use), holding Siri with no text field in focus opens it for you, fills it
+  with what you say, and sends it when you let go; in a text field Siri dictates as usual. See [Computer-use agent](#computer-use-agent).
 
 ## Requirements
 
@@ -282,10 +283,11 @@ Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
 
 ## Computer-use agent
 
-Hold TV for half a second (a tap still sends Shift+Enter) or choose **Computer Use Agent**
-in the menu bar. A floating panel takes focus; hold Siri and your dictation app types the
-task into it. Select (or Return) runs it, Hold TV stops a running task, and holding TV
-again closes the panel. While the task runs, focus returns to the app you were in.
+Press Play/Pause on the aluminum remote (or any button set to Computer Use in Settings ›
+Controls; the 1st-gen remote has none by default) or choose **Computer Use** in the menu bar.
+A floating panel takes focus; hold Siri and your dictation app types the task into it.
+Select (or Return) runs it; pressing the Computer Use button again stops a running task, or
+closes the panel. While the task runs, focus returns to the app you were in.
 
 The planner operates the Mac through [agent-desktop](https://github.com/vercel-labs/agent-desktop),
 bundled in the app, which acts on native accessibility trees without moving the pointer.
@@ -312,9 +314,9 @@ the focused editor. Back clears the input; on the old remote TV opens the Skill 
 On aluminum remotes Skill has moved to ordinary Play/Pause and the menu's TV slot is inactive.
 The middle-left Stop current task button sends Esc: Siri on the first generation,
 Play/Pause on the second and third generations. Volume Up redoes (⌘⇧Z), and Volume
-Down undoes (⌘Z), with forward/backward curved-arrow icons. A quick menu-button tap leaves the menu
-open; hold it for 250 ms or longer to peek, then release to close. While holding it,
-another action button executes immediately on press. In the latched menu, actions
+Down undoes (⌘Z), with forward/backward curved-arrow icons. Pressing the menu button leaves the menu
+open, however long you hold it. While it is still held, another action button executes
+immediately on press. In the latched menu, actions
 execute once on release, except Stop current task, which executes on press. Each action closes the menu and consumes the remaining
 releases. Click outside, press Escape, or tap the menu button again to cancel.
 Power sends ⌘Enter while the menu is open, closes it, and owns both press edges;
@@ -343,8 +345,9 @@ First-generation microphone-control findings, evidence, diagnostic tools and cro
 The Controls pane edits one profile at a time, picked from the profile switcher in the
 window's top-right corner. **General** applies in every app that has no profile of its own. The menu lists
 every profile with its app icon, **Add App** offers every installed application, and an
-app profile can be removed from the same menu. Claude and ChatGPT come preinstalled; their
-only difference from General is the Skill trigger on Play/Pause (`/` and `$`).
+app profile can be removed from the same menu. Claude and ChatGPT come preinstalled and start
+out following General. A **Normal | Advanced** switch at the top of the remote card shows either
+what each button does, or what it does while the Advanced Menu is open.
 
 An app profile keeps only the buttons you change for it. Every other button does what
 General does, and keeps following later changes to General; a pill's **Same as General**
@@ -365,8 +368,23 @@ ByteDance/Volcengine) and the language, and stores your own API keys in the keyc
 
 With Seed ASR and **Type While Speaking** on, the words stream into the focused editor as you
 speak. Text already typed is never deleted while you hold Siri; when you let go, the whole clip is recognized once more by the accurate recognizer and
-the text is refined in place. Without it the clip is transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
+the text is refined in place. That accurate pass is uploaded while you speak, so it usually lands within a second of letting go, and it places periods by meaning, not by how long you paused to think. Without it the clip is transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
 corrections only ever delete what the current hold typed.
+
+**Dictionary.** Settings › Dictation › Dictionary lists names and terms dictation tends to get
+wrong. Seed ASR listens for them when it refines the text after you let go, OpenAI is given them
+as its vocabulary, and every engine writes them with your capitalization.
+
+**Cleaner, more accurate Seed text.** Two Seed ASR switches, both on by default: **Remove
+Filler Words** drops um, uh, 嗯, 那个 and stutters such as "我想我想"; **Use Text Before the
+Cursor** sends up to 500 characters already in the field along with the audio, so names and
+topics you have already typed come out right (that text goes to Volcengine with the recording;
+password fields are never read).
+
+**Alternative hotkey.** Settings › Dictation can also assign one keyboard modifier (Left or
+Right Option, Command or Control). Hold it to dictate exactly as with Siri, through the Mac's
+own microphone (the remote's microphone only works while Siri is held). Pressing another key
+while holding it counts as a shortcut and records nothing.
 
 While you hold Siri, an orange copy of the caret-positioning cursor stands at the insertion
 point. Its mic fills with the live input level, so a stopped bridge reads visibly empty, it
@@ -382,9 +400,9 @@ unfinished. Existing configured installations keep their mapping without a force
 Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
 the menu bar.
 
-Settings panes: Controls (the profile switcher, the remote and its pills, and the text-cursor
-guide), Device (Auto Disconnect and status), Dictation, Computer Use, Diagnostics and About
-(version and updates).
+Settings panes: Controls (the profile switcher, the remote and its pills with a Normal | Advanced
+switch, and the text-cursor guide), Device (status, Auto Disconnect and diagnostics), Dictation, Computer Use, and About (version,
+updates and links) at the bottom of the sidebar.
 
 ## Automatic updates
 

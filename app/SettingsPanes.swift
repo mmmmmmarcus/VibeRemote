@@ -68,8 +68,7 @@ struct SettingsRootView: View {
                                   everywhere: using.count == model.snapshot.profiles.all.count)
                 case .agent: AgentPane(generation: model.snapshot.generation,
                                        openPanel: actions.openAgentPanel)
-                case .diagnostics: DiagnosticsPane(diagnostics: model.diagnostics, actions: actions)
-                case .about: AboutPane(updater: updater, showOnboarding: actions.showOnboarding)
+                case .about: AboutPane(updater: updater, actions: actions)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -96,16 +95,21 @@ struct SettingsRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// The remote's panes from the top; About is pinned to the bottom edge, at the user's request.
     private var sidebar: some View {
-        ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: SettingsMetrics.xs / 2) {
+                    header("Remote")
+                    rows(SettingsTab.remoteTabs)
+                }
+            }
+            .scrollIndicators(.never)
             VStack(alignment: .leading, spacing: SettingsMetrics.xs / 2) {
-                header("Remote")
-                rows(SettingsTab.remoteTabs)
-                header("VibeRemote").padding(.top, SettingsMetrics.md)
                 rows(SettingsTab.appTabs)
             }
+            .padding(.bottom, SettingsMetrics.md)
         }
-        .scrollIndicators(.never)
         .padding(.top, SettingsMetrics.md)
         .padding(.horizontal, SettingsMetrics.md)
         .frame(width: SettingsMetrics.sidebarWidth)
@@ -332,6 +336,8 @@ enum SetupGuide {
 /// separators, group backgrounds and the label/control accessibility pairing.
 struct SettingsPane<Content: View>: View {
     let title: String
+    /// Extra scroll room below the last section, for a pane with a control pinned over its corner.
+    var bottomInset: CGFloat = 0
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -343,6 +349,7 @@ struct SettingsPane<Content: View>: View {
                 .padding(.top, SettingsMetrics.xxl)
             Form { leadingHeaderStripped }
                 .formStyle(.grouped)
+                .contentMargins(.bottom, bottomInset, for: .scrollContent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         // The transparent title-bar band is taller than the pane rhythm; nothing sits in it here.
@@ -435,45 +442,76 @@ private struct RemotePane: View {
     let setSiriAction: (ButtonAction) -> Void
     let restoreDefaults: () -> Void
     let actions: SettingsActions
+    @State private var mode: ControlsMode = .normal
+    /// The Advanced Menu choices (global, per remote family), refreshed after every edit.
+    @State private var advanced = AdvancedMenuMapping.load()
+
+    private var generation: RemoteGeneration { model.snapshot.generation }
+    private var advancedAtDefaults: Bool { (advanced[generation] ?? [:]).isEmpty }
 
     var body: some View {
         SettingsPane(title: "Controls") {
             Section {
-                RemoteHero(snapshot: model.snapshot, setSiriAction: setSiriAction,
-                           setButtonAction: actions.setButtonAction, followGeneral: actions.followGeneral)
-            } footer: {
-                VStack(spacing: SettingsMetrics.sm) {
-                    Text(heroFooter)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    SettingsListActions {
-                        Button("Restore Defaults", action: restoreDefaults)
-                            .disabled(model.snapshot.isAtDefaults)
-                            .accessibilityIdentifier("settings.restoreDefaults")
+                RemoteHero(snapshot: model.snapshot, mode: mode, advanced: advanced[generation] ?? [:],
+                           setSiriAction: setSiriAction, setButtonAction: actions.setButtonAction,
+                           followGeneral: actions.followGeneral, setAdvanced: setAdvanced)
+                    // Normal = what the buttons do; Advanced = what they do while the Advanced Menu
+                    // is open (user's request, 2026-11-11). The opener always shows Advanced Menu.
+                    .overlay(alignment: .top) {
+                        Picker("", selection: $mode) {
+                            ForEach(ControlsMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier("settings.controlsMode")
                     }
-                }
+                    // Inside the remote's card, in its empty bottom-right corner; the explanation
+                    // under the card was removed (user's request, 2026-11-11).
+                    .overlay(alignment: .bottomTrailing) {
+                        Button("Restore Defaults") {
+                            switch mode {
+                            case .normal: restoreDefaults()
+                            case .advanced:
+                                advanced[generation] = nil
+                                AdvancedMenuMapping.save(advanced)
+                            }
+                        }
+                        .disabled(mode == .normal ? model.snapshot.isAtDefaults : advancedAtDefaults)
+                        .accessibilityIdentifier("settings.restoreDefaults")
+                    }
             }
-            TextCursorGuide(generation: model.snapshot.generation)
+            TextCursorGuide(generation: generation)
         }
+        .onAppear { advanced = AdvancedMenuMapping.load() }
     }
 
-    private var heroFooter: String {
-        model.snapshot.editingProfile.isGeneral
-            ? "General applies in every app without a profile of its own. Click a label to choose what its button does."
-            : "Click a label to change it for \(model.snapshot.editingProfile.name) only. Buttons you leave alone do what General says."
+    private func setAdvanced(_ button: String, _ action: AdvancedMenuAction?) {
+        AdvancedMenuMapping.set(action, isNone: action == nil, button: button, generation: generation)
+        advanced = AdvancedMenuMapping.load()
     }
 }
 
-/// Device: the physical remote itself rather than what its buttons do — Auto Disconnect and one
-/// Status section for the link, battery, microphone bridge and any setup step still open.
+/// The Controls card's two views of the same remote: what each button does normally, and what it
+/// does while the Advanced Menu is open (Advanced Menu choices are global, not per profile).
+enum ControlsMode: String, CaseIterable {
+    case normal, advanced
+    var title: String { self == .normal ? "Normal" : "Advanced" }
+}
+
+/// Device: the physical remote itself rather than what its buttons do — one untitled group for the
+/// link, battery, microphone bridge and any setup step still open, Auto Disconnect below it, then
+/// Diagnostics.
 private struct DevicePane: View {
     @ObservedObject var model: RemoteSettingsModel
     let setIdleTimeout: (RemoteIdleTimeout) -> Void
     let actions: SettingsActions
 
     var body: some View {
-        SettingsPane(title: "Device") {
+        SettingsPane(title: "Device", bottomInset: Self.cornerButtonClearance) {
+            // Status first, then Auto Disconnect in its own group; neither has a header
+            // (user's layout, 2026-11-12).
+            Section { status }
             Section {
                 SettingsRow(title: "Auto Disconnect") {
                     Picker("", selection: Binding(get: { model.snapshot.idleTimeout }, set: setIdleTimeout)) {
@@ -489,11 +527,51 @@ private struct DevicePane: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Section("Status") { status }
+            // Last: everything Diagnostics showed in About (moved here 2026-11-13, user's request).
+            Section {
+                if let report = model.diagnostics.report {
+                    SettingsRow(title: "Remote", value: report.remoteAddress ?? "Not detected")
+                    SettingsRow(title: "Output Device", value: report.outputDevice ?? "Missing")
+                    SettingsRow(title: "Default Input", value: report.defaultInput ?? "Unknown")
+                    SettingsRow(title: "Voice Sessions", value: report.voiceSessions)
+                } else {
+                    SettingsRow(title: "Loading diagnostics…", value: "")
+                }
+                SettingsRow(title: "Helper", value: model.diagnostics.helper)
+                SettingsRow(title: "viberemote.log") {
+                    Button("Open", action: actions.openAppLog)
+                        .controlSize(.small)
+                        .disabled(model.diagnostics.report?.appLogAvailable == false)
+                }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                SettingsListActions {
+                    Button("Refresh", action: actions.refreshDiagnostics)
+                    Button("Copy Diagnostics", action: actions.copyDiagnostics)
+                }
+            }
+            // No Needs Attention section here: the Vibe Remote Daemon row above already shows
+            // the same text as its subtitle.
+            if let issues = model.diagnostics.report?.blockingIssues, !issues.isEmpty {
+                Section("Blocking Issues") {
+                    ForEach(issues, id: \.self) { Text($0).textSelection(.enabled) }
+                }
+            }
         }
-        // The bridge and setup rows read the same async snapshot the Diagnostics pane does.
+        // Pinned to the pane's bottom-right corner, not a section footer (user's request, 2026-11-11).
+        .overlay(alignment: .bottomTrailing) {
+            Button(model.diagnostics.bridgeRunning ? "Restart Daemon" : "Start Daemon", action: actions.restartBridge)
+                .accessibilityIdentifier("settings.restartDaemon")
+                .padding(SettingsMetrics.xxl)
+        }
+        // The bridge, setup and diagnostics rows all read the same async snapshot.
         .onAppear(perform: actions.refreshDiagnostics)
     }
+
+    /// Room below the last section so its Refresh / Copy Diagnostics row scrolls clear of the
+    /// Restart Daemon button pinned over the pane's bottom-right corner.
+    private static let cornerButtonClearance: CGFloat = 52
 
     /// Connection, battery and the voice bridge always show. Helper and Audio Driver appear
     /// only while they need the user; when both are fine there is nothing to act on, and the
@@ -501,28 +579,30 @@ private struct DevicePane: View {
     @ViewBuilder private var status: some View {
         let snapshot = model.snapshot
         let diagnostics = model.diagnostics
-        SettingsRow(title: "Bluetooth",
-                    subtitle: snapshot.connected ? snapshot.remoteName : "Pair the remote in Bluetooth settings",
-                    statusDot: snapshot.connected ? .green : .gray) {
-            Text(snapshot.connected ? "Connected" : "Disconnected")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("settings.connection")
+        // Label on the left, state on the right (user's layout, 2026-11-11): the remote's own name
+        // with its connection light, the battery as plain text, the daemon's state; Restart Daemon
+        // is pinned to the pane's corner.
+        SettingsRow(title: "Bluetooth") {
+            HStack(spacing: SettingsMetrics.sm) {
+                Text(snapshot.connected ? (snapshot.remoteName ?? snapshot.generation.displayName) : "Disconnected")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Circle()
+                    .fill(snapshot.connected ? Color.green : Color.gray)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("settings.connection")
         }
         if snapshot.connected {
             SettingsRow(title: "Battery") {
-                HStack(spacing: SettingsMetrics.md) {
-                    Text(batteryText(snapshot)).foregroundStyle(.secondary)
-                    SettingsBatteryGauge(connected: snapshot.connected, percent: snapshot.batteryPercent)
-                }
+                Text(batteryText(snapshot)).foregroundStyle(.secondary)
             }
         }
-        SettingsRow(title: "Voice Bridge", subtitle: diagnostics.attention,
-                    statusDot: diagnostics.bridgeRunning ? .green : .orange) {
-            HStack(spacing: SettingsMetrics.md) {
-                Text(diagnostics.bridgeRunning ? "Running" : "Stopped").foregroundStyle(.secondary)
-                Button(diagnostics.bridgeRunning ? "Restart" : "Start", action: actions.restartBridge)
-                    .controlSize(.small)
-            }
+        SettingsRow(title: "Vibe Remote Daemon", subtitle: diagnostics.attention) {
+            Text(diagnostics.bridgeRunning ? "Running" : "Stopped")
+                .foregroundStyle(diagnostics.bridgeRunning ? Color.secondary : Color.orange)
         }
         ForEach(diagnostics.setupIssues) { issue in
             SettingsRow(title: issue.isHelper ? "Helper" : "Audio Driver",
@@ -551,9 +631,13 @@ private struct DevicePane: View {
 /// resting pose.
 private struct RemoteHero: View {
     let snapshot: RemoteSettingsSnapshot
+    var mode: ControlsMode = .normal
+    /// This remote family's Advanced Menu choices (`AdvancedMenuMapping`).
+    var advanced: [String: String] = [:]
     let setSiriAction: (ButtonAction) -> Void
     let setButtonAction: (String, ButtonAction) -> Void
     let followGeneral: (String) -> Void
+    var setAdvanced: (String, AdvancedMenuAction?) -> Void = { _, _ in }
     @State private var modelHover: String?
     @State private var pillHover: String?
     @State private var dragging = false
@@ -595,19 +679,41 @@ private struct RemoteHero: View {
         .allowsHitTesting(!dragging)
     }
 
+    private var generation: RemoteGeneration { snapshot.generation }
+
+    /// In Advanced mode a menu button shows its Advanced Menu action; the opener always reads
+    /// Advanced Menu; controls the menu does not use (the clickpad) keep their normal fixed text.
+    private func advancedMenuButton(_ key: String) -> Bool {
+        AdvancedMenuMapping.buttons(for: generation).contains(key)
+    }
+
+    private func guideTitle(_ key: String) -> String {
+        guard mode == .advanced, advancedMenuButton(key) else { return RemoteSettingsGuide.title(for: key, snapshot: snapshot) }
+        return AdvancedMenuMapping.action(button: key, generation: generation, overrides: advanced)?.title ?? "None"
+    }
+
     private func pill(_ key: String, side: PillSide, tipY: CGFloat) -> some View {
-        let guide = RemoteSettingsGuide.title(for: key, snapshot: snapshot)
+        let guide = guideTitle(key)
         // One line per pill; a second guide line (the glass surface's swipe) stays in the label.
         let title = String(guide.split(separator: "\n").first ?? Substring(guide))
-        let options = RemoteSettingsGuide.pillOptions(for: key, snapshot: snapshot)
-        return ButtonPill(title: title, side: side, tipY: tipY, editable: options != nil,
+        let editable = mode == .advanced ? advancedMenuButton(key)
+            : RemoteSettingsGuide.pillOptions(for: key, snapshot: snapshot) != nil
+        return ButtonPill(title: title, side: side, tipY: tipY, editable: editable,
                           highlighted: pillHover == key || modelHover == key,
                           onHover: { inside in
                               if inside { pillHover = key } else if pillHover == key { pillHover = nil }
                           },
-                          onTap: { presentMenu(for: key) })
+                          onTap: { mode == .advanced ? presentAdvancedMenu(for: key) : presentMenu(for: key) })
             .accessibilityLabel("\(RemoteSettingsGuide.buttonName(for: key, generation: snapshot.generation)): \(guide.replacingOccurrences(of: "\n", with: ", "))")
             .accessibilityIdentifier("settings.pill.\(key)")
+    }
+
+    private func presentAdvancedMenu(for key: String) {
+        guard advancedMenuButton(key) else { return }
+        AdvancedActionMenu.present(current: AdvancedMenuMapping.action(button: key, generation: generation, overrides: advanced),
+                                   defaultChoice: AdvancedMenuMapping.defaultAction(button: key, generation: generation)) { action in
+            setAdvanced(key, action)
+        }
     }
 
     private func presentMenu(for key: String) {
@@ -771,6 +877,37 @@ enum ButtonActionMenu {
     }
 }
 
+/// The Advanced-mode pill menu: None, then every Advanced Menu action; the current one checked
+/// and the button's own default marked.
+enum AdvancedActionMenu {
+    private final class Target: NSObject {
+        let onSelect: (AdvancedMenuAction?) -> Void
+        init(onSelect: @escaping (AdvancedMenuAction?) -> Void) { self.onSelect = onSelect }
+        @objc func choose(_ item: NSMenuItem) {
+            onSelect((item.representedObject as? String).flatMap(AdvancedMenuAction.init(rawValue:)))
+        }
+    }
+
+    static func present(current: AdvancedMenuAction?, defaultChoice: AdvancedMenuAction?,
+                        onSelect: @escaping (AdvancedMenuAction?) -> Void) {
+        let target = Target(onSelect: onSelect)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for action in [nil] + AdvancedMenuAction.allCases.map(Optional.some) {
+            let title = action?.title ?? "None"
+            let item = NSMenuItem(title: action == defaultChoice ? "\(title) (Default)" : title,
+                                  action: #selector(Target.choose(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = action?.rawValue ?? AdvancedMenuMapping.noneValue
+            item.state = action == current ? .on : .off
+            menu.addItem(item)
+        }
+        // popUp tracks synchronously, so `target` outlives the selection.
+        menu.popUp(positioning: menu.items.first { $0.state == .on }, at: NSEvent.mouseLocation, in: nil)
+        withExtendedLifetime(target) {}
+    }
+}
+
 /// The Controls pane's profile switcher, a Liquid Glass capsule in the window's top-right corner:
 /// the edited profile's app icon and name (General has no icon). Its native menu lists every
 /// profile (the edited one checked), then Add App, a submenu of every installed app that has no
@@ -876,41 +1013,6 @@ private final class ProfileMenuTarget: NSObject {
     }
 }
 
-/// Battery-widget style ring; charging is not shown because the snapshot does not
-/// provide a verified charging state. Unknown and disconnected readings stay neutral.
-private struct SettingsBatteryGauge: View {
-    let connected: Bool
-    let percent: Int?
-    private var reading: Int? {
-        guard connected, let percent, (0...100).contains(percent) else { return nil }
-        return percent
-    }
-    private var label: String {
-        if let reading { return "Remote battery: \(reading)%" }
-        return connected ? "Remote battery unavailable" : "Remote disconnected"
-    }
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Color.primary.opacity(0.12), lineWidth: 3)
-            if let reading {
-                Circle().trim(from: 0, to: CGFloat(reading) / 100)
-                    .stroke(reading <= 20 ? Color.red : Color.green,
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-            }
-            Image(systemName: "appletvremote.gen4.fill")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(connected ? Color.primary : Color.secondary)
-        }
-        .frame(width: 22, height: 22)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier("settings.battery")
-        .help(label)
-    }
-}
-
 // MARK: - Computer Use
 
 /// Computer Use's choices, read from and written to the same defaults and Keychain
@@ -942,7 +1044,7 @@ struct AgentDemo: View {
             // acted on, result showing.
             let progress = reduceMotion ? 0.75 : Self.progress(at: timeline.date)
             HStack(spacing: SettingsMetrics.md) {
-                RemoteBlueprint(generation: generation, highlight: .newLine,
+                RemoteBlueprint(generation: generation, highlight: .computerUse,
                                 symbol: "cursorarrow.motionlines", showsGrid: false)
                     .frame(width: 116)
                 Canvas { context, size in Self.drawScreen(in: context, size: size, progress: progress) }
@@ -953,7 +1055,7 @@ struct AgentDemo: View {
         }
     }
 
-    /// One pass of the loop: hold, dictate, the agent acts, the result rests long enough
+    /// One pass of the loop: press, dictate, the agent acts, the result rests long enough
     /// to read, then it starts over.
     static func progress(at date: Date) -> Double {
         let period = 5.6
@@ -1051,6 +1153,7 @@ private struct AgentPane: View {
     let openPanel: () -> Void
     @StateObject private var store = AgentSettingsStore()
     @State private var keyDraft = ""
+    @AppStorage(AutoComputerUse.enabledKey) private var autoComputerUse = false
 
     var body: some View {
         SettingsPane(title: "Computer Use") {
@@ -1061,7 +1164,22 @@ private struct AgentPane: View {
                     .padding(.vertical, SettingsMetrics.md)
                     .accessibilityHidden(true)
             } footer: {
-                Text("Hold TV for half a second — or pick Computer Use in the menu bar. A field pops up from VibeRemote's Dock icon; type or dictate what you want done and send it. The icon turns green while the agent works in the app that was in front.")
+                Text("Press Play/Pause, or any button set to Computer Use — or pick Computer Use in the menu bar. A field pops up from VibeRemote's Dock icon; type or dictate what you want done and send it. The icon turns green while the agent works in the app that was in front.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Auto Computer Use (2026-11-13, user's request): Siri decides between dictation and
+            // Computer Use by what has the focus. See AutoComputerUse.swift.
+            Section {
+                SettingsRow(title: "Auto Computer Use") {
+                    Toggle("", isOn: $autoComputerUse)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .accessibilityIdentifier("settings.agent.auto")
+                }
+            } footer: {
+                Text("When Siri is set to Dictation: holding Siri with no text field in focus opens Computer Use, fills it with what you say, and sends it when you let go. In a text field, Siri dictates as usual.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1213,57 +1331,13 @@ private struct TextCursorGuide: View {
     }
 }
 
-// MARK: - Diagnostics
-
-private struct DiagnosticsPane: View {
-    let diagnostics: SettingsDiagnostics
-    let actions: SettingsActions
-
-    var body: some View {
-        SettingsPane(title: "Diagnostics") {
-            Section {
-                if let report = diagnostics.report {
-                    SettingsRow(title: "Remote", value: report.remoteAddress ?? "Not detected")
-                    SettingsRow(title: "Output Device", value: report.outputDevice ?? "Missing")
-                    SettingsRow(title: "Default Input", value: report.defaultInput ?? "Unknown")
-                    SettingsRow(title: "Voice Sessions", value: report.voiceSessions)
-                } else {
-                    SettingsRow(title: "Loading diagnostics…", value: "")
-                }
-                SettingsRow(title: "Helper", value: diagnostics.helper)
-            } footer: {
-                SettingsListActions {
-                    Button("Refresh", action: actions.refreshDiagnostics)
-                    Button("Copy Diagnostics", action: actions.copyDiagnostics)
-                }
-            }
-            if let attention = diagnostics.attention {
-                Section("Needs Attention") {
-                    Text(attention).foregroundStyle(.orange).textSelection(.enabled)
-                }
-            }
-            if let issues = diagnostics.report?.blockingIssues, !issues.isEmpty {
-                Section("Blocking Issues") {
-                    ForEach(issues, id: \.self) { Text($0).textSelection(.enabled) }
-                }
-            }
-            Section("Log File") {
-                SettingsRow(title: "viberemote.log") {
-                    Button("Open", action: actions.openAppLog)
-                        .controlSize(.small)
-                        .disabled(diagnostics.report?.appLogAvailable == false)
-                }
-            }
-        }
-        .onAppear(perform: actions.refreshDiagnostics)
-    }
-}
-
 // MARK: - About
 
+/// About: the app, its updates and links. Diagnostics moved to the end of Device on 2026-11-13
+/// (user's request), after a stay here since 2026-11-11.
 private struct AboutPane: View {
     @ObservedObject var updater: AppUpdater
-    let showOnboarding: () -> Void
+    let actions: SettingsActions
 
     private static let repository = URL(string: "https://github.com/mmmmmmarcus/VibeRemote")!
 
@@ -1305,7 +1379,7 @@ private struct AboutPane: View {
                         .accessibilityIdentifier("settings.updates.install")
                 }
                 SettingsRow(title: "Getting Started") {
-                    Button("Open Guide…", action: showOnboarding)
+                    Button("Open Guide…", action: actions.showOnboarding)
                 }
             }
             Section("Links") {

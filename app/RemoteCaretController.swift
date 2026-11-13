@@ -657,9 +657,15 @@ private final class CaretAXQuery {
         guard writableStatus == .success, writable.boolValue else { return blocked("selection not writable status=\(writableStatus.rawValue)") }
         guard let text = attribute(element, kAXValueAttribute) as? String, text.utf16.count <= 16_384 else { return blocked("text value unavailable or too large") }
         var selection = CFRange(), position = CGPoint.zero, size = CGSize.zero
-        guard unpack(attribute(element, kAXSelectedTextRangeAttribute), .cfRange, &selection), selection.length == 0,
-              CaretNavigation.boundaries(text).contains(selection.location),
-              unpack(attribute(element, kAXPositionAttribute), .cgPoint, &position),
+        // Separate reasons, with offsets and counts only (never text), so a failure below a line
+        // break can be told apart from a missing selection (2026-11-12).
+        guard unpack(attribute(element, kAXSelectedTextRangeAttribute), .cfRange, &selection) else { return blocked("selection unavailable") }
+        guard selection.length == 0 else { return blocked("selection not collapsed (length \(selection.length))") }
+        guard CaretNavigation.boundaries(text).contains(selection.location) else {
+            let breaks = text.filter(\.isNewline).count
+            return blocked("selection off a character boundary (at \(selection.location) of \(text.utf16.count), \(breaks) line breaks)")
+        }
+        guard unpack(attribute(element, kAXPositionAttribute), .cgPoint, &position),
               unpack(attribute(element, kAXSizeAttribute), .cgSize, &size), size.width > 0, size.height > 0,
               position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite else { return blocked("selection or editor bounds unavailable") }
         return Editor(element: element, pid: pid, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
@@ -722,21 +728,20 @@ private final class CaretAXQuery {
             if let refreshed = refreshedMarkerGeometry(context, for: editor) {
                 markerGeometry = refreshed
                 lightlyRefreshed = true
+            } else if let rebuilt = makeMarkerGeometry(editor) {
+                markerGeometry = rebuilt
             } else {
-                markerGeometry = makeMarkerGeometry(editor)
+                // Right after a keystroke Chromium's value and its text markers can disagree for
+                // a moment, so no provider verifies. Keep the verified context and answer nothing
+                // this time; the next read re-anchors it. Dropping it fell through to
+                // AXBoundsForRange, which Chromium does not answer, and nothing re-seeded once
+                // the editor was calibrated: one unlucky read lost the dictation bubble for the
+                // rest of a Claude hold, then for good once the text wrapped (2026-11-13).
+                entryDiagnostic("text markers out of step with the editor's text")
+                return nil
             }
         }
-        func bounds(_ requested: NSRange) -> CGRect? {
-            if let context = markerGeometry { return markerBounds(requested, in: context) }
-            var range = CFRange(location: requested.location, length: requested.length), rect = CGRect.zero
-            guard let value = AXValueCreate(.cfRange, &range),
-                  unpack(attribute(editor.element, kAXBoundsForRangeParameterizedAttribute, value), .cgRect, &rect),
-                  rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite,
-                  rect.height.isFinite, rect.height > 0 else { entryDiagnostic("range bounds unavailable (collapsed=\(requested.length == 0))"); return nil }
-            guard requested.length != 0 || CaretRangeGeometry.isInsertionRect(rect) else { return nil }
-            entryDiagnostic("range geometry (collapsed=\(requested.length == 0)): \(rect)")
-            return rect
-        }
+        func bounds(_ requested: NSRange) -> CGRect? { rangeBounds(requested, in: editor) }
         if geometryCorrection.map({ !CFEqual($0.element, editor.element) }) ?? true {
             var mode = CaretRangeGeometry.correction(text: editor.text, near: offset, bounds: bounds)
             // Also re-seed fully when only the quick refresh ran: markers cached while the editor
@@ -744,8 +749,9 @@ private final class CaretAXQuery {
             // them in Claude's composer, which otherwise never calibrated once words arrived.
             if mode == nil, markerGeometry == nil || lightlyRefreshed {
                 lightlyRefreshed = false
-                markerGeometry = makeMarkerGeometry(editor)
-                if markerGeometry != nil {
+                // A failed rebuild keeps the context just verified for this text (see above).
+                if let rebuilt = makeMarkerGeometry(editor) {
+                    markerGeometry = rebuilt
                     mode = CaretRangeGeometry.correction(text: editor.text, near: offset, bounds: bounds)
                 }
             }
@@ -759,9 +765,9 @@ private final class CaretAXQuery {
             rmDebug("Caret AX geometry calibrated: \(mode.rawValue), source=\(markerGeometry == nil ? "ranges" : "text-markers")")
         }
         var insertion = bounds(NSRange(location: offset, length: 0))
-        if insertion == nil, lightlyRefreshed {
+        if insertion == nil, lightlyRefreshed, let rebuilt = makeMarkerGeometry(editor) {
             // The quick re-anchor found no usable marker here: fall back to the full seeding.
-            markerGeometry = makeMarkerGeometry(editor)
+            markerGeometry = rebuilt
             insertion = bounds(NSRange(location: offset, length: 0))
         }
         guard let raw = insertion else { entryDiagnostic("caret unavailable"); return nil }
@@ -775,6 +781,57 @@ private final class CaretAXQuery {
         // the stem must not change the underlying insertion geometry.
         return CGRect(x: rect.minX, y: rect.minY, width: 2, height: rect.height)
     }
+    /// A range's bounds through the editor's verified text markers when it has them, else
+    /// AXBoundsForRange. Collapsed ranges must be caret-shaped.
+    private func rangeBounds(_ requested: NSRange, in editor: Editor) -> CGRect? {
+        if let context = markerGeometry { return markerBounds(requested, in: context) }
+        var range = CFRange(location: requested.location, length: requested.length), rect = CGRect.zero
+        guard let value = AXValueCreate(.cfRange, &range),
+              unpack(attribute(editor.element, kAXBoundsForRangeParameterizedAttribute, value), .cgRect, &rect),
+              rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite,
+              rect.height.isFinite, rect.height > 0 else { entryDiagnostic("range bounds unavailable (collapsed=\(requested.length == 0))"); return nil }
+        guard requested.length != 0 || CaretRangeGeometry.isInsertionRect(rect) else { return nil }
+        entryDiagnostic("range geometry (collapsed=\(requested.length == 0)): \(rect)")
+        return rect
+    }
+
+    /// The dictation indicator's measure when the collapsed range at `offset` has no geometry.
+    /// Claude's composer stops answering that query at the end of its text once the text wraps
+    /// onto a second line, and the indicator's `textEnd` fallback refuses a wrapped text frame,
+    /// so the bubble stayed at the end of the first line (2026-11-12). Nonempty glyph ranges
+    /// still measure correctly there (they are what calibration uses), so the caret goes at the
+    /// right edge of the character before it, on that character's own line. After line breaks,
+    /// the first glyph's left edge, one line height below the last visible glyph per break.
+    /// Indicator only: caret positioning never estimates an insertion X from a glyph (wrong
+    /// for right-to-left text), because it moves text; the indicator only points.
+    func caretAfterGlyph(_ offset: Int, in editor: Editor) -> CGRect? {
+        // Calibrated for this editor (in `caret`, which runs first), so its markers are current.
+        let failedStep = lastStep ?? "?"
+        guard let correction = geometryCorrection, CFEqual(correction.element, editor.element) else {
+            entryDiagnostic("\(failedStep); not calibrated"); return nil
+        }
+        let stops = CaretNavigation.boundaries(editor.text)
+        let utf16 = Array(editor.text.utf16)
+        guard let index = stops.firstIndex(of: offset), index > 0 else { entryDiagnostic("\(failedStep); caret at start"); return nil }
+        func isBreak(_ stop: Int) -> Bool { [10, 13, 0x2028, 0x2029].contains(utf16[stop]) }
+        var previous = index - 1, breaks = 0
+        while previous >= 0, isBreak(stops[previous]) { breaks += 1; previous -= 1 }
+        guard previous >= 0,
+              let glyph = rangeBounds(NSRange(location: stops[previous], length: stops[previous + 1] - stops[previous]), in: editor),
+              glyph.width > 0, glyph.height > 0 else { entryDiagnostic("\(failedStep); no glyph before caret (\(lastStep ?? "?"))"); return nil }
+        var rect = CGRect(x: glyph.maxX, y: glyph.minY, width: 2, height: glyph.height)
+        if breaks > 0 {
+            let lineStart = isBreak(stops[0]) ? nil : rangeBounds(NSRange(location: 0, length: stops[1]), in: editor)
+            rect.origin = CGPoint(x: lineStart.map(\.minX) ?? editor.bounds.minX + 3, y: glyph.minY + glyph.height * CGFloat(breaks))
+        }
+        guard editor.bounds.insetBy(dx: -1, dy: 0).contains(CGPoint(x: rect.minX, y: rect.midY)) else {
+            entryDiagnostic(String(format: "glyph caret outside editor (dx=%.0f dy=%.0f)",
+                                   rect.minX - editor.bounds.minX, rect.midY - editor.bounds.minY))
+            return nil
+        }
+        return rect
+    }
+
     /// The last step this query reported, kept even when not diagnosing, so a caller whose read
     /// came back empty can say why (geometry and capabilities only, never text).
     var lastStep: String?
@@ -970,6 +1027,9 @@ final class CaretInsertionPoint: @unchecked Sendable {
     enum Accuracy: String, Sendable {
         /// Calibrated against real glyphs, exactly as caret positioning measures it.
         case glyph
+        /// The right edge of the character before the caret, when the caret's own collapsed
+        /// range has no geometry (Claude's composer at the end of wrapped text).
+        case afterGlyph
         /// An empty editor's own collapsed-range rectangle.
         case emptyEditor
         /// An empty editor that reports no caret rectangle: its leading edge, where the
@@ -989,6 +1049,9 @@ final class CaretInsertionPoint: @unchecked Sendable {
         /// that knows where the caret should be can tell a stale accessibility tree from a
         /// current one.
         let offset: Int
+        /// Counts only, for the indicator's per-hold trace: the editor's UTF-16 length, its line
+        /// breaks, and the breaks before the caret. Never text.
+        var shape = ""
     }
 
     private let queue = DispatchQueue(label: "com.viberemote.caret-insertion", qos: .userInitiated)
@@ -1000,6 +1063,14 @@ final class CaretInsertionPoint: @unchecked Sendable {
     /// Main-confined: why the latest empty read came back empty, and how many did.
     private(set) var lastFailure: String?
     private var failures = 0
+    /// Main-confined: every distinct reason an empty or `textEnd` read gave since the last `takeFailureReasons`.
+    private var failureReasons: [String: Int] = [:]
+
+    @MainActor
+    func takeFailureReasons() -> String {
+        defer { failureReasons.removeAll() }
+        return failureReasons.sorted { $0.value > $1.value }.map { "\($0.value)× \($0.key)" }.joined(separator: ", ")
+    }
 
     /// Read count, mean and slowest read in milliseconds, then starts a fresh tally.
     @MainActor
@@ -1019,12 +1090,18 @@ final class CaretInsertionPoint: @unchecked Sendable {
             let started = ProcessInfo.processInfo.systemUptime
             let reading = measure()
             let elapsed = ProcessInfo.processInfo.systemUptime - started
-            let failure = reading == nil ? (query.lastStep ?? "no focused editor") : nil
+            // A `textEnd` reading is the coarse last resort, which refuses wrapped text: record why
+            // the measured steps before it failed, so a hold whose bubble stalls on a wrap explains itself.
+            let failure = reading == nil ? (query.lastStep ?? "no focused editor")
+                : reading?.accuracy == .textEnd ? "text end used: \(query.lastStep ?? "?")" : nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.inFlight = false
                     self.timings.append(elapsed)
-                    if let failure { self.lastFailure = failure; self.failures += 1 }
+                    if let failure {
+                        self.failureReasons[failure, default: 0] += 1
+                        if reading == nil { self.lastFailure = failure; self.failures += 1 }
+                    }
                     completion(reading)
                     if let next = self.pending {
                         self.pending = nil
@@ -1045,21 +1122,54 @@ final class CaretInsertionPoint: @unchecked Sendable {
         query.lastStep = nil
         guard let editor = query.observe() else { return nil }
         requestFullAccessibility(editor.pid)
+        var reading = measure(editor)
+        let utf16 = Array(editor.text.utf16), caret = min(Int(editor.selection.location), utf16.count)
+        func breaks(_ units: ArraySlice<UInt16>) -> Int { units.filter { $0 == 10 || $0 == 13 || $0 == 0x2028 || $0 == 0x2029 }.count }
+        reading?.shape = "len \(utf16.count), breaks \(breaks(utf16[...])), \(breaks(utf16[..<caret])) before"
+        return reading
+    }
+
+    private func measure(_ editor: CaretAXQuery.Editor) -> Reading? {
+        if showsPlaceholder(editor) {
+            // ChatGPT's empty composer reports its placeholder as its value. Measuring that as text
+            // failed (no calibration, caret not at its end), so the bubble waited ~3 s for the first
+            // streamed words there while Claude's showed at once (2026-11-13).
+            return Self.emptyReading(editor, insertion: query.uncalibratedInsertion(0, in: editor))
+        }
         if let caret = query.caret(Int(editor.selection.location), in: editor) {
             return Reading(caret: caret, editor: editor.bounds, accuracy: .glyph, offset: Int(editor.selection.location))
+        }
+        if let caret = query.caretAfterGlyph(Int(editor.selection.location), in: editor) {
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .afterGlyph, offset: Int(editor.selection.location))
         }
         guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else {
             // Dictation types at the caret, so the caret is usually at the end of the text.
             guard Self.isAtTextEnd(text: editor.text, caret: Int(editor.selection.location)),
                   let leaf = query.lastTextLeafFrame(in: editor),
-                  let caret = Self.textEnd(leaf: leaf, editor: editor.bounds) else { return nil }
+                  let caret = Self.textEnd(leaf: leaf, editor: editor.bounds) else {
+                query.lastStep = (query.lastStep ?? "?") + "; no text end"
+                return nil
+            }
             return Reading(caret: caret, editor: editor.bounds, accuracy: .textEnd, offset: Int(editor.selection.location))
         }
-        if let raw = query.uncalibratedInsertion(0, in: editor) {
+        return Self.emptyReading(editor, insertion: query.uncalibratedInsertion(0, in: editor))
+    }
+
+    private static func emptyReading(_ editor: CaretAXQuery.Editor, insertion raw: CGRect?) -> Reading {
+        if let raw {
             return Reading(caret: CGRect(x: raw.minX, y: raw.minY, width: 2, height: raw.height),
                            editor: editor.bounds, accuracy: .emptyEditor, offset: 0)
         }
-        return Reading(caret: Self.editorStart(editor.bounds), editor: editor.bounds, accuracy: .editorStart, offset: 0)
+        return Reading(caret: editorStart(editor.bounds), editor: editor.bounds, accuracy: .editorStart, offset: 0)
+    }
+
+    /// The caret at the start of a value that is only the editor's placeholder (read only then,
+    /// so it costs one AX call while the composer is empty).
+    private func showsPlaceholder(_ editor: CaretAXQuery.Editor) -> Bool {
+        guard editor.selection.location == 0, !editor.text.allSatisfy(\.isNewline),
+              let placeholder = query.attribute(editor.element, kAXPlaceholderValueAttribute) as? String else { return false }
+        let trimmed = placeholder.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed == editor.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Electron apps (Claude) build per-character text geometry only for an assistive client
@@ -1123,6 +1233,15 @@ enum CaretProbe {
         if let editor = query.observe() {
             print("editor bounds=\(editor.bounds) length=\(editor.text.utf16.count) caret=\(editor.selection.location) onlyNewlines=\(editor.text.allSatisfy(\.isNewline))")
             print("caret:", query.caret(Int(editor.selection.location), in: editor).map { "\($0)" } ?? "nil")
+            // `--all`: the measured caret at every character boundary, for checking geometry on
+            // later lines against a known test page. Offsets and rectangles only.
+            if CommandLine.arguments.contains("--all") {
+                let utf16 = Array(editor.text.utf16)
+                for offset in CaretNavigation.boundaries(editor.text) {
+                    let afterBreak = offset > 0 && (utf16[offset - 1] == 10 || utf16[offset - 1] == 13)
+                    print("  \(offset)\(afterBreak ? " (after break)" : ""):", query.caret(offset, in: editor).map { "\($0)" } ?? "nil")
+                }
+            }
         } else {
             print("observe failed")
         }
@@ -1675,14 +1794,29 @@ final class CaretOverlay {
                           fraction: opacity, respectFlipped: false, hints: nil)
                 context.restoreGState()
             case .recognizing:
-                let start = spinnerAngle * 180 / .pi
-                let arc = NSBezierPath()
-                arc.appendArc(withCenter: center, radius: 4.6 * scale, startAngle: start,
-                              endAngle: start + 270, clockwise: false)
-                arc.lineWidth = 1.8 * scale
-                arc.lineCapStyle = .round
-                NSColor.textBackgroundColor.withAlphaComponent(opacity).setStroke()
-                arc.stroke()
+                // An opacity gradient along the arc (2026-11-13, user's request): opaque at the
+                // head, which leads the clockwise turn, fading to clear over 300°, so it reads as
+                // spinning rather than as a ring with a gap. Short butt-capped segments, each a
+                // little more transparent, plus a round dot for the head; overlapping round caps
+                // would darken every joint.
+                let head = spinnerAngle * 180 / .pi, sweep: CGFloat = 300, steps = 30
+                let radius = 4.6 * scale, width = 1.8 * scale
+                let color = NSColor.textBackgroundColor
+                for step in 0..<steps {
+                    let from = head + sweep * CGFloat(step) / CGFloat(steps)
+                    let segment = NSBezierPath()
+                    // A quarter-degree overlap hides antialiasing seams between segments.
+                    segment.appendArc(withCenter: center, radius: radius, startAngle: from,
+                                      endAngle: from + sweep / CGFloat(steps) + 0.25, clockwise: false)
+                    segment.lineWidth = width
+                    segment.lineCapStyle = .butt
+                    let fade = 1 - CGFloat(step) / CGFloat(steps)
+                    color.withAlphaComponent(opacity * fade * fade).setStroke()
+                    segment.stroke()
+                }
+                let tip = CGPoint(x: center.x + radius * cos(spinnerAngle), y: center.y + radius * sin(spinnerAngle))
+                color.withAlphaComponent(opacity).setFill()
+                NSBezierPath(ovalIn: CGRect(x: tip.x - width / 2, y: tip.y - width / 2, width: width, height: width)).fill()
             }
         }
     }

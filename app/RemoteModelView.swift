@@ -192,8 +192,8 @@ final class RemoteModelNSView: SCNView {
     private var generation: RemoteGeneration?
     private var dragOrigin: NSPoint?
     private var dragAngles = RemoteModelScene.restingAngles
-    private var highlightedGeometry: SCNGeometry?
-    private var originalMaterials: [SCNMaterial] = []
+    /// The lit control's geometries with their own materials, restored on the next change.
+    private var highlighted: [(geometry: SCNGeometry, materials: [SCNMaterial])] = []
     private var remote: SCNNode? { scene?.rootNode.childNode(withName: "remote", recursively: false) }
 
     init() {
@@ -247,9 +247,8 @@ final class RemoteModelNSView: SCNView {
     }
 
     func applyHighlight(_ key: String?) {
-        highlightedGeometry?.materials = originalMaterials
-        highlightedGeometry = nil
-        originalMaterials = []
+        for entry in highlighted { entry.geometry.materials = entry.materials }
+        highlighted = []
         guard let key, let remote else { needsDisplay = true; return }
         let name: String
         switch key {
@@ -258,19 +257,62 @@ final class RemoteModelNSView: SCNView {
         case "touch.edit": name = "clickpad-ring"
         default: name = key
         }
-        guard let geometry = remote.childNode(withName: name, recursively: true)?.geometry else { return }
-        highlightedGeometry = geometry
-        originalMaterials = geometry.materials
-        // Copy materials so shared CAD finishes on other buttons remain unchanged.
-        geometry.materials = originalMaterials.map { original in
-            let material = original.copy() as! SCNMaterial
-            let base = original.diffuse.contents as? NSColor ?? .darkGray
-            material.diffuse.contents = base.blended(withFraction: 0.65, of: .systemBlue)
-            material.emission.contents = NSColor.systemBlue
-            material.emission.intensity = 0.35
-            return material
+        for geometry in Self.highlightParts(name, in: remote).compactMap(\.geometry)
+        where !highlighted.contains(where: { $0.geometry === geometry }) {
+            highlighted.append((geometry, geometry.materials))
+            // Copy materials so shared CAD finishes on other buttons remain unchanged. Dark
+            // surfaces (the button, and the fills inside its TV and play symbols) turn blue; the
+            // symbol's light strokes turn white, since blue-tinted strokes all but vanished.
+            geometry.materials = geometry.materials.map { original in
+                let material = original.copy() as! SCNMaterial
+                let base = original.diffuse.contents as? NSColor ?? .darkGray
+                let stroke = (base.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0) > 0.5
+                material.diffuse.contents = stroke ? NSColor.white : base.blended(withFraction: 0.65, of: .systemBlue)
+                material.emission.contents = stroke ? NSColor.white : NSColor.systemBlue
+                material.emission.intensity = stroke ? 0.5 : 0.35
+                return material
+            }
         }
         needsDisplay = true
+    }
+
+    /// The named controls a printed symbol can sit on.
+    private static let symbolHosts = ["siri", "power", "back", "tv", "playPause", "mute", "volume",
+                                      "clickpad-center", "clickpad-ring"]
+
+    /// Every node a control's highlight colours: its named CAD solid plus the unnamed solids
+    /// lying on its face. The aluminum remote's symbols are CAD solids of their own, so TV turned
+    /// blue around a dark, unlit symbol (2026-11-13). Each unnamed part belongs to the smallest
+    /// named control whose face contains it, so the clickpad ring never takes the center's
+    /// parts. Ink planes added for the 1st-gen remote are not CAD parts and keep their image.
+    static func highlightParts(_ name: String, in remote: SCNNode) -> [SCNNode] {
+        guard let control = remote.childNode(withName: name, recursively: true) else { return [] }
+        guard symbolHosts.contains(name) else { return [control] }
+        func extent(_ node: SCNNode) -> (low: SCNVector3, high: SCNVector3) {
+            let (lo, hi) = node.boundingBox
+            var low = SCNVector3(CGFloat.infinity, .infinity, .infinity)
+            var high = SCNVector3(-CGFloat.infinity, -.infinity, -.infinity)
+            for x in [lo.x, hi.x] { for y in [lo.y, hi.y] { for z in [lo.z, hi.z] {
+                let p = node.convertPosition(SCNVector3(x, y, z), to: remote)
+                low = SCNVector3(min(low.x, p.x), min(low.y, p.y), min(low.z, p.z))
+                high = SCNVector3(max(high.x, p.x), max(high.y, p.y), max(high.z, p.z))
+            } } }
+            return (low, high)
+        }
+        let hosts = symbolHosts.compactMap { key in remote.childNode(withName: key, recursively: true).map { (key, extent($0)) } }
+        func area(_ e: (low: SCNVector3, high: SCNVector3)) -> CGFloat { (e.high.x - e.low.x) * (e.high.y - e.low.y) }
+        var parts = [control]
+        remote.enumerateChildNodes { node, _ in
+            guard node.geometry != nil, node.name?.hasPrefix("cad-part-") == true else { return }
+            let part = extent(node)
+            let owner = hosts.filter { _, face in
+                part.low.x >= face.low.x - 0.5 && part.high.x <= face.high.x + 0.5
+                    && part.low.y >= face.low.y - 0.5 && part.high.y <= face.high.y + 0.5
+                    && part.low.z >= face.low.z - 0.5
+            }.min { area($0.1) < area($1.1) }
+            if owner?.0 == name { parts.append(node) }
+        }
+        return parts
     }
 
     override func mouseMoved(with event: NSEvent) {

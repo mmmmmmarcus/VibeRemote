@@ -200,12 +200,9 @@ extension RemoteGeneration {
     /// remains Enter; remapping it cannot enable the firmware-gated microphone.
     var buttonActionOverrides: [String: ButtonAction] {
         switch self {
-        case .glassTouchSurface:
-            return [
-                "tv": .shiftEnterOrModifier,
-                "playPause": .agentClientOrSlash,
-            ]
-        case .aluminumClickpad, .unknown:
+        // The glass remote's TV hold-modifier and Play/Pause hold were removed on 2026-11-13
+        // (user's request: only Siri responds to a hold); its Play/Pause opens Advanced Menu.
+        case .glassTouchSurface, .aluminumClickpad, .unknown:
             return [:]
         }
     }

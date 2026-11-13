@@ -4,16 +4,36 @@ import XCTest
 final class ButtonProfileTests: XCTestCase {
     private let figma = "com.figma.Desktop"
 
-    func testDefaultsSeedClaudeAndChatGPTWithTheirSkillTrigger() {
+    func testDefaultsStartClaudeAndChatGPTEmptyWithPlayPauseComputerUse() {
         let set = ButtonProfileSet.defaults()
         XCTAssertEqual(set.all.map(\.name), ["General", "Claude", "ChatGPT"])
-        // Aluminum Play/Pause defaults to the app-detecting Skill; each seed pins its character.
-        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfile.generalID), .skillPicker)
-        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID), .slashSkill)
-        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.chatGPTBundleID), .dollarSkill)
-        // The glass remote's Play/Pause opens Advanced Menu, so its seeds pin nothing.
-        XCTAssertNil(set.profile(id: ButtonProfileSet.claudeBundleID)?.overrides[.glassTouchSurface])
+        // Play/Pause opens Computer Use everywhere by default since 2026-11-13; seeds pin nothing.
+        for id in [ButtonProfile.generalID, ButtonProfileSet.claudeBundleID, ButtonProfileSet.chatGPTBundleID] {
+            XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: id), .computerUse)
+        }
+        XCTAssertTrue(set.profile(id: ButtonProfileSet.claudeBundleID)?.overrides.isEmpty == true)
         XCTAssertTrue(set.isAtDefaults(ButtonProfileSet.claudeBundleID))
+    }
+
+    func testRetiredSkillSeedsAreRemovedOnceAndLaterChoicesKept() throws {
+        let suite = "ButtonProfileTests.migration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // A profile saved with the old seeds, plus a deliberate choice that must survive.
+        defaults.set([["bundleID": ButtonProfileSet.claudeBundleID, "name": "Claude",
+                       "overrides": ["aluminumClickpad": ["playPause": "Skill Picker: /", "power": "Undo"]]],
+                      ["bundleID": ButtonProfileSet.chatGPTBundleID, "name": "ChatGPT",
+                       "overrides": ["aluminumClickpad": ["playPause": "Skill Picker: $"]]]],
+                     forKey: ButtonProfileStore.appsKey)
+        var set = ButtonProfileStore.load(defaults)
+        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID), .computerUse)
+        XCTAssertEqual(set.action(button: "power", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID), .undo)
+        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.chatGPTBundleID), .computerUse)
+        // Choosing Skill again afterwards is kept: the migration runs once.
+        set.set(.slashSkill, for: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID)
+        ButtonProfileStore.save(set, defaults)
+        XCTAssertEqual(ButtonProfileStore.load(defaults).action(button: "playPause", generation: .aluminumClickpad,
+                                                                 profile: ButtonProfileSet.claudeBundleID), .slashSkill)
     }
 
     func testFrontmostAppWithoutProfileUsesGeneral() {
@@ -70,7 +90,7 @@ final class ButtonProfileTests: XCTestCase {
         set.set(.undo, for: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID)
         XCTAssertFalse(set.isAtDefaults(ButtonProfileSet.claudeBundleID))
         set.restore(ButtonProfileSet.claudeBundleID)
-        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID), .slashSkill)
+        XCTAssertEqual(set.action(button: "playPause", generation: .aluminumClickpad, profile: ButtonProfileSet.claudeBundleID), .computerUse)
         set.add(bundleID: ButtonProfileSet.claudeBundleID, name: "Duplicate")
         XCTAssertEqual(set.apps.count, 2, "adding an app that already has a profile does nothing")
         set.remove(ButtonProfileSet.claudeBundleID)

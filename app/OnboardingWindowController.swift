@@ -159,8 +159,7 @@ struct OnboardingView: View {
         case .deleteWord:
             return "Press \(glass ? "Menu" : "Back") to delete one word. Keep holding to delete more."
         case .newLine:
-            return glass ? "Press TV for a new line without sending. Hold it for modifier shortcuts."
-                : "Press TV to add a new line without sending your message."
+            return "Press TV to add a new line without sending your message."
         case .arrowKeys:
             return glass ? "Click the edges of the touch surface to press the arrow keys."
                 : "Press the edges of the clickpad to press the arrow keys."
@@ -308,6 +307,8 @@ struct OnboardingView: View {
 /// drawn remote family, matching `RemoteButtonMapping`.
 enum BlueprintHighlight: Equatable {
     case none, siri, deleteWord, newLine, arrows, advancedMenu, touchSurface
+    /// Aluminum Play/Pause's default; the glass remote has no default Computer Use button.
+    case computerUse
 }
 
 /// Front-view geometry in millimetres. Proportions follow the published remote dimensions;
@@ -349,6 +350,7 @@ private struct RemoteGeometry {
         case .deleteWord: return circles[glass ? "menu" : "back"]?.center
         case .newLine: return circles["tv"]?.center
         case .advancedMenu: return circles[glass ? "playPause" : "mute"]?.center
+        case .computerUse: return glass ? nil : circles["playPause"]?.center
         case .arrows: return glass ? CGPoint(x: 34, y: 23) : ring.map { CGPoint(x: $0.center.x + $0.outer - 3, y: $0.center.y) }
         case .touchSurface: return glass ? CGPoint(x: 30, y: 23) : ring.map { CGPoint(x: $0.center.x + 10, y: $0.center.y) }
         }
@@ -412,6 +414,7 @@ private struct RemoteDrawing {
             case .deleteWord: return glass ? "menu" : "back"
             case .newLine: return "tv"
             case .advancedMenu: return glass ? "playPause" : "mute"
+            case .computerUse: return glass ? nil : "playPause"
             default: return nil
             }
         }()

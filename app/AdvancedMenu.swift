@@ -95,24 +95,16 @@ enum AdvancedMenuAction: String, CaseIterable, Sendable {
     }
 }
 
-/// A click owns its release even when the menu is dismissed meanwhile. A stale release
-/// may be consumed but can never execute an action in a later menu presentation.
-/// Dismissing the presentation does not end a physically held menu chord.
-struct AdvancedMenuInputState {
-    enum Command: Equatable { case showMenu, dismissMenu, perform(AdvancedMenuAction) }
-    struct Result { let consumed: Bool; var command: Command? = nil }
-    private struct Key: Hashable { let device: String; let button: String }
-    private struct Press { let command: Command?; let session: UUID?; let beganAt: TimeInterval; var executed = false }
-    static let holdDuration: TimeInterval = 0.25
-    private var presses: [Key: Press] = [:]
-    private(set) var session: UUID?
-    private(set) var owner: String?
-    private var suppressedSiriSession = false
-    var suppressesVoice: Bool { isVisible || suppressedSiriSession }
-    var isVisible: Bool { session != nil }
-    static let auxiliaryButtons: Set<String> = ["back", "menu", "tv", "playPause", "mute", "volumeUp", "volumeDown"]
-    static func trigger(for generation: RemoteGeneration) -> String { generation == .glassTouchSurface ? "playPause" : "mute" }
-    static func action(button: String, generation: RemoteGeneration) -> AdvancedMenuAction? {
+/// Which Advanced Menu action each remote button performs (customizable in Settings › Controls
+/// since 2026-11-11, user's request). The menu opener stays fixed. Choices are global, not per
+/// profile, stored as `advancedMenuOverrides` = {generation: {button: action raw value or "none"}}
+/// and read again on every press, so a Settings change applies to the next menu without restart.
+enum AdvancedMenuMapping {
+    static let defaultsKey = "advancedMenuOverrides"
+    static let noneValue = "none"
+
+    /// The menu's built-in layout.
+    static func defaultAction(button: String, generation: RemoteGeneration) -> AdvancedMenuAction? {
         switch button {
         case "back", "menu": return .deleteAll
         case "tv": return generation == .glassTouchSurface ? .skill : nil
@@ -123,6 +115,79 @@ struct AdvancedMenuInputState {
         case "siri": return .stopTask
         default: return nil
         }
+    }
+
+    /// The buttons Settings offers, top of the remote first. The glass remote has no Power and its
+    /// Play/Pause opens the menu; on aluminum, Mute opens it.
+    static func buttons(for generation: RemoteGeneration) -> [String] {
+        generation == .glassTouchSurface
+            ? ["siri", "back", "tv", "volumeUp", "volumeDown"]
+            : ["power", "siri", "back", "tv", "playPause", "volumeUp", "volumeDown"]
+    }
+
+    /// HID reports the 1st-gen Menu button as "menu"; it is the same control as aluminum Back.
+    static func key(_ button: String) -> String { button == "menu" ? "back" : button }
+
+    static func action(button: String, generation: RemoteGeneration, overrides: [String: String]) -> AdvancedMenuAction? {
+        guard button != AdvancedMenuInputState.trigger(for: generation) else { return nil }
+        guard let stored = overrides[key(button)] else { return defaultAction(button: button, generation: generation) }
+        return stored == noneValue ? nil : AdvancedMenuAction(rawValue: stored)
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> [RemoteGeneration: [String: String]] {
+        let stored = defaults.dictionary(forKey: defaultsKey) as? [String: [String: String]] ?? [:]
+        var result: [RemoteGeneration: [String: String]] = [:]
+        for (rawGeneration, buttons) in stored {
+            guard let generation = RemoteGeneration(rawValue: rawGeneration) else { continue }
+            let offered = Set(Self.buttons(for: generation))
+            result[generation] = buttons.filter { button, value in
+                offered.contains(button) && (value == noneValue || AdvancedMenuAction(rawValue: value) != nil)
+            }
+        }
+        return result
+    }
+
+    /// `nil` restores the button's default; choosing the default itself also removes the entry.
+    static func set(_ action: AdvancedMenuAction?, isNone: Bool, button: String, generation: RemoteGeneration,
+                    in defaults: UserDefaults = .standard) {
+        var all = load(from: defaults)
+        let value: String? = isNone ? noneValue : action?.rawValue
+        let isDefault = isNone ? defaultAction(button: button, generation: generation) == nil
+            : action == defaultAction(button: button, generation: generation)
+        all[generation, default: [:]][key(button)] = isDefault ? nil : value
+        save(all, to: defaults)
+    }
+
+    static func save(_ overrides: [RemoteGeneration: [String: String]], to defaults: UserDefaults = .standard) {
+        let stored = Dictionary(uniqueKeysWithValues: overrides.filter { !$0.value.isEmpty }.map { ($0.key.rawValue, $0.value) })
+        defaults.set(stored, forKey: defaultsKey)
+    }
+}
+
+/// A click owns its release even when the menu is dismissed meanwhile. A stale release
+/// may be consumed but can never execute an action in a later menu presentation.
+/// Dismissing the presentation does not end a physically held menu chord.
+struct AdvancedMenuInputState {
+    enum Command: Equatable { case showMenu, dismissMenu, perform(AdvancedMenuAction) }
+    struct Result { let consumed: Bool; var command: Command? = nil }
+    private struct Key: Hashable { let device: String; let button: String }
+    private struct Press { let command: Command?; let session: UUID?; let beganAt: TimeInterval; var executed = false }
+    private var presses: [Key: Press] = [:]
+    private(set) var session: UUID?
+    private(set) var owner: String?
+    private var suppressedSiriSession = false
+    var suppressesVoice: Bool { isVisible || suppressedSiriSession }
+    var isVisible: Bool { session != nil }
+    static let auxiliaryButtons: Set<String> = ["back", "menu", "tv", "playPause", "mute", "volumeUp", "volumeDown"]
+    static func trigger(for generation: RemoteGeneration) -> String { generation == .glassTouchSurface ? "playPause" : "mute" }
+    /// The user's choices from Settings (see `AdvancedMenuMapping`), refreshed by the controller.
+    var overrides: [RemoteGeneration: [String: String]] = [:]
+    /// The built-in layout, ignoring Settings.
+    static func action(button: String, generation: RemoteGeneration) -> AdvancedMenuAction? {
+        AdvancedMenuMapping.defaultAction(button: button, generation: generation)
+    }
+    func action(button: String, generation: RemoteGeneration) -> AdvancedMenuAction? {
+        AdvancedMenuMapping.action(button: button, generation: generation, overrides: overrides[generation] ?? [:])
     }
     mutating func show(owner: String?) { session = UUID(); self.owner = owner }
     mutating func dismiss() { session = nil; owner = nil }
@@ -140,7 +205,7 @@ struct AdvancedMenuInputState {
                 presses[key] = Press(command: .dismissMenu, session: owner == nil || owner == device ? session : nil, beganAt: time)
                 return Result(consumed: true)
             }
-            if isVisible, owner == nil || owner == device, let action = Self.action(button: button, generation: generation) {
+            if isVisible, owner == nil || owner == device, let action = action(button: button, generation: generation) {
                 let trigger = Key(device: device, button: Self.trigger(for: generation))
                 let held = presses[trigger]?.session == session
                 let immediate = held || action == .stopTask
@@ -162,7 +227,7 @@ struct AdvancedMenuInputState {
                 return Result(consumed: true)
             }
             if presses[trigger] != nil,
-               let action = Self.action(button: button, generation: generation) {
+               let action = action(button: button, generation: generation) {
                 if button == "siri" { suppressedSiriSession = true }
                 presses[key] = Press(command: .perform(action), session: nil, beganAt: time, executed: true)
                 return Result(consumed: true)
@@ -176,7 +241,10 @@ struct AdvancedMenuInputState {
         guard press.session == session, isVisible, !press.executed else { return Result(consumed: true) }
         switch press.command {
         case .showMenu:
-            return Result(consumed: true, command: time - press.beganAt >= Self.holdDuration ? .dismissMenu : nil)
+            // Every press latches the menu open, however long it was held (2026-11-13, user's
+            // request: no button but Siri responds to a hold). It used to close on a release
+            // after 0.25 s.
+            return Result(consumed: true)
         case .dismissMenu: return Result(consumed: true, command: .dismissMenu)
         case .perform: return Result(consumed: true, command: press.command)
         case nil: return Result(consumed: true)
@@ -295,6 +363,7 @@ final class AdvancedMenuController {
     }
 
     func handle(button: String, pressed: Bool, device: String, generation: RemoteGeneration, time: TimeInterval = Date.timeIntervalSinceReferenceDate) -> Bool {
+        if pressed { input.overrides = AdvancedMenuMapping.load() }
         let result = input.handle(button: button, pressed: pressed, device: device, generation: generation, time: time)
         publishVoiceSuppression()
         switch result.command {
@@ -388,20 +457,27 @@ final class AdvancedMenuController {
             button.setAccessibilityLabel(action?.title ?? "Close Advanced Menu")
             view.addSubview(button)
         }
+        // Each slot sits where its button is on the remote and shows what that button is set to
+        // in Settings › Controls; a button set to None leaves its slot empty.
+        func slot(_ control: String, in view: NSView, frame: NSRect) {
+            if let action = input.action(button: control, generation: generation) {
+                button(action, in: view, frame: frame)
+            }
+        }
         let clear = glass(NSRect(x: x, y: y, width: 36, height: 36))
-        button(.deleteAll, in: clear, frame: clear.bounds)
+        slot("back", in: clear, frame: clear.bounds)
         if generation == .glassTouchSurface {
             let skill = glass(NSRect(x: x+44, y: y, width: 36, height: 36))
-            button(.skill, in: skill, frame: skill.bounds)
+            slot("tv", in: skill, frame: skill.bounds)
         }
         let middleLeft = glass(NSRect(x: x, y: y+44, width: 36, height: 36))
-        button(.stopTask, in: middleLeft, frame: middleLeft.bounds)
+        slot(generation == .glassTouchSurface ? "siri" : "playPause", in: middleLeft, frame: middleLeft.bounds)
 
         let close = glass(NSRect(x: x, y: y+88, width: 36, height: 36))
         button(nil, in: close, frame: close.bounds)
         let history = glass(NSRect(x: x+44, y: y+44, width: 36, height: 80))
-        button(.redo, in: history, frame: NSRect(x: 4, y: 4, width: 28, height: 28))
-        button(.undo, in: history, frame: NSRect(x: 4, y: 48, width: 28, height: 28))
+        slot("volumeUp", in: history, frame: NSRect(x: 4, y: 4, width: 28, height: 28))
+        slot("volumeDown", in: history, frame: NSRect(x: 4, y: 48, width: 28, height: 28))
         shadow.needsDisplay = true
         panel = window
         animatedContent = root
