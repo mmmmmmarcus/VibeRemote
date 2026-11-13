@@ -90,6 +90,23 @@ final class DictationStreamingTests: XCTestCase {
     }
 
     /// Smooth while nearly caught up, never far behind when text backs up.
+    /// The correction after release may re-anchor on the editor's own caret only when this hold's
+    /// text is verifiably right before it (ChatGPT counted 1–2 ahead, 2026-11-13).
+    func testReanchorOnlyWhenTheHoldsTextIsRightBeforeTheCaret() {
+        let reanchor = DictationTypewriterPlan.reanchor
+        // The caret past the count (anchor read as 13, so 24 expected), the hold's text right before it.
+        XCTAssertEqual(reanchor("Earlier note.\nhello there", 25, "hello there"), 14)
+        // A trailing paragraph break after the caret.
+        XCTAssertEqual(reanchor("Earlier note.\nhello there\n", 25, "hello there"), 14)
+        // Offsets that leave out an earlier paragraph break: the caret at the end reads one short.
+        XCTAssertEqual(reanchor("Earlier note.\nhello there", 24, "hello there"), 13)
+        // Something else before the caret: never re-anchor, so nothing is deleted.
+        XCTAssertNil(reanchor("Earlier note.\nhello thera", 26, "hello there"))
+        XCTAssertNil(reanchor("hello there and more", 20, "hello there"), "caret not after the hold's text")
+        XCTAssertNil(reanchor("hi", 2, "hello there"))
+        XCTAssertNil(reanchor("anything", 3, ""))
+    }
+
     func testHeldTextOnlyGrowsWithWhatTwoPartialsAgreeOn() {
         let grow = DictationTypewriterPlan.growth
         // The first partial has nothing to agree with yet; the moving tail stays off screen.
@@ -113,6 +130,16 @@ final class DictationStreamingTests: XCTestCase {
         // A revised last word: the characters just before it stand in.
         XCTAssertEqual(grow("We will meet at the cafe", "We will meet at the café tomorrow", "We will meet at the café tomorrow at"),
                        "We will meet at the cafe tomorrow")
+        // Punctuation the recognizer adds to words already shown does not stop typing
+        // (reproduced 2026-11-13: "quickly and" → "quickly, and" froze the rest of the hold).
+        XCTAssertEqual(grow("when I typed quickly and", "when I typed quickly, and I would rather.",
+                            "when I typed quickly, and I would rather it."),
+                       "when I typed quickly and I would rather")
+        XCTAssertEqual(grow("Right now it", "right now, it jumps around.", "right now, it jumps around a lot."),
+                       "Right now it jumps around")
+        // Punctuation already on screen is not typed twice.
+        XCTAssertEqual(grow("quickly, ", "quickly, and I would.", "quickly, and I would rather."), "quickly, and I would")
+        XCTAssertEqual(grow("我觉得", "我觉得，我们应该改一下。", "我觉得，我们应该改一下光标。"), "我觉得，我们应该改一下")
         // A long run that occurs twice far from the end is not trusted.
         XCTAssertEqual(grow("we said hello there friends ok", "hello there friends and then hello there friends again",
                             "hello there friends and then hello there friends again now"),

@@ -312,49 +312,70 @@ enum DictationTypewriterPlan {
     /// retyping partials looked unstable, and the refined result after release replaces them
     /// anyway). It shows what two consecutive partials agree on, so the recognizer's still-moving
     /// tail stays off screen. When a revision changes text already shown, typing carries on from
-    /// where the shown text's end falls in the agreed text (`alignedEnd`); only when it cannot be
-    /// found at all is nothing added until release.
+    /// where the shown text's end falls in the agreed text (`continuation`); only when it cannot
+    /// be found at all is nothing added until release.
     static func growth(shown target: String, previous: String, latest: String) -> String {
         let agreed = commonPrefix(previous, latest)
         if agreed.hasPrefix(target) { return agreed.count > target.count ? agreed : target }
-        guard !target.isEmpty, let end = alignedEnd(of: target, in: agreed) else { return target.isEmpty ? agreed : target }
-        return target + agreed[agreed.index(agreed.startIndex, offsetBy: end)...]
+        guard !target.isEmpty else { return agreed }
+        return target + (continuation(of: target, in: agreed) ?? "")
     }
 
-    /// Where the end of the shown text falls in the agreed text. Its last characters are found
-    /// again near where they ended; failing that, a longer run of them that occurs exactly once,
-    /// because revisions of earlier text add up: a 15 s hold on 2026-11-13 drifted past the
-    /// former fixed 12-character window and typing stopped at 114 of 276 characters. If the
-    /// last characters themselves were revised ("cafe" → "café"), the run a few characters
-    /// earlier stands in and as many agreed characters are skipped as follow it on screen.
-    /// A character offset into `agreed`.
-    static func alignedEnd(of shown: String, in agreed: String) -> Int? {
-        let shown = Array(shown), agreed = Array(agreed)
-        func endings(of anchor: ArraySlice<Character>) -> [Int] {
-            guard !anchor.isEmpty, anchor.count <= agreed.count else { return [] }
-            return (anchor.count...agreed.count).filter { agreed[($0 - anchor.count)..<$0].elementsEqual(anchor) }
+    /// What follows the end of the shown text in the agreed text, or nil when that end cannot be
+    /// found. Matching compares only letters, digits and CJK characters, case-insensitively: the
+    /// recognizer keeps adding punctuation to words already typed ("quickly and" → "quickly, and"),
+    /// and an exact match then never found the shown end again, so typing stopped for the rest of
+    /// the hold at the first inserted comma (2026-11-13, reproduced with `--growth`).
+    ///
+    /// The shown end is found by its last six such characters near where they ended (the last
+    /// occurrence, so an earlier repeat cannot type a duplicate); failing that, by its last twelve
+    /// where they occur exactly once, because revisions of earlier words add up (a 15 s hold
+    /// drifted past a fixed window the same day). If the last word itself was revised ("cafe" →
+    /// "café"), the characters just before it within that word stand in, and as many agreed
+    /// characters are skipped.
+    static func continuation(of shown: String, in agreed: String) -> String? {
+        func isText(_ character: Character) -> Bool { character.isLetter || character.isNumber }
+        // Each text character with its offset in the original string.
+        func skeleton(_ text: [Character]) -> [(character: String, offset: Int)] {
+            text.enumerated().filter { isText($0.element) }.map { (String($0.element).lowercased(), $0.offset) }
         }
-        for skip in 0...min(8, shown.count - 1) {
-            let end = shown.count - skip
-            // Skip only within the last word: a skipped space or punctuation means the anchor
-            // would come from an earlier word, which a repeat elsewhere can match.
-            if skip > 0, !(shown[(end - 1)...]).allSatisfy({ $0.isLetter || $0.isNumber }) { break }
-            var found: Int?
-            // Near its expected place, the last such occurrence (an earlier repeat of the same
-            // characters would type a duplicate).
-            let near = shown[max(0, end - 6)..<end]
+        let shownCharacters = Array(shown), agreedCharacters = Array(agreed)
+        let shownText = skeleton(shownCharacters).map(\.character)
+        let agreedSkeleton = skeleton(agreedCharacters)
+        let agreedText = agreedSkeleton.map(\.character)
+        guard !shownText.isEmpty else { return nil }
+        func endings(of anchor: ArraySlice<String>) -> [Int] {
+            guard !anchor.isEmpty, anchor.count <= agreedText.count else { return [] }
+            return (anchor.count...agreedText.count).filter { agreedText[($0 - anchor.count)..<$0].elementsEqual(anchor) }
+        }
+        // The shown text's last word, if it ends in one. Skipping stays inside it, keeping at
+        // least one of its letters in the anchor: an anchor from an earlier word can match a
+        // repeat of that word elsewhere and type a duplicate.
+        let lastWord = shownCharacters.reversed().prefix(while: isText).count
+        var matched: Int?
+        for skip in 0...min(8, max(0, lastWord - 1), shownText.count - 1) {
+            let end = shownText.count - skip
+            let near = shownText[max(0, end - 6)..<end]
             if let last = endings(of: near).last(where: { abs($0 - end) <= 12 }) {
-                found = last
+                matched = last + skip
             } else if end >= 12 {
-                // Anywhere, when a 12-character run is unambiguous.
-                let long = endings(of: shown[(end - 12)..<end])
-                if long.count == 1 { found = long[0] }
+                let long = endings(of: shownText[(end - 12)..<end])
+                if long.count == 1 { matched = long[0] + skip }
             }
-            if let found {
-                return agreed.count >= found + skip ? found + skip : nil
-            }
+            if matched != nil { break }
         }
-        return nil
+        guard let matched, matched <= agreedText.count else { return nil }
+        // Back to the agreed text: just after the matched character.
+        var index = matched == 0 ? 0 : agreedSkeleton[matched - 1].offset + 1
+        // Punctuation or spacing the screen already ends with is not typed twice: skip the
+        // agreed text's own run there, keeping a space if only the agreed text has one.
+        let shownTrail = shownCharacters.reversed().prefix { !isText($0) }
+        guard !shownTrail.isEmpty else { return String(agreedCharacters[index...]) }
+        let runStart = index
+        while index < agreedCharacters.count, !isText(agreedCharacters[index]) { index += 1 }
+        let run = agreedCharacters[runStart..<index]
+        let space = run.contains(where: \.isWhitespace) && !shownTrail.contains(where: \.isWhitespace)
+        return (space ? " " : "") + String(agreedCharacters[index...])
     }
 
     static func commonPrefix(_ a: String, _ b: String) -> String {
@@ -418,6 +439,33 @@ enum DictationTypewriterPlan {
         guard let expected, let observed else { return .proceed }
         return observed.length == 0 && observed.location == expected ? .proceed : .wait
     }
+
+    /// A new anchor when the caret is not where the count says but the hold's own text is
+    /// verifiably right before it, or nil. ChatGPT's composer reported its caret 1–2 UTF-16
+    /// units past anchor + typed from the first keystroke on (2026-11-13: 44 characters already
+    /// in the box), so the correction after release stopped with "the cursor moved" and the
+    /// refined text never went in. The anchor is read once, before the first keystroke, and
+    /// Chromium's offsets around paragraph breaks are not consistent with the value, so the count
+    /// can start off by one. Deleting stays safe: the range must end at the caret and hold
+    /// exactly what this hold typed. Either the value up to the caret ends with it, or (offsets
+    /// and value disagreeing about breaks earlier in the text) the caret is at the end of the
+    /// value and the value ends with it. The hold's text is one line, so neither check spans a break.
+    static func reanchor(value: String, caret: Int, displayed: String) -> Int? {
+        let typed = displayed.utf16.count
+        guard typed > 0, caret >= typed else { return nil }
+        let units = Array(value.utf16)
+        if caret <= units.count, String(utf16CodeUnits: Array(units[(caret - typed)..<caret]), count: typed) == displayed {
+            return caret - typed
+        }
+        // The caret at the end of the text, counted with or without the line breaks before it.
+        var end = value
+        while end.last?.isNewline == true { end.removeLast() }
+        let breaks = end.dropLast(displayed.count).filter(\.isNewline).count
+        if end.hasSuffix(displayed), [value.utf16.count, end.utf16.count, end.utf16.count - breaks].contains(caret) {
+            return caret - typed
+        }
+        return nil
+    }
 }
 
 /// Moves the editor's text toward the latest transcript one paced tick at a time. Each hold has
@@ -429,8 +477,9 @@ final class DictationTypewriter {
         let pid: pid_t
         let element: AXUIElement?
         /// UTF-16 selection start when this hold began typing: typing replaces any selection,
-        /// so the caret should then sit at anchor + typed length.
-        let anchor: Int?
+        /// so the caret should then sit at anchor + typed length. Re-anchored when the editor's
+        /// count turns out to differ (see `DictationTypewriterPlan.reanchor`).
+        var anchor: Int?
     }
 
     private(set) var displayed = ""
@@ -543,6 +592,17 @@ final class DictationTypewriter {
             let expected = focus.anchor.map { $0 + displayed.utf16.count }
             let observed = focus.element.flatMap(Self.selection)
             if DictationTypewriterPlan.caretCheck(expected: expected, observed: observed) == .wait {
+                // After two waits (a lagging tree has caught up by then), trust the caret if the
+                // hold's own text sits right before it.
+                if caretWaits >= 2, let observed, observed.length == 0, let expected, let element = focus.element,
+                   let value = Self.value(element),
+                   let anchor = DictationTypewriterPlan.reanchor(value: value, caret: observed.location, displayed: displayed) {
+                    rmDebug("🗣 Dictation re-anchored: the editor's caret was \(observed.location - expected) from the count, with this hold's text right before it")
+                    self.focus?.anchor = anchor
+                    caretWaits = 0
+                    schedule(0)
+                    return
+                }
                 caretWaits += 1
                 if caretWaits > DictationTypewriterPlan.maximumCaretWaits { stop("the cursor moved"); return }
                 schedule(0.03)
@@ -665,6 +725,13 @@ final class DictationTypewriter {
         return CFEqual(original, current)
     }
 
+    private static func value(_ element: AXUIElement) -> String? {
+        AXUIElementSetMessagingTimeout(element, 0.05)
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &raw) == .success else { return nil }
+        return raw as? String
+    }
+
     private static func selection(_ element: AXUIElement) -> CFRange? {
         AXUIElementSetMessagingTimeout(element, 0.03)
         var raw: CFTypeRef?
@@ -689,6 +756,7 @@ enum SeedStreamVerifier {
         var final: String?
         var failure: String?
         var finalAt: TimeInterval?
+        var texts: [String] = []
     }
 
     static func run(path: String) -> Never {
@@ -727,6 +795,7 @@ enum SeedStreamVerifier {
                 record.partials += 1
                 if record.firstPartial == nil, !result.text.isEmpty { record.firstPartial = now }
                 record.final = result.text
+                record.texts.append(result.text)
             case .final(let result):
                 if let result { record.final = result.text }
                 record.finalAt = now
@@ -787,6 +856,17 @@ enum SeedStreamVerifier {
         guard answered, let finalAt = record.finalAt else { print("no final result within 15 s"); exit(1) }
         print(String(format: "final: %.2f s after the last packet", finalAt - lastSent))
         print("stream text: \(record.final ?? "")")
+        // `--growth` replays the partials through the typewriter's while-held rule, to show where
+        // the screen would stall (synthetic clips only: it prints what was said).
+        if CommandLine.arguments.contains("--growth") {
+            var shown = "", previous = ""
+            for text in record.texts {
+                let latest = DictationTyper.normalized(DictationDictionary.apply(settings.dictionary, to: text))
+                shown = DictationTypewriterPlan.growth(shown: shown, previous: previous, latest: latest)
+                previous = latest
+                print("partial: \(latest)\n  shown: \(shown)")
+            }
+        }
         if second != nil {
             _ = nostreamDone.wait(timeout: .now() + 15)
             nostream.lock.lock()

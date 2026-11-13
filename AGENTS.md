@@ -1244,10 +1244,14 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
   (`DictationTypewriterPlan.growth`, 2026-11-10, user's request: deleting and retyping partials looked unstable,
   and the refined result replaces them after release anyway): it shows what two consecutive partials agree on,
   and after a revision of shown text it continues from where the shown text's end falls in the agreed text
-  (`alignedEnd`): its last six characters within 12 of their expected place (last such occurrence), else a run of its
-  last 12 that occurs exactly once anywhere (revisions add up: a fixed window stalled a 15 s hold at 114 of 276
-  characters on 2026-11-13, and the bubble stopped with it, since reads follow keystrokes); if the last word itself was
-  revised, the characters just before it within that word stand in. Only when nothing aligns does it pause until release. Every correction happens in `finish`, toward the refined text. The user confirmed on 2026-11-11
+  (`continuation`), matching only letters, digits and CJK characters, case-insensitively: its last six within 12 of
+  their expected place (last such occurrence), else its last 12 where they occur exactly once (revisions add up: a fixed
+  window stalled a 15 s hold at 114 of 276 characters on 2026-11-13, and the bubble stopped with it, since reads follow
+  keystrokes); if the last word itself was revised, its earlier letters stand in (never skipping into an earlier word).
+  Exact matching was the user's "stops after about six words": the recognizer adds commas to words already shown
+  ("quickly and" → "quickly, and"), and the shown end was never found again; punctuation the screen already ends with
+  is not typed twice. `--verify-seed-stream <file> --growth` replays a clip's partials through this rule (synthetic
+  clips only: it prints the text). The user confirmed the fix on a real 17.7 s hold the same day. Only when nothing aligns does it pause until release. Every correction happens in `finish`, toward the refined text. The user confirmed on 2026-11-11
   that streaming now reads smooth and stable, with replacement only after release. Pace: one character per tick
   spread over ~0.18 s while nearly caught up (12–45 ms), more per tick as text backs up, ≤20
   UTF-16 units per key event; deletes up to 40 per tick then one settling tick. After release (2026-11-12, user's request: "deleting like a real human", settled 1.6–2.1 s after release for ~100 corrected characters) the correction is one step: after the same caret check, `AXSelectedTextRange` is set to exactly the tail being replaced (`replacementRange`: common-prefix end to the end of this hold's text, never before the anchor), confirmed by reading it back (Chromium applies it asynchronously; up to 8 checks 15 ms apart), then the refined text is typed over it in back-to-back ≤20-unit key events (an empty replacement is one Backspace). Unconfirmed selection restores the caret to the hold's end and Backspace takes over for the rest of the hold. The hold's log line says `by selection` or `by Backspace`. Only the selection is written, never AXValue. A later hold's
@@ -1255,7 +1259,13 @@ set marked text in another app, so the user chose (2026-11-09) real keystrokes i
 - Corrections delete real characters, so they are guarded: focus (pid, then the AX focused
   element) is fixed at the hold's first edit and re-checked before every delete and at least every
   100 ms while typing; before deleting, the AX caret must sit exactly at anchor + typed UTF-16
-  length (a lagging editor gets six 30 ms retries). Any failure stops typing for that hold and
+  length (a lagging editor gets six 30 ms retries). After two retries the caret may be re-anchored
+  (`DictationTypewriterPlan.reanchor`) if this hold's own text verifiably sits right before it: the value up
+  to the caret ends with it, or the caret is at the end of the value (counting earlier line breaks or not)
+  and the value ends with it. ChatGPT reported its caret 1–2 ahead of the count from the first keystroke
+  (2026-11-13, text already in the box), so the post-release correction stopped with "the cursor moved"
+  and the refined text never went in; the log line `Dictation re-anchored` records the offset only.
+  Any failure stops typing for that hold and
   leaves what is on screen; nothing is ever deleted beyond what the hold typed. Unreadable
   selection or focus proceeds on the remaining checks.
 - After release: drain grace, last packet, wait ≤4 s for the stream's final, then send the recorded clip once to
