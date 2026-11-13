@@ -2,7 +2,8 @@
 
 The one app that turns your Siri Remote into the best AI inputer: a macOS menu-bar app
 that maps every remote button to the keys AI agent apps need — per app, with profiles —
-and turns the remote's microphone into dictation that types your prompt as you speak.
+turns the remote's microphone into dictation that types your prompt as you speak, and
+runs a Computer Use agent on the Mac from a task you say out loud.
 
 | Folder | What it holds |
 |---|---|
