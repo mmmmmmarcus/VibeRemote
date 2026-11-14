@@ -1039,6 +1039,9 @@ final class CaretInsertionPoint: @unchecked Sendable {
         /// ranges, observed in ChatGPT on 2026-11-10), the caret at the end of the text: the
         /// right edge of the last text element's frame, which Chromium still reports.
         case textEnd
+        /// The same, once that element wraps: its last line's end, laid out by VibeRemote (see
+        /// `wrappedEnd`). The line is exact; the position along it is an estimate.
+        case wrappedEnd
     }
 
     struct Reading: Sendable {
@@ -1117,6 +1120,10 @@ final class CaretInsertionPoint: @unchecked Sendable {
     /// the first streamed words replace this with measured glyph geometry.
     /// Apps already asked for full accessibility, by pid (queue-confined).
     private var accessibilityRequested: Set<pid_t> = []
+    /// Queue-confined: the editor font's size and line height per app, learned from one-line text
+    /// whose rendered frame is known (see `wrappedEnd`).
+    private var fontSizes: [pid_t: CGFloat] = [:]
+    private var lineHeights: [pid_t: CGFloat] = [:]
 
     private func measure() -> Reading? {
         query.lastStep = nil
@@ -1145,12 +1152,24 @@ final class CaretInsertionPoint: @unchecked Sendable {
         guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else {
             // Dictation types at the caret, so the caret is usually at the end of the text.
             guard Self.isAtTextEnd(text: editor.text, caret: Int(editor.selection.location)),
-                  let leaf = query.lastTextLeafFrame(in: editor),
-                  let caret = Self.textEnd(leaf: leaf, editor: editor.bounds) else {
+                  let leaf = query.lastTextLeafFrame(in: editor) else {
                 query.lastStep = (query.lastStep ?? "?") + "; no text end"
                 return nil
             }
-            return Reading(caret: caret, editor: editor.bounds, accuracy: .textEnd, offset: Int(editor.selection.location))
+            let paragraph = Self.lastParagraph(editor.text)
+            if let caret = Self.textEnd(leaf: leaf, editor: editor.bounds) {
+                // While the text fits on one line its rendered width is known: learn the font size.
+                if let size = Self.fontSize(paragraph: paragraph, renderedWidth: leaf.width) { fontSizes[editor.pid] = size }
+                lineHeights[editor.pid] = leaf.height
+                return Reading(caret: caret, editor: editor.bounds, accuracy: .textEnd, offset: Int(editor.selection.location))
+            }
+            guard let caret = Self.wrappedEnd(paragraph: paragraph, leaf: leaf, editor: editor.bounds,
+                                              fontSize: fontSizes[editor.pid] ?? Self.defaultFontSize,
+                                              lineHeight: lineHeights[editor.pid]) else {
+                query.lastStep = (query.lastStep ?? "?") + "; no text end"
+                return nil
+            }
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .wrappedEnd, offset: Int(editor.selection.location))
         }
         return Self.emptyReading(editor, insertion: query.uncalibratedInsertion(0, in: editor))
     }
@@ -1166,10 +1185,76 @@ final class CaretInsertionPoint: @unchecked Sendable {
     /// The caret at the start of a value that is only the editor's placeholder (read only then,
     /// so it costs one AX call while the composer is empty).
     private func showsPlaceholder(_ editor: CaretAXQuery.Editor) -> Bool {
-        guard editor.selection.location == 0, !editor.text.allSatisfy(\.isNewline),
-              let placeholder = query.attribute(editor.element, kAXPlaceholderValueAttribute) as? String else { return false }
-        let trimmed = placeholder.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty && trimmed == editor.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard editor.selection.location == 0, !editor.text.allSatisfy(\.isNewline) else { return false }
+        // ChatGPT lists AXPlaceholderValue but answers nothing for it; its placeholder ("Work with
+        // Codex") is the element's title and description instead (probed 2026-11-13), so the
+        // first check alone never matched and the bubble still waited for the first words.
+        let candidates = [kAXPlaceholderValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute]
+            .map { query.attribute(editor.element, $0 as String) as? String }
+        return Self.isPlaceholder(value: editor.text, candidates: candidates)
+    }
+
+    /// The value is only a placeholder when it equals one of the element's own labels.
+    static func isPlaceholder(value: String, candidates: [String?]) -> Bool {
+        let shown = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !shown.isEmpty else { return false }
+        return candidates.contains { $0?.trimmingCharacters(in: .whitespacesAndNewlines) == shown }
+    }
+
+    /// The text after the last line break, without the trailing breaks a composer reports.
+    static func lastParagraph(_ text: String) -> String {
+        var text = text
+        while text.last?.isNewline == true { text.removeLast() }
+        guard let breakIndex = text.lastIndex(where: \.isNewline) else { return text }
+        return String(text[text.index(after: breakIndex)...])
+    }
+
+    /// The size the composers use (16 px system font) until a one-line reading says otherwise.
+    static let defaultFontSize: CGFloat = 16
+
+    /// The system font size at which `paragraph` renders `renderedWidth` wide, or nil when the
+    /// text is too short to tell (a few characters measure too coarsely).
+    static func fontSize(paragraph: String, renderedWidth: CGFloat) -> CGFloat? {
+        guard paragraph.count >= 8, renderedWidth > 0 else { return nil }
+        let reference = (paragraph as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: defaultFontSize)]).width
+        guard reference > 0 else { return nil }
+        let size = defaultFontSize * renderedWidth / reference
+        return (10...28).contains(size) ? size : nil
+    }
+
+    /// The end of a wrapped text element's last line, for the dictation indicator only. Without
+    /// per-character geometry (ChatGPT) the element's frame is all there is, and once the text
+    /// wraps it says nothing about where the last line ends, so the bubble stayed at the end of
+    /// line 1 while the text grew below it (2026-11-13: 417 of 486 reads empty in a 281-character
+    /// hold). The paragraph is laid out again at the frame's width: its widest line is the frame's
+    /// width, so greedy wrapping there breaks where the editor did, given the same font. The line
+    /// count divides the frame's height into rows, so the row is exact; the position along it is
+    /// as good as the font estimate. Caret positioning never uses this: it moves text.
+    static func wrappedEnd(paragraph: String, leaf: CGRect, editor: CGRect, fontSize: CGFloat,
+                           lineHeight: CGFloat? = nil) -> CGRect? {
+        guard !paragraph.isEmpty, leaf.width > 20, leaf.height > 30 else { return nil }
+        let storage = NSTextStorage(string: paragraph, attributes: [.font: NSFont.systemFont(ofSize: fontSize)])
+        let layout = NSLayoutManager()
+        // A hair wider than the frame, so the widest line itself is not pushed onto the next row
+        // by rounding.
+        let container = NSTextContainer(size: CGSize(width: leaf.width + 1, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        var lines: [CGRect] = []
+        layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) { _, used, _, _, _ in
+            lines.append(used)
+        }
+        guard let last = lines.last else { return nil }
+        // Rows come from the frame itself: its height over the editor's line height (learned from
+        // one-line text), or else over our own line count.
+        let rows = lineHeight.map { max(1, Int((leaf.height / $0).rounded())) } ?? lines.count
+        let rowHeight = leaf.height / CGFloat(rows)
+        let x = min(leaf.minX + last.width, leaf.maxX)
+        let caret = CGRect(x: x, y: leaf.minY + rowHeight * CGFloat(rows - 1), width: 2, height: rowHeight)
+        guard editor.insetBy(dx: -1, dy: -1).contains(CGPoint(x: caret.minX, y: caret.midY)) else { return nil }
+        return caret
     }
 
     /// Electron apps (Claude) build per-character text geometry only for an assistive client
@@ -1228,10 +1313,29 @@ final class CaretInsertionPoint: @unchecked Sendable {
 /// cursor without holding Siri. Prints geometry and capabilities only, never editor text.
 enum CaretProbe {
     static func run() -> Never {
+        // `--delay <s>`: wait first, so another app can be brought to the front.
+        if let index = CommandLine.arguments.firstIndex(of: "--delay"), CommandLine.arguments.indices.contains(index + 1),
+           let seconds = Double(CommandLine.arguments[index + 1]) {
+            Thread.sleep(forTimeInterval: seconds)
+        }
         let query = CaretAXQuery()
         query.diagnosingEntry = true
         if let editor = query.observe() {
             print("editor bounds=\(editor.bounds) length=\(editor.text.utf16.count) caret=\(editor.selection.location) onlyNewlines=\(editor.text.allSatisfy(\.isNewline))")
+            // What the element says about itself: attribute names, and for the text-like ones
+            // only their length and whether they equal the value. Never their text.
+            var names: CFArray?
+            if AXUIElementCopyAttributeNames(editor.element, &names) == .success, let names = names as? [String] {
+                print("attributes:", names.sorted().joined(separator: " "))
+                for name in [kAXPlaceholderValueAttribute as String, kAXDescriptionAttribute as String,
+                             kAXTitleAttribute as String, kAXHelpAttribute as String, "AXRoleDescription"] where names.contains(name) {
+                    let value = query.attribute(editor.element, name) as? String
+                    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    print("  \(name): length \(value?.count ?? -1), equals value: \(trimmed == editor.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+                }
+                print("  role:", (query.attribute(editor.element, kAXRoleAttribute) as? String) ?? "?",
+                      "subrole:", (query.attribute(editor.element, kAXSubroleAttribute) as? String) ?? "-")
+            }
             print("caret:", query.caret(Int(editor.selection.location), in: editor).map { "\($0)" } ?? "nil")
             // `--all`: the measured caret at every character boundary, for checking geometry on
             // later lines against a known test page. Offsets and rectangles only.

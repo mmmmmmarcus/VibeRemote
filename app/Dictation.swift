@@ -461,7 +461,7 @@ final class DictationIndicator {
             // was final, and the bubble never followed in Claude or ChatGPT (2026-11-10).
             guard let point else { behind(); return }
             self.place(point, expected: expected)
-            if let expected, [.glyph, .afterGlyph, .textEnd].contains(point.accuracy), point.offset != expected {
+            if let expected, [.glyph, .afterGlyph, .textEnd, .wrappedEnd].contains(point.accuracy), point.offset != expected {
                 self.staleReads += 1
                 behind()
             }
