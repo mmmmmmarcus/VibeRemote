@@ -149,7 +149,7 @@ final class PacketLoggerButtonMonitor {
         guard worker == nil else { return }
         refreshLabels()
         let reader = PacketCaptureReader(path: path, labels: labels) { [weak self] in
-            DispatchQueue.main.async { self?.deliverPending() }
+            DispatchQueue.main.async { [weak self] in self?.deliverPending() }
         }
         worker = reader
         reader.start()
@@ -273,7 +273,7 @@ private final class PacketCaptureReader: @unchecked Sendable {
     var pollCount: Int { queue.sync { polls } }
     func updateLabels(_ labels: Set<String>) { queue.async { self.labels = labels } }
     func start() {
-        queue.async {
+        queue.async { [self] in
             self.running = true
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
             timer.setEventHandler { [weak self] in self?.readAndNotify() }

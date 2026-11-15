@@ -160,8 +160,10 @@ final class ListEditingController {
            let rich = parameter(focus, kAXAttributedStringForRangeParameterizedAttribute, value) as? NSAttributedString,
            rich.length > 0 {
             let attrs = rich.attributes(at: 0, effectiveRange: nil)
-            if attrs[NSAttributedString.Key(kAXListItemLevelTextAttribute.takeUnretainedValue() as String)] != nil ||
-                attrs[NSAttributedString.Key(kAXListItemPrefixTextAttribute.takeUnretainedValue() as String)] != nil ||
+            // HIServices exports these immutable AX keys as mutable C globals.
+            // Use their stable string values without reading shared mutable storage.
+            if attrs[NSAttributedString.Key("AXListItemLevel")] != nil ||
+                attrs[NSAttributedString.Key("AXListItemPrefix")] != nil ||
                 (attrs[.paragraphStyle] as? NSParagraphStyle)?.textLists.isEmpty == false {
                 structure = .list
             }

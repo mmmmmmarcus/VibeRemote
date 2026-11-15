@@ -171,7 +171,9 @@ private final class OpusDecoder {
     }
 }
 
-private final class VirtualAudioOutput: VoiceAudioOutput {
+// Mutable engine and liveness state is lock-protected; rebuilds are serialized on
+// controlQueue. AudioDelivery synchronizes its own state across render callbacks.
+private final class VirtualAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     private let delivery = AudioDelivery()
     private let format: AVAudioFormat
     /// Guards `engine`/`player`, which the rebuild path replaces wholesale while the read

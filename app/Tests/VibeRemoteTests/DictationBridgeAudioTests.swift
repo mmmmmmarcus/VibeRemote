@@ -78,11 +78,12 @@ final class DictationBridgeAudioTests: XCTestCase {
         reader.start()
         try writeSession(tone(4_800), complete: false)
         let appended = expectation(description: "appended samples read")
+        let path = self.path, samples = tone(4_800)
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
-            let handle = FileHandle(forWritingAtPath: self.path)!
+            let handle = FileHandle(forWritingAtPath: path)!
             handle.seekToEndOfFile()
             var data = Data()
-            for sample in self.tone(4_800) { withUnsafeBytes(of: sample.bitPattern.littleEndian) { data.append(contentsOf: $0) } }
+            for sample in samples { withUnsafeBytes(of: sample.bitPattern.littleEndian) { data.append(contentsOf: $0) } }
             handle.write(data)
             handle.closeFile()
             appended.fulfill()

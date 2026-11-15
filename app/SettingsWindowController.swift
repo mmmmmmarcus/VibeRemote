@@ -358,7 +358,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         snapshot: RemoteSettingsSnapshot,
         setSiriAction: @escaping (ButtonAction) -> Void,
         resetSiriAction: @escaping () -> Void,
-        setIdleTimeout: @escaping (RemoteIdleTimeout) -> Void = { _ in },
+        setIdleTimeout: @escaping @MainActor @Sendable (RemoteIdleTimeout) -> Void = { _ in },
         actions: SettingsActions = SettingsActions()
     ) {
         model = RemoteSettingsModel(snapshot: snapshot)

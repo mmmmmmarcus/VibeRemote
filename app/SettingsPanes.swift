@@ -48,7 +48,7 @@ struct SettingsRootView: View {
     @ObservedObject private var updater = AppUpdater.shared
     let setSiriAction: (ButtonAction) -> Void
     let restoreDefaults: () -> Void
-    let setIdleTimeout: (RemoteIdleTimeout) -> Void
+    let setIdleTimeout: @MainActor @Sendable (RemoteIdleTimeout) -> Void
     let actions: SettingsActions
 
     var body: some View {
@@ -60,7 +60,9 @@ struct SettingsRootView: View {
                     RemotePane(model: model, setSiriAction: setSiriAction,
                                restoreDefaults: restoreDefaults, actions: actions)
                 case .device:
-                    DevicePane(model: model, setIdleTimeout: setIdleTimeout, actions: actions)
+                    DevicePane(model: model, setIdleTimeout: { timeout in
+                        setIdleTimeout(timeout)
+                    }, actions: actions)
                 case .dictation:
                     let using = model.snapshot.profiles.profiles(withSiri: .vibeDictation)
                     DictationPane(profiles: using.map(\.name),
@@ -507,7 +509,7 @@ enum ControlsMode: String, CaseIterable {
 /// Diagnostics.
 private struct DevicePane: View {
     @ObservedObject var model: RemoteSettingsModel
-    let setIdleTimeout: (RemoteIdleTimeout) -> Void
+    let setIdleTimeout: @MainActor @Sendable (RemoteIdleTimeout) -> Void
     let actions: SettingsActions
 
     var body: some View {
@@ -755,7 +757,7 @@ private struct ButtonPill: View {
     let onHover: (Bool) -> Void
     let onTap: () -> Void
 
-    static let arrowLength: CGFloat = 9
+    nonisolated static let arrowLength: CGFloat = 9
 
     var body: some View {
         Button(action: onTap) {
@@ -1057,13 +1059,13 @@ struct AgentDemo: View {
 
     /// One pass of the loop: press, dictate, the agent acts, the result rests long enough
     /// to read, then it starts over.
-    static func progress(at date: Date) -> Double {
+    nonisolated static func progress(at date: Date) -> Double {
         let period = 5.6
         return date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
     }
 
     /// Phase ramps, each 0...1 across its own slice of the loop.
-    static func phase(_ progress: Double, from: Double, to: Double) -> Double {
+    nonisolated static func phase(_ progress: Double, from: Double, to: Double) -> Double {
         min(max((progress - from) / (to - from), 0), 1)
     }
 

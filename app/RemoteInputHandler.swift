@@ -507,9 +507,10 @@ final class RemoteInputHandler {
               !remoteIdleTracker.isEmpty else { return }
 
         let timer = Timer(timeInterval: 45, repeats: true) { [weak self] timer in
+            let callbackTimer = MainRunLoopTimer(timer: timer)
             MainActor.assumeIsolated {
                 guard let self else {
-                    timer.invalidate()
+                    callbackTimer.timer.invalidate()
                     return
                 }
                 let targets = self.devices.filter { interfaceID, _ in
@@ -518,7 +519,7 @@ final class RemoteInputHandler {
                     return self.remoteIdleTracker.shouldKeepAlive(deviceKey: key)
                 }
                 guard !targets.isEmpty else {
-                    timer.invalidate()
+                    callbackTimer.timer.invalidate()
                     self.remoteKeepAliveTimer = nil
                     return
                 }
@@ -1594,6 +1595,12 @@ private struct CallbackValue: @unchecked Sendable {
     let value: IOHIDValue
 }
 
+// IOHID invokes report callbacks on the main run loop. This borrowed pointer is
+// used only by the synchronous assumeIsolated call, never retained or dispatched.
+private struct CallbackReport: @unchecked Sendable {
+    let bytes: UnsafePointer<UInt8>
+}
+
 private func inputValueCallback(
     context: UnsafeMutableRawPointer?,
     result: IOReturn,
@@ -1634,11 +1641,12 @@ private func inputReportCallback(
     } else {
         interfaceID = nil
     }
+    let callbackReport = CallbackReport(bytes: UnsafePointer(report))
     MainActor.assumeIsolated {
         handler.handleInputReport(
             result: result,
             reportID: reportID,
-            bytes: UnsafePointer(report),
+            bytes: callbackReport.bytes,
             length: reportLength,
             from: interfaceID,
             source: "report"
@@ -1659,12 +1667,14 @@ private func featureEnableCallback(
     let request = Unmanaged<RemoteInputHandler.FeatureEnableRequest>
         .fromOpaque(context)
         .takeRetainedValue()
+    let handler = request.handler
+    let usagePage = request.usagePage, usage = request.usage, variant = request.variant
     MainActor.assumeIsolated {
-        request.handler?.handleFeatureEnableResult(
+        handler?.handleFeatureEnableResult(
             result,
-            usagePage: request.usagePage,
-            usage: request.usage,
-            variant: request.variant
+            usagePage: usagePage,
+            usage: usage,
+            variant: variant
         )
     }
 }

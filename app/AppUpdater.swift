@@ -3,7 +3,7 @@ import Combine
 import Sparkle
 
 @MainActor
-final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation, NSToolbarItemValidation, SPUStandardUserDriverDelegate {
+final class AppUpdater: NSObject, ObservableObject, NSMenuItemValidation, NSToolbarItemValidation, @MainActor SPUStandardUserDriverDelegate {
     static let shared = AppUpdater()
     @Published private(set) var canCheck = false
     @Published private(set) var updateAvailable = false

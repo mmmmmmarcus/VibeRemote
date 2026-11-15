@@ -504,7 +504,7 @@ final class CaretQueryPipeline<Request: Sendable, Reply: Sendable> {
     private let clear: @Sendable () -> Void
     private var epoch: UInt64 = 0
     private var busy = false
-    private var pending: (Request, @MainActor (Reply) -> Void)?
+    private var pending: (Request, @MainActor @Sendable (Reply) -> Void)?
     init(clear: @escaping @Sendable () -> Void = {}, read: @escaping @Sendable (Request) -> Reply) {
         self.clear = clear; self.read = read
     }
@@ -514,7 +514,7 @@ final class CaretQueryPipeline<Request: Sendable, Reply: Sendable> {
         // never waits, and the next contact cannot race cleanup of old state.
         queue.async(execute: clear)
     }
-    func submit(_ request: Request, receive: @escaping @MainActor (Reply) -> Void) {
+    func submit(_ request: Request, receive: @escaping @MainActor @Sendable (Reply) -> Void) {
         if busy { pending = (request, receive); return }
         busy = true
         let generation = epoch, work = read
