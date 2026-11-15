@@ -866,6 +866,34 @@ final class ModelTests: XCTestCase {
         ))
     }
 
+    /// Measured 2026-11-14 on the black-glass remote: previous hold released at 09.80, new
+    /// Siri down dispatched at 10.257 while its voice session was stamped 10.248 by the
+    /// leading capture clock. The strict check dropped that drain and the hold hit the 4 s
+    /// deadline.
+    func testVoiceDrainMatchesHoldDespiteCaptureClockLead() {
+        let previousStart = Date(timeIntervalSince1970: 7.909)
+        let previousRelease = Date(timeIntervalSince1970: 9.8)
+        let holdStart = Date(timeIntervalSince1970: 10.257)
+        XCTAssertTrue(RemoteInputHandler.voiceDrainBelongsToCurrentHold(
+            voiceStartedAt: Date(timeIntervalSince1970: 10.248),
+            holdStartedAt: holdStart, previousReleaseAt: previousRelease))
+        XCTAssertTrue(RemoteInputHandler.voiceDrainBelongsToCurrentHold(
+            voiceStartedAt: Date(timeIntervalSince1970: 10.3),
+            holdStartedAt: holdStart, previousReleaseAt: previousRelease))
+        // The earlier hold's late completion must never end this one.
+        XCTAssertFalse(RemoteInputHandler.voiceDrainBelongsToCurrentHold(
+            voiceStartedAt: previousStart, holdStartedAt: holdStart, previousReleaseAt: previousRelease))
+        // A quick re-press: the tolerance window is clipped at the previous release.
+        XCTAssertFalse(RemoteInputHandler.voiceDrainBelongsToCurrentHold(
+            voiceStartedAt: Date(timeIntervalSince1970: 9.9),
+            holdStartedAt: Date(timeIntervalSince1970: 10.0),
+            previousReleaseAt: Date(timeIntervalSince1970: 9.95)))
+        // Far older than the tolerance is still rejected with no previous release.
+        XCTAssertFalse(RemoteInputHandler.voiceDrainBelongsToCurrentHold(
+            voiceStartedAt: Date(timeIntervalSince1970: 9.0),
+            holdStartedAt: holdStart, previousReleaseAt: .distantPast))
+    }
+
     func testConnectionInputGateIsPerRemoteAndExtendsAcrossInterfaces() {
         var gate = RemoteConnectionInputGate()
         gate.arm(deviceKey: "old", now: 10)

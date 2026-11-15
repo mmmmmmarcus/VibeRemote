@@ -67,6 +67,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `Dictation.swift`, `DictationEngines.swift`, `DictationPane.swift` | VibeRemote Dictation: recorder, typer, controller; Apple/WhisperKit/OpenAI/Seed ASR engines; Settings pane. |
+| `DictationBridgeAudio.swift`, `RemoteAudioProtocol/DictationAudioFile.swift`, `VoiceBridgeHelper/DictationAudioWriter.swift` | Direct dictation audio: the voice helper writes each decoded session to a private file; Dictation reads it instead of the loopback. |
 | `DictationStreaming.swift` | Streaming dictation: Volcengine SAUC frame codec and WebSocket session, the `bigmodel_nostream` refinement session, the typewriter that types and corrects partials, the per-hold live state, and the `--verify-seed-stream` check. |
 | `DictationDictionary.swift` | The dictation dictionary: entries (one word each), storage, Seed hotword budget/context, OpenAI prompt, and the local replacement pass. |
 | `DictationFillers.swift` | Local filler-word cleanup of Seed's final text (hesitations, clause fillers, stutters), applied when Remove Filler Words is on. |
@@ -473,6 +474,10 @@ few seconds).
   `voice-ended` reports protocol end; `voice-drained` reports output completion, tagged
   with the hold's start time. A 4-second old / 3-second new remote safety deadline prevents
   stuck keys. Stale completions must not release a later Siri hold.
+  Match a drain by its voice start against the hold start minus 0.5 s (the helper stamps the
+  start record when read, once 9 ms before the app's HID Siri-down, so a strict check hit the 4 s
+  deadline), bounded below by the previous hold's physical release. A first-generation
+  tail reuse keeps the original hold start.
 - Audio format: Opus CELT-only, 48 kHz mono, 960 samples/frame, 99-byte HID
   payload, enable byte `0xAF`, report ID `0xFA`. Cross-checked against
   https://github.com/azais-corentin/siri-remote.
@@ -1158,12 +1163,20 @@ dictation app. Siri's `vibeDictation` action (pill title "Dictation"; the Siri p
 Settings › Dictation has no on/off toggle since 2026-11-09, user's request, and only says
 whether Siri uses it) begins `DictationController` on Siri down and ends it at the
 exact moment a mapped dictation key would be released: `holdsDictation` routes it through the
-same voice-tail/`voice-drained` wait and safety timeout, the first-generation tail continues the
+same voice-tail wait and safety timeout, but it ends on `voice-audio-complete` (protocol end +
+0.1 s settle) rather than `voice-drained`, ignored while Siri is still down; the first-generation tail continues the
 same recording, and an aluminum re-press ends (and transcribes) the previous hold first. No key is
 held. It is Siri-only; no other button's `choices` may include it.
-- Capture: an in-app `AVAudioEngine` pinned (AUHAL current device) to the bridge's own virtual
-  input, found by `supportedOutputDeviceNames`, running only from Siri down to drain + 150 ms.
-  The voice helper and the shared-memory HAL are unchanged. Needs Microphone TCC,
+- Capture (direct audio, 2026-11-14): the voice helper (`--dictation-audio-file`) writes every
+  allowed session's decoded 48 kHz PCM to `dictation-audio.pcm` in the 0700 bridge directory
+  (`DictationAudioFile` in RemoteAudioProtocol: 64-byte header, staged and renamed per session,
+  complete flag written after the last sample, deleted 10 s after completion and at launch).
+  `DictationBridgeAudioReader` polls it every 20 ms during a hold and resamples to 16 kHz; it
+  takes one session (a first-generation hold follows into later ones), excludes sessions earlier
+  holds took, and freezes synchronously in `end()` before an aluminum re-press's next hold. This
+  removed the loopback's output drain and 150 ms grace. The writer is fed beside the output,
+  never instead of it; mapped keys still follow the drain. The remote needs no Microphone TCC;
+  only the Mac-microphone hotkey's `AVAudioEngine` recorder does, with
   `NSMicrophoneUsageDescription` and the audio-input entitlement. Clips under 0.3 s are dropped;
   digital silence reports "No audio arrived" (bridge stopped).
 - Engines take one finished 16 kHz mono clip (`DictationAudio`), no streaming: Apple
@@ -1370,6 +1383,17 @@ Type While Speaking, Remove Filler Words, Use Text Before the Cursor, App ID; no
   records the Mac's own microphone (`DictationAudioDevice.macMicrophoneID`: the system input if it is a
   real microphone, else the built-in one, else any non-virtual input) and never changes the system
   input (input switching was rejected on 2026-10-31). No drain grace for that source.
+- Its **Microphone** row (2026-11-15, user's request; shown only while a hotkey is chosen) lists
+  "Same as System (<what that resolves to>)" and every input except the bridge's virtual devices
+  (`DictationAudioDevice.microphones`, refreshed by a CoreAudio listener on devices and the default
+  input). Same as System is the rule above, never the VibeRemote device. A chosen device is stored by
+  UID plus name (`dictationHotkeyMicrophoneUID/Name`); while it is not connected the row shows it as
+  "(Not Connected)" and holds fall back to Same as System (`DictationAudioDevice.resolve`, tested).
+- `DictationRecorder` is an input-only HAL output unit (input bus 1 on, output bus 0 off, 16 kHz
+  mono Float32 client format), not `AVAudioEngine`: after the input device is switched the engine's
+  input node keeps the old device's format, and a Bluetooth headset's switch to its call profile is
+  a configuration change that stops it — a ThinkPlus headset mic delivered zero buffers (probed
+  2026-11-15) while the HAL unit delivered 16 k frames/s at once. Do not move it back to the engine.
 - A modifier is half of every shortcut: another modifier already down at the press, or any key or
   modifier while held, cancels the hold (`DictationController.cancel`, nothing typed). Sides are told
   apart by the device-dependent flag bits (NX_DEVICE…KEYMASK). Events whose source pid is VibeRemote's

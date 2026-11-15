@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreAudio
 import SwiftUI
 
 /// Settings › Dictation: whether Siri runs VibeRemote's own dictation, which speech service
@@ -15,6 +16,11 @@ final class DictationSettingsStore: ObservableObject {
     @Published private(set) var whisperProgress: Double?
     @Published private(set) var whisperError: String?
     @Published private(set) var whisperRevision = 0
+    /// The inputs the hotkey can record, kept current while the pane is open.
+    @Published private(set) var microphones: [DictationAudioDevice.Microphone] = []
+    /// What "Same as System" records right now.
+    @Published private(set) var systemMicrophone: DictationAudioDevice.Microphone?
+    private var deviceWatcher: AudioDeviceWatcher?
 
     private static func loadSavedKeys() -> Set<DictationProvider> {
         Set(DictationProvider.allCases.filter { $0.needsAPIKey && DictationKeychain.key(for: $0) != nil })
@@ -34,6 +40,27 @@ final class DictationSettingsStore: ObservableObject {
         microphone = AVCaptureDevice.authorizationStatus(for: .audio)
         savedKeys = Self.loadSavedKeys()
         whisperRevision += 1
+        refreshMicrophones()
+    }
+
+    func refreshMicrophones() {
+        microphones = DictationAudioDevice.microphones()
+        systemMicrophone = DictationAudioDevice.macMicrophone(choice: nil)
+        if deviceWatcher == nil {
+            deviceWatcher = AudioDeviceWatcher { [weak self] in
+                MainActor.assumeIsolated { self?.refreshMicrophones() }
+            }
+        }
+    }
+
+    /// The picker's selection: a device UID, or "" for Same as System.
+    var hotkeyMicrophoneUID: String {
+        get { settings.hotkeyMicrophone?.uid ?? "" }
+        set {
+            guard !newValue.isEmpty else { settings.hotkeyMicrophone = nil; return }
+            let name = microphones.first(where: { $0.uid == newValue })?.name ?? settings.hotkeyMicrophone?.name ?? ""
+            settings.hotkeyMicrophone = DictationMicrophoneChoice(uid: newValue, name: name)
+        }
     }
 
     func requestMicrophone() {
@@ -65,6 +92,33 @@ final class DictationSettingsStore: ObservableObject {
     }
 }
 
+/// Calls back on main whenever an audio device appears or goes away, or the system input
+/// changes, so the hotkey's microphone list never shows a stale device.
+final class AudioDeviceWatcher: @unchecked Sendable {
+    private static let selectors = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice]
+    private let block: AudioObjectPropertyListenerBlock
+
+    init(onChange: @escaping @Sendable () -> Void) {
+        block = { _, _ in onChange() }
+        for selector in Self.selectors {
+            var address = Self.address(selector)
+            AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        }
+    }
+
+    deinit {
+        for selector in Self.selectors {
+            var address = Self.address(selector)
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        }
+    }
+
+    private static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
+    }
+}
+
 struct DictationPane: View {
     /// Read only: the profiles whose Siri is set to Dictation. The Siri button's own choice in
     /// Settings › Controls is the one switch (per profile), so this pane carries no second toggle.
@@ -82,13 +136,19 @@ struct DictationPane: View {
         return everywhere ? nil : "Siri uses Dictation in: \(ListFormatter.localizedString(byJoining: profiles))."
     }
 
+    /// The remote's voice comes straight from the voice helper; only the hotkey, which records
+    /// the Mac's own microphone, needs Microphone access.
+    private var needsMicrophone: Bool {
+        store.microphone != .authorized && store.settings.hotkey != .none
+    }
+
     var body: some View {
         SettingsPane(title: "Dictation") {
-            if store.microphone != .authorized || usage != nil {
+            if needsMicrophone || usage != nil {
                 Section {
-                    if store.microphone != .authorized {
+                    if needsMicrophone {
                         SettingsRow(title: "Microphone Access",
-                                    subtitle: "VibeRemote records the remote's microphone from its own audio device.",
+                                    subtitle: "The dictation hotkey records the Mac's own microphone.",
                                     statusDot: .red) {
                             Button(store.microphone == .notDetermined ? "Allow…" : "Open Settings…",
                                    action: store.requestMicrophone)
@@ -141,10 +201,25 @@ struct DictationPane: View {
                     .fixedSize()
                     .accessibilityIdentifier("settings.dictation.hotkey")
                 }
+                if store.settings.hotkey != .none {
+                    SettingsRow(title: "Microphone") {
+                        Picker("", selection: $store.hotkeyMicrophoneUID) {
+                            Text(systemMicrophoneTitle).tag("")
+                            Divider()
+                            ForEach(store.microphones, id: \.uid) { Text($0.name).tag($0.uid) }
+                            if let missing = missingMicrophone {
+                                Text("\(missing.name.isEmpty ? "Microphone" : missing.name) (Not Connected)").tag(missing.uid)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier("settings.dictation.hotkeyMicrophone")
+                    }
+                }
             } header: {
                 Text("Alternative Dictation Hotkey")
             } footer: {
-                Text("Hold this key to dictate the same way as holding Siri, through the Mac's own microphone: the remote's microphone only works while Siri is held. Pressing another key while holding it is treated as a shortcut and records nothing.")
+                Text("Hold this key to dictate the same way as holding Siri, through the microphone you choose: the remote's microphone only works while Siri is held. Same as System uses the Mac's input setting, or another microphone while that is VibeRemote, and a chosen microphone that is not connected falls back to it. Pressing another key while holding it is treated as a shortcut and records nothing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -155,6 +230,18 @@ struct DictationPane: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
         }
+    }
+
+    private var systemMicrophoneTitle: String {
+        store.systemMicrophone.map { "Same as System (\($0.name))" } ?? "Same as System"
+    }
+
+    /// A chosen microphone that is not plugged in or paired right now, kept selectable so the
+    /// choice survives until it comes back.
+    private var missingMicrophone: DictationMicrophoneChoice? {
+        guard let choice = store.settings.hotkeyMicrophone,
+              !store.microphones.contains(where: { $0.uid == choice.uid }) else { return nil }
+        return choice
     }
 
     private var serviceFooter: String? {

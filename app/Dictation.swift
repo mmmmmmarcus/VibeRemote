@@ -1,4 +1,5 @@
 import AppKit
+import AudioToolbox
 import AVFoundation
 import CoreAudio
 import Speech
@@ -34,6 +35,8 @@ struct DictationSettings: Equatable, Sendable {
     var dictionary: [DictationDictionaryEntry] = []
     /// A keyboard modifier that dictates like a Siri hold, through the Mac's own microphone.
     var hotkey: DictationHotkey = .none
+    /// The microphone the hotkey records; nil follows the system input (2026-11-15, user's request).
+    var hotkeyMicrophone: DictationMicrophoneChoice?
 
     private enum Key {
         static let provider = "dictationProvider"
@@ -46,6 +49,8 @@ struct DictationSettings: Equatable, Sendable {
         static let seedStreamResourceID = "dictationSeedStreamResourceID"
         static let seedRemoveFillers = "dictationSeedRemoveFillers"
         static let seedEditorContext = "dictationSeedEditorContext"
+        static let hotkeyMicrophoneUID = "dictationHotkeyMicrophoneUID"
+        static let hotkeyMicrophoneName = "dictationHotkeyMicrophoneName"
     }
 
     static func load(from defaults: UserDefaults = .standard) -> DictationSettings {
@@ -64,6 +69,10 @@ struct DictationSettings: Equatable, Sendable {
         settings.seedEditorContext = defaults.object(forKey: Key.seedEditorContext) as? Bool ?? true
         settings.dictionary = DictationDictionary.load(from: defaults)
         settings.hotkey = DictationHotkey.load(from: defaults)
+        if let uid = defaults.string(forKey: Key.hotkeyMicrophoneUID), !uid.isEmpty {
+            settings.hotkeyMicrophone = DictationMicrophoneChoice(uid: uid,
+                                                                  name: defaults.string(forKey: Key.hotkeyMicrophoneName) ?? "")
+        }
         return settings
     }
 
@@ -80,7 +89,21 @@ struct DictationSettings: Equatable, Sendable {
         defaults.set(seedEditorContext, forKey: Key.seedEditorContext)
         DictationDictionary.save(dictionary, to: defaults)
         defaults.set(hotkey.rawValue, forKey: DictationHotkey.defaultsKey)
+        if let hotkeyMicrophone {
+            defaults.set(hotkeyMicrophone.uid, forKey: Key.hotkeyMicrophoneUID)
+            defaults.set(hotkeyMicrophone.name, forKey: Key.hotkeyMicrophoneName)
+        } else {
+            defaults.removeObject(forKey: Key.hotkeyMicrophoneUID)
+            defaults.removeObject(forKey: Key.hotkeyMicrophoneName)
+        }
     }
+}
+
+/// A specific microphone for the hotkey, kept by its CoreAudio UID (device IDs change when a
+/// device reconnects). The name is only for showing a choice that is not connected right now.
+struct DictationMicrophoneChoice: Equatable, Sendable {
+    var uid: String
+    var name: String
 }
 
 /// Bring-your-own keys, one Keychain item per cloud service, never in defaults or logs.
@@ -141,17 +164,41 @@ enum DictationAudioDevice {
         return nil
     }
 
-    /// The Mac's own microphone, for the keyboard hotkey (the remote's microphone only streams
-    /// while Siri is physically held). The system input when it is a real microphone, else the
-    /// built-in one, else any other input that is not one of the bridge's virtual devices. The
-    /// system input setting itself is never changed: the bridge usually points it at its own
-    /// virtual device, and switching it back and forth is what the user rejected on 2026-10-31.
-    static func macMicrophoneID() -> AudioDeviceID? {
+    /// One input the hotkey can record.
+    struct Microphone: Equatable, Hashable, Sendable {
+        var id: AudioDeviceID
+        var uid: String
+        var name: String
+        var builtIn: Bool
+    }
+
+    /// Every input the hotkey can record: the bridge's own virtual devices carry only the
+    /// remote's voice, so they are left out. Built-in first, then by name.
+    static func microphones() -> [Microphone] {
         let virtual = Set(MicrophoneBridgeManager.supportedOutputDeviceNames)
-        func usable(_ id: AudioDeviceID) -> Bool { hasInput(id) && !(name(of: id).map(virtual.contains) ?? false) }
-        if let current = defaultInput(), usable(current) { return current }
-        let devices = allDevices().filter(usable)
-        return devices.first(where: { transportType($0) == kAudioDeviceTransportTypeBuiltIn }) ?? devices.first
+        return allDevices().compactMap { id -> Microphone? in
+            guard hasInput(id), let name = name(of: id), !virtual.contains(name), let uid = uid(of: id) else { return nil }
+            return Microphone(id: id, uid: uid, name: name, builtIn: transportType(id) == kAudioDeviceTransportTypeBuiltIn)
+        }
+        .sorted { ($0.builtIn ? 0 : 1, $0.name.localizedLowercase) < ($1.builtIn ? 0 : 1, $1.name.localizedLowercase) }
+    }
+
+    /// The microphone the hotkey records. A chosen device that is not connected falls back to
+    /// the system's, so the hotkey still works when, say, a headset is put away. The system
+    /// input setting itself is never changed: the bridge usually points it at its own virtual
+    /// device, and switching it back and forth is what the user rejected on 2026-10-31.
+    static func macMicrophone(choice: DictationMicrophoneChoice?) -> Microphone? {
+        resolve(choice: choice, available: microphones(), systemInput: defaultInput())
+    }
+
+    /// The system input when it is a real microphone, else the built-in one, else any other.
+    /// "Same as System" cannot mean the bridge's virtual device: that is usually the system
+    /// input while the bridge runs, and it is silent unless Siri is held.
+    static func resolve(choice: DictationMicrophoneChoice?, available: [Microphone],
+                        systemInput: AudioDeviceID?) -> Microphone? {
+        if let choice, let chosen = available.first(where: { $0.uid == choice.uid }) { return chosen }
+        if let systemInput, let current = available.first(where: { $0.id == systemInput }) { return current }
+        return available.first(where: \.builtIn) ?? available.first
     }
 
     private static func defaultInput() -> AudioDeviceID? {
@@ -162,6 +209,16 @@ enum DictationAudioDevice {
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
         return status == noErr && id != 0 ? id : nil
+    }
+
+    private static func uid(of id: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var uid = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &uid) { AudioObjectGetPropertyData(id, &address, 0, nil, &size, $0) }
+        return status == noErr && !(uid as String).isEmpty ? uid as String : nil
     }
 
     private static func transportType(_ id: AudioDeviceID) -> UInt32 {
@@ -203,75 +260,108 @@ enum DictationAudioDevice {
     }
 }
 
-/// Records one hold from the virtual device, resampled to 16 kHz mono as it arrives.
-/// The engine runs only between Siri down and the end of the hold, so the system's
-/// microphone indicator is on only while the user is actually dictating.
+/// Records one hold from a Mac microphone (the keyboard hotkey), as 16 kHz mono.
+///
+/// An input-only HAL output unit, not `AVAudioEngine` (2026-11-15). After its input device is
+/// switched, the engine's input node keeps the previous device's format (2 ch 48 kHz against a
+/// Bluetooth headset's 1 ch 16 kHz), and opening a headset's microphone moves it from its music
+/// to its call profile, a configuration change that stops the engine: a ThinkPlus headset mic
+/// delivered no buffer at all. The HAL unit has no output side for that change to stop, and its
+/// own converter delivers the client format below whatever rate the device runs at. It runs only
+/// for the hold, so the microphone indicator is on only while the user is actually dictating.
 final class DictationRecorder: @unchecked Sendable {
     /// A dropped release must not record forever.
     static let maximumDuration: TimeInterval = 300
+    /// The largest slice the render callback accepts; the HAL asks for far fewer frames.
+    private static let maximumFrames = 8_192
 
-    private let engine = AVAudioEngine()
+    private var unit: AudioUnit?
     private let lock = NSLock()
     private var samples: [Float] = []
-    // Touched only by the tap, which AVAudioEngine calls serially on its render thread.
-    private var converter: AVAudioConverter?
-    /// Set before the tap is installed and only read by it afterwards.
+    /// Set before the unit starts and only read by its render callback afterwards.
     private var onSamples: (@Sendable ([Float]) -> Void)?
-    private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: DictationAudio.sampleRate,
-                                       channels: 1, interleaved: false)!
+    /// The render callback's scratch buffer, allocated before the unit starts.
+    private let scratch = UnsafeMutablePointer<Float>.allocate(capacity: DictationRecorder.maximumFrames)
 
-    /// `onSamples` receives each tap's 16 kHz mono samples on the render thread, roughly every
-    /// 40 ms: the level meter and the streaming session both read them there.
+    deinit {
+        if let unit {
+            AudioOutputUnitStop(unit)
+            AudioUnitUninitialize(unit)
+            AudioComponentInstanceDispose(unit)
+        }
+        scratch.deallocate()
+    }
+
+    /// `onSamples` receives each slice's 16 kHz mono samples on the HAL's IO thread: the level
+    /// meter and the streaming session both read them there.
     func start(deviceID: AudioDeviceID, onSamples: (@Sendable ([Float]) -> Void)? = nil) throws {
         self.onSamples = onSamples
-        let input = engine.inputNode
-        guard let unit = input.audioUnit else { throw DictationError("Could not open the VibeRemote input.") }
+        var description = AudioComponentDescription(componentType: kAudioUnitType_Output,
+                                                    componentSubType: kAudioUnitSubType_HALOutput,
+                                                    componentManufacturer: kAudioUnitManufacturer_Apple,
+                                                    componentFlags: 0, componentFlagsMask: 0)
+        var instance: AudioUnit?
+        guard let component = AudioComponentFindNext(nil, &description),
+              AudioComponentInstanceNew(component, &instance) == noErr, let unit = instance else {
+            throw DictationError("Could not open the microphone.")
+        }
+        self.unit = unit
+        var enable: UInt32 = 1
+        var disable: UInt32 = 0
         var device = deviceID
-        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                          &device, UInt32(MemoryLayout<AudioDeviceID>.size))
-        guard status == noErr else { throw DictationError("Could not select the VibeRemote input (\(status)).") }
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0,
-              let converter = AVAudioConverter(from: format, to: target) else {
-            throw DictationError("The VibeRemote input has no usable audio format.")
-        }
-        self.converter = converter
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
-            self?.append(buffer)
-        }
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            input.removeTap(onBus: 0)
-            throw DictationError("Could not start recording: \(error.localizedDescription)")
+        var format = AudioStreamBasicDescription(
+            mSampleRate: DictationAudio.sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4, mChannelsPerFrame: 1,
+            mBitsPerChannel: 32, mReserved: 0)
+        var maximumFrames = UInt32(Self.maximumFrames)
+        var callback = AURenderCallbackStruct(inputProc: { refCon, flags, timestamp, bus, frames, _ in
+            Unmanaged<DictationRecorder>.fromOpaque(refCon).takeUnretainedValue()
+                .render(flags: flags, timestamp: timestamp, bus: bus, frames: frames)
+            return noErr
+        }, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+        let steps: [(String, OSStatus)] = [
+            // Bus 1 is the input element, bus 0 the output element, which stays off.
+            ("enable input", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
+                                                  &enable, UInt32(MemoryLayout<UInt32>.size))),
+            ("disable output", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+                                                    &disable, UInt32(MemoryLayout<UInt32>.size))),
+            ("select device", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                                   &device, UInt32(MemoryLayout<AudioDeviceID>.size))),
+            ("set format", AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+                                                &format, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))),
+            ("set slice", AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+                                               &maximumFrames, UInt32(MemoryLayout<UInt32>.size))),
+            ("set callback", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+                                                  &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))),
+            ("initialize", AudioUnitInitialize(unit)),
+            ("start", AudioOutputUnitStart(unit)),
+        ]
+        for (step, status) in steps where status != noErr {
+            throw DictationError("Could not start recording (\(step): \(status)).")
         }
     }
 
     func stop() -> DictationAudio {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        if let unit {
+            AudioOutputUnitStop(unit)
+            AudioUnitUninitialize(unit)
+            AudioComponentInstanceDispose(unit)
+            self.unit = nil
+        }
         lock.lock(); defer { lock.unlock() }
         return DictationAudio(samples: samples)
     }
 
-    private func append(_ buffer: AVAudioPCMBuffer) {
-        guard let converter, buffer.frameLength > 0 else { return }
-        let ratio = target.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
-        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-        var supplied = false
-        var error: NSError?
-        // `.noDataNow` (not end of stream) keeps the resampler's filter state between taps.
-        _ = converter.convert(to: output, error: &error) { _, status in
-            if supplied { status.pointee = .noDataNow; return nil }
-            supplied = true
-            status.pointee = .haveData
-            return buffer
-        }
-        guard error == nil, output.frameLength > 0, let channel = output.floatChannelData?[0] else { return }
-        let chunk = UnsafeBufferPointer(start: channel, count: Int(output.frameLength))
-        onSamples?(Array(chunk))
+    private func render(flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+                        timestamp: UnsafePointer<AudioTimeStamp>, bus: UInt32, frames: UInt32) {
+        guard let unit, frames > 0, Int(frames) <= Self.maximumFrames else { return }
+        var list = AudioBufferList(mNumberBuffers: 1,
+                                   mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: frames * 4,
+                                                         mData: UnsafeMutableRawPointer(scratch)))
+        guard AudioUnitRender(unit, flags, timestamp, bus, frames, &list) == noErr else { return }
+        let chunk = Array(UnsafeBufferPointer(start: scratch, count: Int(frames)))
+        onSamples?(chunk)
         lock.lock(); defer { lock.unlock() }
         guard Double(samples.count) < Self.maximumDuration * DictationAudio.sampleRate else { return }
         samples.append(contentsOf: chunk)
@@ -530,7 +620,9 @@ final class DictationController: ObservableObject {
     @Published private(set) var phase: Phase = .idle
 
     private let indicator = DictationIndicator()
-    private var recorder: DictationRecorder?
+    private var recorder: (any DictationAudioSource)?
+    /// Voice sessions recent remote holds already took, so the next hold never re-reads one.
+    private var bridgeSessionsTaken: [UUID] = []
     /// The streaming side of the hold that is recording, if it streams.
     private var live: DictationLiveHold?
     /// The newest hold's typewriter: the next hold waits for it, so keystrokes never interleave.
@@ -567,9 +659,6 @@ final class DictationController: ObservableObject {
 
     /// Short enough that a tap of Siri types nothing.
     static let minimumDuration: TimeInterval = 0.3
-    /// After the bridge reports its output drained, the HAL loopback still holds a few
-    /// milliseconds that have not reached the input tap yet.
-    static let drainGrace: UInt64 = 150_000_000
 
     /// Where a hold's audio comes from: the remote (Siri held, through the bridge's virtual
     /// device) or the Mac's own microphone (the keyboard hotkey).
@@ -578,19 +667,24 @@ final class DictationController: ObservableObject {
     /// The source of the hold that is recording, if any: the hotkey only ends or cancels its own.
     var recordingSource: Source? { recorder == nil ? nil : source }
 
-    func begin(source: Source = .remote) {
+    /// `followsLaterSessions`: a first-generation remote, whose tail re-press continues the hold.
+    func begin(source: Source = .remote, followsLaterSessions: Bool = false) {
         guard recorder == nil else { return }
         let settings = DictationSettings.load()
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            break
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { _ in }
-            fail("Allow VibeRemote to use the microphone, then try again.")
-            return
-        default:
-            fail("Microphone access is off for VibeRemote. Turn it on in System Settings › Privacy & Security › Microphone.")
-            return
+        // The remote's voice comes straight from the voice helper; only the Mac's own
+        // microphone needs Microphone access.
+        if source == .macMicrophone {
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .authorized:
+                break
+            case .notDetermined:
+                AVCaptureDevice.requestAccess(for: .audio) { _ in }
+                fail("Allow VibeRemote to use the microphone, then try again.")
+                return
+            default:
+                fail("Microphone access is off for VibeRemote. Turn it on in System Settings › Privacy & Security › Microphone.")
+                return
+            }
         }
         if settings.provider == .apple, SFSpeechRecognizer.authorizationStatus() == .notDetermined {
             SFSpeechRecognizer.requestAuthorization { _ in }
@@ -599,20 +693,18 @@ final class DictationController: ObservableObject {
             fail("Add your \(settings.provider.title) key in Settings › Dictation.")
             return
         }
-        let device: AudioDeviceID
-        switch source {
-        case .remote:
-            guard let id = DictationAudioDevice.inputID() else {
-                fail("The VibeRemote audio device is missing. Install the audio driver in Settings › Device.")
-                return
-            }
-            device = id
-        case .macMicrophone:
-            guard let id = DictationAudioDevice.macMicrophoneID() else {
+        var device: AudioDeviceID?
+        var microphoneName: String?
+        if source == .macMicrophone {
+            guard let microphone = DictationAudioDevice.macMicrophone(choice: settings.hotkeyMicrophone) else {
                 fail("No microphone was found on this Mac.")
                 return
             }
-            device = id
+            if let choice = settings.hotkeyMicrophone, choice.uid != microphone.uid {
+                rmDebug("🗣 Dictation microphone \(choice.name) is not connected; using \(microphone.name)")
+            }
+            device = microphone.id
+            microphoneName = microphone.name
         }
         // Auto Computer Use: a hold into the open, waiting bar goes there at once; otherwise, with
         // the switch on, the focused element decides once the probe below answers.
@@ -634,22 +726,34 @@ final class DictationController: ObservableObject {
         let session = live?.session
         let refinement = settings.provider == .seedASR ? DictationRefinementStream.make() : nil
         let refinementSession = refinement?.session
-        let recorder = DictationRecorder()
-        do {
-            try recorder.start(deviceID: device) { [weak self] samples in
-                session?.append(samples)
-                refinementSession?.append(samples)
-                let rms = DictationLevelMeter.rms(samples)
-                Task { @MainActor in self?.indicator.hear(rms: rms) }
-            }
-        } catch {
-            live?.cancel()
-            live?.typewriter.stop("recording failed")
-            refinement?.cancel()
-            fail(error.localizedDescription)
-            return
+        let onSamples: @Sendable ([Float]) -> Void = { [weak self] samples in
+            session?.append(samples)
+            refinementSession?.append(samples)
+            let rms = DictationLevelMeter.rms(samples)
+            Task { @MainActor in self?.indicator.hear(rms: rms) }
         }
-        self.recorder = recorder
+        let capture: any DictationAudioSource
+        if let device {
+            let recorder = DictationRecorder()
+            do {
+                try recorder.start(deviceID: device, onSamples: onSamples)
+            } catch {
+                live?.cancel()
+                live?.typewriter.stop("recording failed")
+                refinement?.cancel()
+                fail(error.localizedDescription)
+                return
+            }
+            capture = recorder
+        } else {
+            let reader = DictationBridgeAudioReader(
+                path: MicrophoneBridgeManager.dictationAudioPath, holdStartedAt: Date(),
+                excluding: Set(bridgeSessionsTaken), followsLaterSessions: followsLaterSessions,
+                onSamples: onSamples)
+            reader.start()
+            capture = reader
+        }
+        self.recorder = capture
         self.live = live
         self.source = source
         self.refinement = refinement
@@ -667,7 +771,7 @@ final class DictationController: ObservableObject {
                 self?.resolve(target, textInput: textInput, live: live, hold: hold)
             }
         }
-        rmDebug("🗣 Dictation recording (\(settings.provider.rawValue)\(live == nil ? "" : ", streaming")\(source == .macMicrophone ? ", Mac microphone" : ""))")
+        rmDebug("🗣 Dictation recording (\(settings.provider.rawValue)\(live == nil ? "" : ", streaming")\(microphoneName.map { ", \($0)" } ?? ""))")
     }
 
     /// The probe's answer: a focused text field keeps the hold an ordinary dictation; anything
@@ -774,6 +878,7 @@ final class DictationController: ObservableObject {
     func cancel() {
         guard let recorder else { return }
         self.recorder = nil
+        takeBridgeSessions(from: recorder)
         _ = recorder.stop()
         live?.cancel()
         live?.typewriter.stop("hold cancelled")
@@ -789,6 +894,7 @@ final class DictationController: ObservableObject {
     func end() {
         guard let recorder else { return }
         self.recorder = nil
+        takeBridgeSessions(from: recorder)
         let hold = holdCount
         let live = self.live
         self.live = nil
@@ -800,14 +906,21 @@ final class DictationController: ObservableObject {
         let target = self.target
         let settings = DictationSettings.load()
         Task { @MainActor in
-            // The bridge's loopback lags the remote; the Mac's microphone has nothing to drain.
-            if source == .remote { try? await Task.sleep(nanoseconds: Self.drainGrace) }
+            // No drain grace: the remote's audio comes from the helper's completed session
+            // file, not from the virtual device's loopback, so nothing is still in flight.
             let audio = recorder.stop()
             live?.session?.finish()
             refinement?.session?.finish()
             await self.finish(audio, settings: settings, hold: hold, live: live, source: source,
                               editorText: context?.text, refinement: refinement, target: target)
         }
+    }
+
+    /// Synchronous, before the next hold can begin: an aluminum re-press ends this hold and
+    /// starts the next in the same turn, and its session may already be on disk.
+    private func takeBridgeSessions(from source: any DictationAudioSource) {
+        guard let reader = source as? DictationBridgeAudioReader else { return }
+        bridgeSessionsTaken = Array((bridgeSessionsTaken + reader.freeze()).suffix(16))
     }
 
     private func finish(_ audio: DictationAudio, settings: DictationSettings, hold: Int,

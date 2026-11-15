@@ -11,6 +11,7 @@ import CoreAudio
 @preconcurrency import CoreBluetooth
 import Darwin
 import Foundation
+import RemoteAudioProtocol
 import HelperProtocol
 import IOBluetooth
 
@@ -600,7 +601,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         _ = fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
         let helperCommand = """
-        exec \(shellEscape(helper)) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) >> \(shellEscape(helperLogPath)) 2>&1
+        exec \(shellEscape(helper)) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) --dictation-audio-file \(shellEscape(runtimePath(DictationAudioFile.fileName))) >> \(shellEscape(helperLogPath)) 2>&1
         """
         let helperRunner = Process()
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -727,7 +728,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // needs elevated privileges; running the whole pipeline as root prevents audio
         // from reaching the user's BlackHole device reliably.
         let helperCommand = """
-        exec \(escapedHelper) \(sharedAudioArguments()) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
+        exec \(escapedHelper) \(sharedAudioArguments()) --voice-suppression-file \(shellEscape(voiceSuppressionPath)) --dictation-audio-file \(shellEscape(runtimePath(DictationAudioFile.fileName))) < \(escapedFIFO) >> \(escapedHelperLog) 2>&1
         """
         let helperRunner = Process()
         helperRunner.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -1410,6 +1411,12 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private func removeBridgeFIFOs() {
         removePrivateItem(at: fifoPath)
         removePrivateItem(at: packetLoggerFIFOPath)
+    }
+
+    /// Where the voice helper writes each decoded session for VibeRemote Dictation
+    /// (`DictationAudioFile`); private like the rest of the runtime directory.
+    static var dictationAudioPath: String {
+        (defaultRuntimeDirectoryPath() as NSString).appendingPathComponent(DictationAudioFile.fileName)
     }
 
     private static func defaultRuntimeDirectoryPath() -> String {

@@ -441,6 +441,9 @@ let validateCapture = CommandLine.arguments.contains("--validate-capture")
 let suppressionFile: String? = CommandLine.arguments.firstIndex(of: "--voice-suppression-file").flatMap {
     CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
 }
+let dictationAudioPath: String? = CommandLine.arguments.firstIndex(of: "--dictation-audio-file").flatMap {
+    CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
+}
 
 do {
     let decoder = try OpusDecoder()
@@ -454,6 +457,7 @@ do {
         }
     } else { audioOutput = try VirtualAudioOutput(format: decoder.pcmFormat) }
     let settledOutput = audioOutput.map { SettlingAudioOutput($0) }
+    let dictationAudio = validateCapture ? nil : dictationAudioPath.map { DictationAudioWriter(path: $0) }
     var maximumPeak: Float = 0
     var parser = SiriRemotePacketParser()
     var decodedPackets = 0
@@ -504,6 +508,7 @@ do {
                 let age = captureLineTimestamp(line, year: captureYear).map { String(format: "%.1f", received.timeIntervalSince($0) * 1000) } ?? "unknown"
                 log("Latency voice start epoch=\(String(format: "%.6f", received.timeIntervalSince1970)) captureAgeMs=\(age)")
                 settledOutput?.voiceStarted()
+                dictationAudio?.voiceStarted()
                 log("Voice started")
             case .packet(let packet):
                 guard voiceSessionGate.allowsPackets else { continue }
@@ -516,6 +521,7 @@ do {
                         }
                         settledOutput?.enqueue(buffer, traceFirstPacket: traceFirstPacket,
                                              captureTime: traceFirstPacket ? captureLineTimestamp(line, year: captureYear) : nil)
+                        dictationAudio?.enqueue(buffer)
                         traceFirstPacket = false
                         decodedPackets += 1
                         if decodedPackets == 1 || decodedPackets % 50 == 0 {
@@ -542,6 +548,7 @@ do {
                 }
                 log("Voice protocol ended; draining queued audio")
                 settledOutput?.voiceEnded()
+                dictationAudio?.voiceEnded()
             }
         }
     }

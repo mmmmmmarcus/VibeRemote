@@ -8,6 +8,7 @@
 import IOKit
 import IOKit.hid
 import Foundation
+import RemoteAudioProtocol
 import Carbon.HIToolbox
 import AppKit
 
@@ -109,13 +110,19 @@ final class RemoteInputHandler {
     private var pendingTapKeyUps: [UUID: (keyCode: Int, flags: CGEventFlags, text: String?)] = [:]
     private var pendingVoiceTailReleaseTimers: [String: Timer] = [:]
     private var voiceEndedObserver: NSObjectProtocol?
+    private var dictationAudioObserver: NSObjectProtocol?
     /// VibeRemote Dictation, keyed like `heldKeys`: begin on Siri down, end once the voice
     /// tail drains (the same moment a mapped dictation key is released).
-    var onDictationBegin: (() -> Void)?
+    /// Receives the remote's generation: the first-generation tail re-press continues a hold.
+    var onDictationBegin: ((RemoteGeneration) -> Void)?
     var onDictationEnd: (() -> Void)?
     private var dictationButtons: Set<String> = []
     private var siriHoldStartedAt = Date.distantPast
-    private var drainedHoldStartedAt = Date.distantPast
+    /// Physical Siri-up of the hold before the current one; a drain whose voice session began
+    /// before it belongs to that earlier hold.
+    private var siriPreviousReleaseAt = Date.distantPast
+    private var siriLastReleaseAt = Date.distantPast
+    private var currentSiriHoldDrained = false
     private let listEditingController = ListEditingController()
     private var connectionInputGate = RemoteConnectionInputGate()
     private var remoteKeepAliveTimer: Timer?
@@ -148,8 +155,35 @@ final class RemoteInputHandler {
         ) { [weak self] notification in
             let startedAt = notification.userInfo?["startedAt"] as? TimeInterval
             MainActor.assumeIsolated {
-                guard let self, let startedAt, Date(timeIntervalSince1970: startedAt) >= self.siriHoldStartedAt else { return }
-                self.drainedHoldStartedAt = Date(timeIntervalSince1970: startedAt)
+                guard let self, let startedAt, Self.voiceDrainBelongsToCurrentHold(
+                    voiceStartedAt: Date(timeIntervalSince1970: startedAt),
+                    holdStartedAt: self.siriHoldStartedAt,
+                    previousReleaseAt: self.siriPreviousReleaseAt
+                ) else { return }
+                self.currentSiriHoldDrained = true
+                self.finishPendingVoiceTailRelease()
+            }
+        }
+        // VibeRemote Dictation reads the helper's session file, which is complete at protocol
+        // end, so its hold ends then instead of waiting for the output to drain. Mapped
+        // dictation keys still wait for the drain: their app hears only what is played.
+        dictationAudioObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name(DictationAudioFile.completeNotification),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let startedAt = notification.userInfo?["startedAt"] as? TimeInterval
+            MainActor.assumeIsolated {
+                // A session that completes while Siri is still down was split by a
+                // first-generation re-press; the hold continues into the next one.
+                guard let self, let startedAt, self.dictationButtons.contains("siri"),
+                      self.buttonState["siri"] != true,
+                      Self.voiceDrainBelongsToCurrentHold(
+                          voiceStartedAt: Date(timeIntervalSince1970: startedAt),
+                          holdStartedAt: self.siriHoldStartedAt,
+                          previousReleaseAt: self.siriPreviousReleaseAt
+                      ) else { return }
+                self.currentSiriHoldDrained = true
                 self.finishPendingVoiceTailRelease()
             }
         }
@@ -664,6 +698,10 @@ final class RemoteInputHandler {
     /// Synchronous, terminal, and idempotent teardown used during application shutdown.
     /// Callbacks are unregistered before devices close, then every actually-held key is released.
     func stop() {
+        if let dictationAudioObserver {
+            DistributedNotificationCenter.default().removeObserver(dictationAudioObserver)
+            self.dictationAudioObserver = nil
+        }
         if let voiceEndedObserver {
             DistributedNotificationCenter.default().removeObserver(voiceEndedObserver)
             self.voiceEndedObserver = nil
@@ -1016,6 +1054,7 @@ final class RemoteInputHandler {
             // physically held key captured for this button.
             stopRepeat(for: button)
             resolveModifierRelease(for: button)
+            if button == "siri" { siriLastReleaseAt = Date() }
             if microphoneBridgeManager?.menuStatus().running == true, let timeout = Self.voiceTailReleaseTimeout(
                 action: action,
                 button: button,
@@ -1128,6 +1167,22 @@ final class RemoteInputHandler {
               generation != .unknown,
               action.holdsDictation else { return nil }
         return generation == .glassTouchSurface ? 4 : 3
+    }
+
+    /// The voice helper stamps a session when it reads the start record, and that can precede
+    /// the app's dispatch of the HID Siri-down that opened the hold (observed 9 ms early on the
+    /// black-glass remote). A strict `>= holdStartedAt` check discarded
+    /// that hold's own drain and left it waiting for the 4-second safety deadline. The
+    /// previous hold's physical release still bounds the window, so a stale completion from
+    /// that earlier session can never end the current one.
+    nonisolated static let voiceStartClockLeadTolerance: TimeInterval = 0.5
+
+    nonisolated static func voiceDrainBelongsToCurrentHold(
+        voiceStartedAt: Date,
+        holdStartedAt: Date,
+        previousReleaseAt: Date
+    ) -> Bool {
+        voiceStartedAt >= max(holdStartedAt.addingTimeInterval(-voiceStartClockLeadTolerance), previousReleaseAt)
     }
 
     /// These timers are created and fired on the main run loop. Common modes keep a held
@@ -1380,9 +1435,8 @@ final class RemoteInputHandler {
 
     /// Press a virtual key and retain its exact specification until this HID button is released.
     private func beginHoldAction(_ action: ButtonAction, button: String, generation: RemoteGeneration) {
-        if button == "siri" { siriHoldStartedAt = Date(); drainedHoldStartedAt = .distantPast }
         if action == .vibeDictation {
-            beginDictationHold(button: button, generation: generation)
+            if beginDictationHold(button: button, generation: generation) { markSiriHoldStarted(button) }
             return
         }
         let spec: (keyCode: Int, flags: CGEventFlags)
@@ -1407,6 +1461,7 @@ final class RemoteInputHandler {
 
         // Defensive: close a stale hold before opening another for the same physical button.
         releaseHeldKey(for: button)
+        markSiriHoldStarted(button)
         postKey(keyCode: spec.keyCode, flags: spec.flags, keyDown: true)
         heldKeys[button] = spec
         rmDebug("⌨️ Held key down: code=\(spec.keyCode) source=\(button)")
@@ -1414,22 +1469,34 @@ final class RemoteInputHandler {
 
     /// Mirrors the held-key path below: the first-generation tail continues the same
     /// recording, while any other new press first ends (and transcribes) the previous one.
-    private func beginDictationHold(button: String, generation: RemoteGeneration) {
+    /// Returns false when the press continues the previous recording (its voice session and
+    /// drain still belong to the earlier hold's start).
+    private func beginDictationHold(button: String, generation: RemoteGeneration) -> Bool {
         if let timer = pendingVoiceTailReleaseTimers.removeValue(forKey: button) {
             timer.invalidate()
             if generation == .glassTouchSurface, dictationButtons.contains(button) {
                 rmDebug("🎙 Continued dictation recording during first-generation voice tail")
-                return
+                return false
             }
         }
         releaseHeldKey(for: button)
         dictationButtons.insert(button)
-        onDictationBegin?()
+        onDictationBegin?(generation)
+        return true
+    }
+
+    /// A first-generation tail reuse keeps the original start, because the firmware keeps
+    /// the same voice session and its drain carries that session's start time.
+    private func markSiriHoldStarted(_ button: String) {
+        guard button == "siri" else { return }
+        siriHoldStartedAt = Date()
+        siriPreviousReleaseAt = siriLastReleaseAt
+        currentSiriHoldDrained = false
     }
 
     private func scheduleVoiceTailRelease(for button: String, timeout: TimeInterval) {
         rmDebug("🎙 Physical Siri release; waiting for protocol end and output drain")
-        if drainedHoldStartedAt >= siriHoldStartedAt { releaseHeldKey(for: button); return }
+        if currentSiriHoldDrained { releaseHeldKey(for: button); return }
         pendingVoiceTailReleaseTimers[button]?.invalidate()
         let timer = scheduleInputTimer(interval: timeout, repeats: false) { [weak self] _ in
             guard let self else { return }

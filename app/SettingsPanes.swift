@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import SwiftUI
 
 /// Settings metrics and colors, matching Spotter's Settings window so both apps read as one
@@ -728,12 +727,9 @@ private struct RemoteHero: View {
                                  general: general) { action in
             guard let action else { followGeneral(key); return }
             if key == "siri" {
+                // Dictation needs no Microphone access for the remote: its voice comes straight
+                // from the voice helper. Only the Mac-microphone hotkey asks, in its own pane.
                 setSiriAction(action)
-                // Choosing Dictation is how it is turned on, so ask for the microphone now
-                // rather than failing the first hold.
-                if action == .vibeDictation, AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-                    AVCaptureDevice.requestAccess(for: .audio) { _ in }
-                }
             } else {
                 setButtonAction(key, action)
             }

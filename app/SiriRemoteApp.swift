@@ -83,7 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteInputHandler?.onRemoteIdleDisconnectRequested = { [weak self] deviceKey in
             self?.disconnectIdleRemote(deviceKey: deviceKey)
         }
-        remoteInputHandler?.onDictationBegin = { DictationController.shared.begin() }
+        remoteInputHandler?.onDictationBegin = { generation in
+            DictationController.shared.begin(followsLaterSessions: generation == .glassTouchSurface)
+        }
         remoteInputHandler?.onDictationEnd = { DictationController.shared.end() }
         
         // Start remote detection
