@@ -94,13 +94,17 @@ struct SettingsRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// The remote's panes from the top; About is pinned to the bottom edge, at the user's request.
+    /// System (what VibeRemote does) then Device (the Siri Remote) from the top (2026-11-15,
+    /// user's request); About is pinned to the bottom edge.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: SettingsMetrics.xs / 2) {
-                    header("Remote")
-                    rows(SettingsTab.remoteTabs)
+                    header("System")
+                    rows(SettingsTab.systemTabs)
+                    header("Device")
+                        .padding(.top, SettingsMetrics.sm)
+                    rows(SettingsTab.deviceTabs)
                 }
             }
             .scrollIndicators(.never)
@@ -507,7 +511,7 @@ private struct DevicePane: View {
     let actions: SettingsActions
 
     var body: some View {
-        SettingsPane(title: "Device", bottomInset: Self.cornerButtonClearance) {
+        SettingsPane(title: SettingsTab.device.title, bottomInset: Self.cornerButtonClearance) {
             // Status first, then Auto Disconnect in its own group; neither has a header
             // (user's layout, 2026-11-12).
             Section { status }

@@ -278,7 +278,7 @@ or battery as separate rows below this summary.
 
 The menu bar's **Settings…** entry opens one retained window, even with the remote
 disconnected (frame autosave `VibeRemote.Settings.Compact`). Panes (split and renamed 2026-11-11 at the user's request; the `.remote` raw value is kept for
-saved state): **Controls** (`SettingsTab.remote`: everything about what the buttons and touch
+saved state; Device became **Siri Remote** and the groups System/Device on 2026-11-15): **Controls** (`SettingsTab.remote`: everything about what the buttons and touch
 surface do — the profile switcher as a Liquid Glass capsule in the window's top-right corner beside
 the Fix pill, with app icons and none for General — macOS 27 does not draw `NSMenuItem.image` in this pop-up menu, so each item's icon is a text attachment in its `attributedTitle` (`ProfilePicker.menuTitle`), with an invisible 16 pt spacer for General so names share one edge, verified by screenshot 2026-11-11; the CAD remote with a clickable glass pill per
 button; Restore Defaults for the edited profile's button choices only, inside the remote's card at its
@@ -898,8 +898,11 @@ Settings callouts show function text only, never a second line repeating physica
 names. RemoteSettingsLayout selects the physical generation. Center = caret positioning;
 aluminum touch = slide to position caret. There is no mouse/touch mode guide.
 
-Sidebar: the Remote group (Controls, Device, Dictation, Computer Use) from the top, and About
-(`appTabs`) pinned to the bottom; `remoteTabs + appTabs` must stay equal to `allCases`.
+Sidebar (2026-11-15, user's request): a **System** group (`systemTabs`: Dictation, Computer Use)
+first, then a **Device** group (`deviceTabs`: Controls, Siri Remote), and About (`appTabs`) pinned
+to the bottom. The physical-remote pane is titled **Siri Remote** (raw value `device` kept), not
+"Device", because more devices are planned. `systemTabs + deviceTabs + appTabs` must stay equal to
+`allCases`, so the enum is declared in sidebar order.
 While any setup issue exists, every pane shows a Liquid Glass capsule in the window's top-right
 corner (red `exclamationmark.triangle.fill`, "Fix Helper", "Fix Audio Driver" or "Fix Setup")
 whose popover is the step-by-step guide with the same actions as the rows. Settings refreshes

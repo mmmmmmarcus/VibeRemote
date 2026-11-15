@@ -63,7 +63,7 @@ paired at the same time and each keeps its own mapping.
 
 The microphone bridge and Dictation additionally use:
 
-- VibeRemote's own virtual audio device, installed from Settings › Device (or the Fix button in
+- VibeRemote's own virtual audio device, installed from Settings › Siri Remote (or the Fix button in
   Settings' corner). BlackHole 2ch or Soundflower (2ch) work as fallbacks.
 - The privileged helper, approved once in System Settings › General › Login Items &
   Extensions, so the bridge starts without a password prompt.
@@ -78,9 +78,10 @@ unfinished. Existing configured installations keep their mapping without a force
 Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
 the menu bar.
 
-Settings panes: Controls (the profile switcher, the remote and its pills with a Normal | Advanced
-switch, and the text-cursor guide), Device (status, Auto Disconnect and diagnostics), Dictation, Computer Use, and About (version,
-updates and links) at the bottom of the sidebar.
+The Settings sidebar has two groups. **System** holds what VibeRemote itself does: Dictation and
+Computer Use. **Device** holds the Siri Remote: Controls (the profile switcher, the remote and its
+pills with a Normal | Advanced switch, and the text-cursor guide) and Siri Remote (status, Auto
+Disconnect and diagnostics). About (version, updates and links) sits at the bottom of the sidebar.
 
 ## Button profiles
 
@@ -95,7 +96,7 @@ An app profile keeps only the buttons you change for it. Every other button does
 General does, and keeps following later changes to General; a pill's **Same as General**
 choice undoes an app-specific change. Siri is per profile too, so Dictation can be on in
 one app and off in another. Restore Defaults restores the profile on screen (an app profile
-goes back to following General); Auto Disconnect lives on the Device pane.
+goes back to following General); Auto Disconnect lives on the Siri Remote pane.
 
 The profile is chosen by the app in front when a button goes down and kept until it comes
 back up, so a press that switches apps — or a hold you carry into another app — releases
@@ -124,9 +125,24 @@ topics you have already typed come out right (that text goes to Volcengine with 
 password fields are never read).
 
 **Alternative hotkey.** Settings › Dictation can also assign one keyboard modifier (Left or
-Right Option, Command or Control). Hold it to dictate exactly as with Siri, through the Mac's
-own microphone (the remote's microphone only works while Siri is held). Pressing another key
+Right Option, Command or Control). Hold it to dictate exactly as with Siri, through a Mac
+microphone (the remote's microphone only works while Siri is held). Pressing another key
 while holding it counts as a shortcut and records nothing.
+
+Once a hotkey is set, its **Microphone** menu chooses what it records:
+
+- **Same as System** (the default) follows the Mac's input setting. The menu names the
+  microphone this means right now. While the system input is VibeRemote's own device, it uses
+  the built-in microphone, or another real microphone on a Mac without one.
+- **A specific microphone**: any connected input, such as a USB mic or a Bluetooth headset.
+  VibeRemote's own device, BlackHole and Soundflower are not listed, because they carry only the
+  remote's voice. A chosen microphone that is not connected shows as "(Not Connected)", and
+  holds use Same as System until it comes back.
+
+The hotkey never changes the system input; it records the chosen microphone directly. Opening a
+Bluetooth headset's microphone usually switches the headset to its call profile for the hold, so
+its playback may sound lower quality until the hold ends. The hotkey needs Microphone access for
+VibeRemote; the Dictation pane shows a Microphone Access row once a hotkey is chosen; the remote does not.
 
 While you hold Siri, an orange copy of the caret-positioning cursor stands at the insertion
 point. Its mic fills with the live input level, so a stopped bridge reads visibly empty, it
@@ -331,7 +347,7 @@ With the app open, the bridge automatically starts when its dependencies and the
 approved, current privileged helper are available. A stopped capture pipeline is
 retried with bounded backoff; reconnect and Mac wake also request recovery.
 Automatic recovery never falls back to an administrator password prompt. Complete
-missing setup in Settings › Device, or with the Fix button in Settings' corner. Quitting VibeRemote stops recovery and capture.
+missing setup in Settings › Siri Remote, or with the Fix button in Settings' corner. Quitting VibeRemote stops recovery and capture.
 
 The working microphone engine is PacketLogger (select with
 `defaults write com.viberemote.app microphoneBridgeEngine packetlogger`). It uses
@@ -379,7 +395,7 @@ HAL read completion does not prove that the receiving app transcribed the audio.
 
 After changing the shared driver, run `./build_audio_driver.sh`, build and install the
 signed app, and restart an already running privileged daemon
-(`sudo launchctl kickstart -k system/com.viberemote.helper`). Settings › Device offers
+(`sudo launchctl kickstart -k system/com.viberemote.helper`). Settings › Siri Remote offers
 **Install Audio Driver** while no supported audio device is present; installing restarts
 CoreAudio. Check `voice-helper.log` for `Audio output: shared-memory HAL` and
 `Voice buffer drained` during an actual recording.

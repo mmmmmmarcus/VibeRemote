@@ -285,22 +285,26 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// `agent` keeps its raw value so saved accessibility identifiers and any stored
     /// selection survive the renames of its visible title (now "Computer Use"); `remote`
     /// likewise keeps its raw value after becoming "Controls" (2026-11-11).
-    case remote, device, dictation, agent, about
+    /// Declared in sidebar order: `systemTabs`, then `deviceTabs`, then `appTabs`.
+    case dictation, agent, remote, device, about
     var id: String { rawValue }
 
-    /// The remote and what it drives. Controls is everything about what the buttons and the
-    /// touch surface do (button assignment, profiles, the text-cursor gesture); Device is the
-    /// physical remote itself (its connection, battery, bridge and Auto Disconnect). Split at the
-    /// user's request on 2026-11-11, when Text Cursor also merged into Controls.
-    static let remoteTabs: [SettingsTab] = [.remote, .device, .dictation, .agent]
-    /// About the app rather than the remote, pinned to the bottom of the sidebar. Diagnostics
-    /// merged into About on 2026-11-11 at the user's request.
+    /// What VibeRemote itself does, whichever device drives it: first in the sidebar
+    /// (2026-11-15, user's request).
+    static let systemTabs: [SettingsTab] = [.dictation, .agent]
+    /// The Siri Remote. Controls is everything about what the buttons and the touch surface do
+    /// (button assignment, profiles, the text-cursor gesture); Siri Remote (`device`) is the
+    /// physical remote itself (its connection, battery, bridge and Auto Disconnect). Split on
+    /// 2026-11-11; the pane was renamed from "Device" on 2026-11-15 because more devices are
+    /// planned, and the group carrying it is now "Device".
+    static let deviceTabs: [SettingsTab] = [.remote, .device]
+    /// About the app rather than the remote, pinned to the bottom of the sidebar.
     static let appTabs: [SettingsTab] = [.about]
 
     var title: String {
         switch self {
         case .remote: return "Controls"
-        case .device: return "Device"
+        case .device: return "Siri Remote"
         case .dictation: return "Dictation"
         case .agent: return "Computer Use"
         case .about: return "About"

@@ -120,7 +120,7 @@ final class DictationTests: XCTestCase {
 
     func testOnlyCloudServicesNeedAKey() {
         XCTAssertEqual(DictationProvider.allCases.filter(\.needsAPIKey), [.openAI, .seedASR])
-        XCTAssertTrue(SettingsTab.remoteTabs.contains(.dictation))
+        XCTAssertTrue(SettingsTab.systemTabs.contains(.dictation))
         XCTAssertEqual(ButtonAction.vibeDictation.settingsTitle, "Dictation")
     }
 

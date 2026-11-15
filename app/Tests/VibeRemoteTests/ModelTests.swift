@@ -1233,14 +1233,14 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(aluminum.first, "power")
         XCTAssertTrue(aluminum.contains("mute"))
         XCTAssertEqual(RemoteSettingsGuide.buttonName(for: "back", generation: .aluminumClickpad), "Back")
-        // Buttons and Microphone are sections of the Remote pane, so the sidebar's two
-        // groups must still account for every tab.
-        XCTAssertEqual(SettingsTab.remoteTabs + SettingsTab.appTabs, SettingsTab.allCases)
+        // The sidebar's System and Device groups and the pinned About account for every tab.
+        XCTAssertEqual(SettingsTab.systemTabs + SettingsTab.deviceTabs + SettingsTab.appTabs, SettingsTab.allCases)
         XCTAssertEqual(SettingsTab.agent.title, "Computer Use")
         // Controls holds what the buttons and the touch surface do (the text-cursor guide merged
         // into it); Device holds the physical remote's own settings and status (2026-11-11).
         XCTAssertEqual(SettingsTab.remote.title, "Controls")
-        XCTAssertEqual(SettingsTab.device.title, "Device")
+        XCTAssertEqual(SettingsTab.device.title, "Siri Remote", "renamed from Device on 2026-11-15")
+        XCTAssertEqual(SettingsTab.device.rawValue, "device")
         XCTAssertEqual(SettingsTab.remote.rawValue, "remote", "the raw value survives the rename")
         // Computer Use's demo runs on one loop: the instruction types out, the agent
         // acts, the result rests. Each phase has to land inside the loop, in order.
@@ -1252,7 +1252,8 @@ final class ModelTests: XCTestCase {
             let progress = AgentDemo.progress(at: Date(timeIntervalSinceReferenceDate: date))
             XCTAssertTrue((0..<1).contains(progress), "loop left 0..<1 at \(date)")
         }
-        XCTAssertEqual(SettingsTab.remoteTabs, [.remote, .device, .dictation, .agent])
+        XCTAssertEqual(SettingsTab.systemTabs, [.dictation, .agent])
+        XCTAssertEqual(SettingsTab.deviceTabs, [.remote, .device])
         // Diagnostics merged into About, which is pinned alone to the sidebar's bottom (2026-11-11).
         XCTAssertEqual(SettingsTab.appTabs, [.about])
         XCTAssertFalse(SettingsTab.allCases.map(\.title).contains("Diagnostics"))
