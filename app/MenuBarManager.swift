@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import HelperProtocol
 
 enum RemoteStatusBadge: Equatable, Sendable {
     case none, starting, disconnected
@@ -153,7 +154,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
         case .bulletOutdent:
             return "Outdent, or remove the current list item"
         case .vibeDictation:
-            return "VibeRemote transcribes what you say while Siri is held and types it"
+            return "vvhisper transcribes what you say while Siri is held and types it"
         case .skillPicker:
             return "Types the frontmost app's skill trigger: $ in ChatGPT / Codex, / elsewhere"
         case .slashSkill:
@@ -295,7 +296,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// stays a template so macOS keeps tinting it for light/dark menu bars.
     static func makeRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        guard let symbol = NSImage(systemSymbolName: "appletvremote.gen4", accessibilityDescription: "VibeRemote")?
+        guard let symbol = NSImage(systemSymbolName: "appletvremote.gen4", accessibilityDescription: "vvhisper")?
             .withSymbolConfiguration(config) else {
             return makeFallbackRemoteIcon(badge: badge)
         }
@@ -447,15 +448,15 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private func setupApplicationMenu() {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
-        let appMenu = NSMenu(title: "VibeRemote")
+        let appMenu = NSMenu(title: "vvhisper")
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
         appMenu.addItem(AppUpdater.shared.makeMenuItem())
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide VibeRemote", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide vvhisper", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit VibeRemote", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit vvhisper", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         appMenu.addItem(quit)
         appItem.submenu = appMenu
@@ -795,10 +796,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         // The helper comes first: approving it once removes the password prompts that the
         // remaining setup steps would otherwise raise.
         let helperState = PrivilegedHelperClient.shared.state
+        if helperState == .ready && !microphoneStatus.running {
+            addActionItem("Repair Helper…", action: #selector(setUpPrivilegedHelper), to: menu)
+        }
         if helperState.needsUserAction {
             menu.addItem(makeBanner(
                 symbolName: "lock.shield.fill",
-                text: helperState == .awaitingApproval ? "Approve VibeRemote Helper" : "One-time setup required",
+                text: helperState == .awaitingApproval ? "Approve vvhisper Helper" : "One-time setup required",
                 buttonTitle: helperState == .awaitingApproval ? "Open Settings" : "Set Up",
                 buttonAction: helperState == .awaitingApproval
                     ? #selector(openHelperSettings)
@@ -985,29 +989,94 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
     }
 
+    private var helperSetupToken: UUID?
+
     @objc private func registerPrivilegedHelper() {
+        setUpPrivilegedHelper()
+    }
+
+    private func registerCurrentHelper(token: UUID) {
+        guard helperSetupToken == token else { return }
         switch PrivilegedHelperClient.shared.register() {
         case .success(let state):
-            rebuildMenu()
-            if state == .awaitingApproval, #available(macOS 13.0, *) {
-                // macOS shows the request in System Settings; take the user straight there.
-                PrivilegedHelperClient.shared.openLoginItemsSettings()
+            if state == .awaitingApproval {
+                finishHelperSetup(token: token)
+                openHelperSettings()
+            } else if state == .ready {
+                PrivilegedHelperClient.shared.fetchVersion { [weak self] version, error in
+                    Task { @MainActor in
+                        guard let self, self.helperSetupToken == token else { return }
+                        if let version, version >= HelperConstants.version {
+                            self.finishHelperSetup(token: token)
+                            self.microphoneBridgeManager.startAtLaunchIfPromptFree()
+                        } else {
+                            self.finishHelperSetup(token: token, error: error ?? "The current helper did not respond. Open Login Items & Extensions and approve vvhisper, then try Repair Helper again.")
+                        }
+                    }
+                }
+            } else {
+                finishHelperSetup(token: token, error: "The helper could not be registered from this app location. Run vvhisper from /Applications.")
             }
         case .failure(let error):
-            rebuildMenu()
-            let alert = NSAlert()
-            alert.messageText = "Setup Failed"
-            alert.informativeText = "VibeRemote could not register its helper: \(error.localizedDescription)"
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            finishHelperSetup(token: token, error: error.localizedDescription)
         }
     }
 
-    /// Onboarding and Settings share one entry point: register first, and once the request
-    /// exists take the user to Login Items, where macOS shows the approval switch.
-    private func setUpPrivilegedHelper() {
-        if PrivilegedHelperClient.shared.state == .awaitingApproval { openHelperSettings() }
-        else { registerPrivilegedHelper() }
+    /// An enabled registration can still point to an old signing team. Probe it before
+    /// offering replacement; ordinary bridge starts never perform this migration.
+    @objc private func setUpPrivilegedHelper() {
+        guard helperSetupToken == nil else { return }
+        if PrivilegedHelperClient.shared.state == .awaitingApproval { openHelperSettings(); return }
+        let token = UUID()
+        helperSetupToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.helperSetupToken == token else { return }
+            if PrivilegedHelperClient.shared.state == .awaitingApproval {
+                self.finishHelperSetup(token: token)
+                self.openHelperSettings()
+            } else {
+                self.finishHelperSetup(token: token, error: "The helper did not respond within 15 seconds. Try Set Up / Repair Helper again.")
+            }
+        }
+        guard PrivilegedHelperClient.shared.state == .ready else { registerCurrentHelper(token: token); return }
+        PrivilegedHelperClient.shared.fetchVersion { [weak self] version, _ in
+            Task { @MainActor in
+                guard let self, self.helperSetupToken == token else { return }
+                if let version, version >= HelperConstants.version {
+                    self.finishHelperSetup(token: token)
+                    self.microphoneBridgeManager.startAtLaunchIfPromptFree()
+                    return
+                }
+                PrivilegedHelperClient.shared.unregister { [weak self] error in
+                    Task { @MainActor in
+                        guard let self, self.helperSetupToken == token else { return }
+                        if let error {
+                            self.finishHelperSetup(token: token, error: "macOS could not remove the old helper registration: \(error.localizedDescription)")
+                        } else {
+                            self.registerCurrentHelper(token: token)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func finishHelperSetup(token: UUID, error: String? = nil) {
+        guard helperSetupToken == token else { return }
+        helperSetupToken = nil
+        cachedDiagnostics = nil
+        rebuildMenu()
+        if error != nil, PrivilegedHelperClient.shared.state == .awaitingApproval {
+            openHelperSettings()
+            return
+        }
+        if let error {
+            let alert = NSAlert()
+            alert.messageText = "Helper Setup Needs Attention"
+            alert.informativeText = error
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
     }
 
     @objc private func openHelperSettings() {

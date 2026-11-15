@@ -16,7 +16,7 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
 DRIVER_NAME="VibeRemoteAudio"
-DEVICE_NAME="VibeRemote"
+DEVICE_NAME="vvhisper"
 BUNDLE_ID="com.viberemote.audio"
 CHANNELS="${CHANNELS:-2}"
 BLACKHOLE_REF="${BLACKHOLE_REF:-ffcb74433fbcf8c8ca5c736677c1a4864384dc09}"

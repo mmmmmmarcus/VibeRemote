@@ -131,7 +131,7 @@ struct DictationPane: View {
     /// Only what the user needs to act on: how to turn Dictation on, or which profiles use it.
     private var usage: String? {
         guard !profiles.isEmpty else {
-            return "Siri holds the key your own dictation app listens for. To have VibeRemote transcribe instead, choose Dictation for the Siri button in the Controls pane."
+            return "Siri holds the key your own dictation app listens for. To have vvhisper transcribe instead, choose Dictation for the Siri button in the Controls pane."
         }
         return everywhere ? nil : "Siri uses Dictation in: \(ListFormatter.localizedString(byJoining: profiles))."
     }
@@ -219,7 +219,7 @@ struct DictationPane: View {
             } header: {
                 Text("Alternative Dictation Hotkey")
             } footer: {
-                Text("Hold this key to dictate the same way as holding Siri, through the microphone you choose: the remote's microphone only works while Siri is held. Same as System uses the Mac's input setting, or another microphone while that is VibeRemote, and a chosen microphone that is not connected falls back to it. Pressing another key while holding it is treated as a shortcut and records nothing.")
+                Text("Hold this key to dictate the same way as holding Siri, through the microphone you choose: the remote's microphone only works while Siri is held. Same as System uses the Mac's input setting, or another microphone while that is vvhisper, and a chosen microphone that is not connected falls back to it. Pressing another key while holding it is treated as a shortcut and records nothing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

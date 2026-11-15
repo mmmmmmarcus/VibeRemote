@@ -8,6 +8,14 @@ import XCTest
 
 final class ModelTests: XCTestCase {
     @MainActor
+    func testRenamedProductKeepsSavedDictationAndLegacyAudioCompatibility() {
+        XCTAssertEqual(ButtonAction(rawValue: "VibeRemote Dictation"), .vibeDictation)
+        XCTAssertEqual(MicrophoneBridgeManager.supportedOutputDeviceNames.first, "vvhisper")
+        XCTAssertTrue(MicrophoneBridgeManager.supportedOutputDeviceNames.contains("VibeRemote"))
+        XCTAssertEqual(HelperConstants.expectedTeamIdentifier, "Q9MD524YL5")
+    }
+
+    @MainActor
     func testCADHoverResolvesButtonsAndVolumeHalves() throws {
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
             let scene = try RemoteModelScene.make(generation: generation)

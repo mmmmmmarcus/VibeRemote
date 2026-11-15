@@ -97,7 +97,7 @@ struct MicrophoneBridgeDiagnostics: Sendable {
 
     var copyText: String {
         var lines: [String] = []
-        lines.append("VibeRemote diagnostics")
+        lines.append("vvhisper diagnostics")
         lines.append("Generated: \(generatedAt)")
         lines.append("Remote: \(remoteAddress ?? "not detected")")
         if blockingIssues.isEmpty {
@@ -542,7 +542,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
     }
 
-    private func startLocked(allowAdministratorPrompt: Bool = true) {
+    private func startLocked(allowAdministratorPrompt: Bool = false) {
         // macOS's IOHID proxy never delivers Siri Remote 0xFA audio reports to user space,
         // so the PacketLogger capture bridge remains the only working audio path. The
         // Direct HID engine stays the default while that conclusion is revalidated;
@@ -564,7 +564,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 appendAppLog("Direct HID microphone bridge already running")
             } else {
                 bridgeReady = false
-                setLastError("The VibeRemote audio device is not installed.")
+                setLastError("The vvhisper audio device is not installed.")
             }
             return
         }
@@ -585,7 +585,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             .resolvingSymlinksInPath()
             .path
         guard let outputDeviceName = preferredOutputDeviceName() else {
-            setLastError("The VibeRemote audio device is not installed.")
+            setLastError("The vvhisper audio device is not installed.")
             return
         }
 
@@ -653,7 +653,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             if let outputDeviceName = preferredOutputDeviceName() {
                 do {
                     guard captureDefaultInputDevice(), setDefaultInputDevice(named: outputDeviceName) else {
-                        setLastError("Could not select the VibeRemote microphone."); return
+                        setLastError("Could not select the vvhisper microphone."); return
                     }
                 }
                 bridgeReady = livePacketLoggerIdentity() != nil
@@ -661,7 +661,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 appendAppLog("Microphone bridge already running")
             } else {
                 bridgeReady = false
-                setLastError("The VibeRemote audio device is not installed.")
+                setLastError("The vvhisper audio device is not installed.")
             }
             return
         }
@@ -706,7 +706,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             .path
         appendAppLog("Microphone bridge voice helper: \(helper)")
         guard let outputDeviceName = preferredOutputDeviceName() else {
-            setLastError("The VibeRemote audio device is not installed.")
+            setLastError("The vvhisper audio device is not installed.")
             return
         }
         appendAppLog("Microphone bridge output device: \(outputDeviceName)")
@@ -844,7 +844,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             return viaHelper
         }
         guard allowAdministratorPrompt else {
-            return .failed("Automatic start is waiting for an approved, current VibeRemote helper. Use the menu to complete setup.")
+            return .failed("The helper needs setup or repair. Click Set Up / Repair Helper below, then approve vvhisper in System Settings if requested.")
         }
         return startSupervisorViaAdministratorPrompt(
             packetLogger: packetLogger,
@@ -889,10 +889,10 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         // not minutes; a hang beyond this is a failure, not a reason to also prompt.
         guard semaphore.wait(timeout: .now() + 60) == .success,
               let result = outcome.value else {
-            return .failed("The VibeRemote helper did not finish starting the capture supervisor in time.")
+            return .failed("The vvhisper helper did not finish starting the capture supervisor in time.")
         }
         guard result.pid > 1 else {
-            return .failed(result.message ?? "The VibeRemote helper could not start the capture supervisor.")
+            return .failed(result.message ?? "The vvhisper helper could not start the capture supervisor.")
         }
         return .started(result.pid)
     }
@@ -1137,7 +1137,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             guard let self else { return }
             self.stopLocked()
             guard let source = self.bundledAudioDriverPath() else {
-                let message = "The bundled VibeRemote audio driver is missing from this build."
+                let message = "The bundled vvhisper audio driver is missing from this build."
                 self.setLastError(message)
                 DispatchQueue.main.async { completion?(false, message) }
                 return
@@ -1147,7 +1147,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 PrivilegedHelperClient.shared.installAudioDriver(fromPath: source) { [weak self] succeeded, message in
                     guard let self else { return }
                     if succeeded {
-                        self.appendAppLog("Installed the VibeRemote audio driver via the helper")
+                        self.appendAppLog("Installed the vvhisper audio driver via the helper")
                         self.workQueue.async {
                             let installed = self.waitForInstalledAudioDevice()
                             if installed {
@@ -1162,7 +1162,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                     }
                     // The helper is registered but could not do the work; surface why rather
                     // than silently falling back to a password prompt.
-                    let failure = message ?? "The VibeRemote helper could not install the audio driver."
+                    let failure = message ?? "The vvhisper helper could not install the audio driver."
                     self.setLastError(failure)
                     DispatchQueue.main.async { completion?(false, failure) }
                 }
@@ -1198,13 +1198,13 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 osa.waitUntilExit()
                 guard osa.terminationStatus == 0 else {
                     let message = errorText.isEmpty
-                        ? "Installing the VibeRemote audio driver was cancelled or failed."
+                        ? "Installing the vvhisper audio driver was cancelled or failed."
                         : errorText
                     self.setLastError(message)
                     DispatchQueue.main.async { completion?(false, message) }
                     return
                 }
-                self.appendAppLog("Installed the VibeRemote audio driver")
+                self.appendAppLog("Installed the vvhisper audio driver")
                 // coreaudiod needs a moment to publish the new device.
                 let installed = self.waitForInstalledAudioDevice()
                 if installed {
@@ -1212,7 +1212,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
                 }
                 DispatchQueue.main.async { completion?(installed, installed ? nil : "The driver was installed but no virtual audio device appeared yet.") }
             } catch {
-                let message = "Could not install the VibeRemote audio driver: \(error.localizedDescription)"
+                let message = "Could not install the vvhisper audio driver: \(error.localizedDescription)"
                 self.setLastError(message)
                 DispatchQueue.main.async { completion?(false, message) }
             }
@@ -1225,7 +1225,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(12)
         repeat {
             Thread.sleep(forTimeInterval: 0.5)
-            if audioDeviceID(named: "VibeRemote") != nil { return true }
+            if audioDeviceID(named: "vvhisper") != nil { return true }
         } while Date() < deadline
         return false
     }
@@ -2034,9 +2034,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     ) -> [String] {
         var issues: [String] = []
         if outputDeviceName == nil {
-            issues.append("The VibeRemote audio device is missing.")
+            issues.append("The vvhisper audio device is missing.")
         } else if defaultInputDeviceName != outputDeviceName {
-            issues.append("System default input is \(defaultInputDeviceName ?? "unknown"), not \(outputDeviceName ?? "VibeRemote").")
+            issues.append("System default input is \(defaultInputDeviceName ?? "unknown"), not \(outputDeviceName ?? "vvhisper").")
         }
         if !helperAlive {
             issues.append("Voice helper is not running.")
@@ -2082,10 +2082,10 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Virtual audio devices the bridge can play into, most preferred first. "VibeRemote" is
-    /// the driver we bundle and install ourselves; the others are honored so an existing
-    /// BlackHole/Soundflower setup keeps working.
-    static let supportedOutputDeviceNames = ["VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"]
+    /// Virtual audio devices in preference order. New drivers expose "vvhisper";
+    /// keep "VibeRemote" for installed drivers from before the rename, plus the
+    /// existing BlackHole/Soundflower fallbacks.
+    static let supportedOutputDeviceNames = ["vvhisper", "VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"]
 
     static let audioDriverBundleName = "VibeRemoteAudio.driver"
     static let halPlugInDirectory = "/Library/Audio/Plug-Ins/HAL"

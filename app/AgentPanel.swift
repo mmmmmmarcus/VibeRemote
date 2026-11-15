@@ -61,7 +61,7 @@ final class ComputerUseAgent: ObservableObject {
         latestMessage = nil
         status = nil
         phase = .running
-        let run = AgentRun { [weak self] event in self?.handle(event) }
+        let run = AgentRun(onEvent: { [weak self] event in self?.handle(event) })
         self.run = run
         run.start(command: command.trimmingCharacters(in: .whitespacesAndNewlines), context: context, settings: settings)
         onRunStarted?()
@@ -121,8 +121,7 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     private var panel: AgentCalloutPanel?
     private var hosting: NSHostingController<AgentCalloutView>?
     private var previousApp: NSRunningApplication?
-    private var iconFrame: CGRect?
-    private var presentation: Task<Void, Never>?
+    private var presentationVisibleFrame: CGRect?
     private var resultDismissal: DispatchWorkItem?
     /// True while VibeRemote shows its Dock icon on Computer Use's behalf.
     private(set) var holdsDock = false
@@ -158,6 +157,13 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     }
 
     func show(fresh: Bool) {
+        // Resolve before changing activation policy or focusing our own window: NSScreen.main
+        // can otherwise refer to Settings or the bar's previous monitor. Every explicit
+        // invocation can move an already-visible bar to the display the user is using.
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(pointer) }
+            ?? NSScreen.main ?? NSScreen.screens.first
+        presentationVisibleFrame = screen?.visibleFrame
         resultDismissal?.cancel()
         let front = NSWorkspace.shared.frontmostApplication
         if let front, front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
@@ -174,10 +180,10 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     }
 
     func dismiss() {
-        presentation?.cancel()
         resultDismissal?.cancel()
         let wasKey = panel?.isKeyWindow == true
         panel?.orderOut(nil)
+        callout.isPresented = false
         // A running command keeps the green tile; anything else gives the Dock icon back.
         if !agent.isRunning { releaseDock() }
         if wasKey { returnFocus() }
@@ -258,62 +264,42 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
 
     // MARK: Presentation
 
-    /// Waits for the Dock icon to settle (a newly shown icon slides in), then pops the callout
-    /// up from it. Without a located icon the callout floats above the bottom of the screen.
+    /// Keep one screen-relative anchor for the entire presentation, independent of Dock icons.
     private func present(key: Bool) {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        presentation?.cancel()
-        presentation = Task { @MainActor [weak self] in
-            let icon = await Self.settledIconFrame()
-            guard let self, !Task.isCancelled else { return }
-            self.iconFrame = icon
-            self.place(panel, fitting: true)
-            if key {
-                // A remote press is no user event in this app, so cooperative activate() can be
-                // refused; the field then has no focus and input methods type into the old app.
-                NSApp.activate(ignoringOtherApps: true)
-                panel.makeKeyAndOrderFront(nil)
-                self.agent.requestFocus()
-            } else {
-                panel.orderFrontRegardless()
-            }
-            rmDebug("🤖 Computer Use callout shown key=\(key) icon=\(icon.map { "\($0)" } ?? "none") active=\(NSApp.isActive)")
+        callout.isPresented = true
+        if presentationVisibleFrame == nil {
+            presentationVisibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
         }
-    }
-
-    /// Two equal reads 50 ms apart, within 0.8 s; the last read otherwise.
-    private static func settledIconFrame() async -> CGRect? {
-        guard AXIsProcessTrusted() else { return nil }
-        var last: CGRect?
-        for _ in 0..<16 {
-            let frame = DockIconLocator.iconFrame()
-            if let frame, frame == last { return frame }
-            last = frame
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            if Task.isCancelled { return last }
+        place(panel, fitting: true)
+        if key {
+            // A remote press is no user event in this app, so cooperative activate() can be
+            // refused; the field then has no focus and input methods type into the old app.
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            agent.requestFocus()
+        } else {
+            panel.orderFrontRegardless()
         }
-        return last
+        rmDebug("🤖 Computer Use callout shown immediately key=\(key) active=\(NSApp.isActive)")
     }
 
     private func place(_ panel: NSPanel, fitting: Bool) {
-        let screen = iconFrame.flatMap { icon in
-            NSScreen.screens.first { $0.frame.intersects(icon) }
-        } ?? NSScreen.main ?? NSScreen.screens.first
-        guard let screen else { return }
-        callout.edge = iconFrame.map { DockCalloutPlacement.edge(of: $0, in: screen.frame) }
+        guard let visible = presentationVisibleFrame ?? NSScreen.main?.visibleFrame else { return }
+        callout.edge = nil
         var size = panel.frame.size
         if fitting, let view = hosting?.view {
             view.layoutSubtreeIfNeeded()
             size = view.fittingSize
         }
-        let placement = DockCalloutPlacement.place(size: size, icon: iconFrame,
-                                                   screen: screen.frame, visible: screen.visibleFrame)
+        let placement = DockCalloutPlacement.place(size: size, icon: nil,
+                                                   screen: visible, visible: visible)
         callout.arrowOffset = placement.arrowOffset
         panel.setFrame(NSRect(origin: placement.origin, size: size), display: true)
     }
 
-    /// The callout grows with its text and phase; keep its arrow on the icon afterwards.
+    /// Text and phase changes resize around the same bottom-center anchor.
     func windowDidResize(_ notification: Notification) {
         guard let panel, panel.isVisible else { return }
         place(panel, fitting: false)
@@ -359,6 +345,7 @@ final class AgentCalloutPanel: NSPanel {
 
 @MainActor
 final class AgentCalloutModel: ObservableObject {
+    @Published var isPresented = false
     @Published var edge: DockEdge? = .bottom
     @Published var arrowOffset: CGFloat = AgentPanelController.width / 2
 }
@@ -371,12 +358,30 @@ struct AgentCalloutView: View {
     @ObservedObject var callout: AgentCalloutModel
     let dismiss: () -> Void
     @FocusState private var commandFocused: Bool
+    @State private var placeholderIndex = 0
+
+    private static let placeholders = [
+        "Open ChatGPT",
+        "Open Claude",
+        "Start a new session in Claude",
+        "Talk to primary Grok bot",
+        "Open Slack",
+        "Open Safari",
+        "Open Downloads in Finder",
+        "Open Calendar",
+        "Switch to Notes"
+    ]
+
+    private var rotatesPlaceholder: Bool {
+        callout.isPresented && agent.phase == .composing && agent.command.isEmpty
+    }
 
     var body: some View {
         HStack(alignment: agent.phase == .composing ? .bottom : .center, spacing: 8) {
             switch agent.phase {
             case .composing:
-                TextField("What do you want to do?", text: $agent.command, axis: .vertical)
+                TextField("What do you want to do?", text: $agent.command,
+                          prompt: Text(Self.placeholders[placeholderIndex]), axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .lineLimit(1...5)
@@ -408,6 +413,15 @@ struct AgentCalloutView: View {
         .onExitCommand(perform: dismiss)
         .onAppear { commandFocused = true }
         .onChange(of: agent.focusRequest) { commandFocused = true }
+        .task(id: rotatesPlaceholder) {
+            guard rotatesPlaceholder else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(4)) }
+                catch { return }
+                guard !Task.isCancelled else { return }
+                placeholderIndex = (placeholderIndex + 1) % Self.placeholders.count
+            }
+        }
     }
 
     private func statusLine(_ text: String) -> some View {

@@ -141,11 +141,11 @@ final class PrivilegedHelperClient: @unchecked Sendable {
         let reported = ErrorLatch()
         let remote = connection().remoteObjectProxyWithErrorHandler { error in
             guard reported.trip() else { return }
-            onError("The VibeRemote helper is not reachable: \(error.localizedDescription)")
+            onError("The vvhisper helper is not reachable: \(error.localizedDescription)")
         }
         guard let helper = remote as? HelperProtocol else {
             if reported.trip() {
-                onError("The VibeRemote helper interface is unavailable.")
+                onError("The vvhisper helper interface is unavailable.")
             }
             return nil
         }
@@ -168,7 +168,14 @@ final class PrivilegedHelperClient: @unchecked Sendable {
 
     func fetchVersion(completion: @escaping @Sendable (Int?, String?) -> Void) {
         let latch = ErrorLatch()
+        // A launchd job that cannot launch may neither reply nor invalidate XPC.
+        // Bound the probe so explicit repair can replace that stale registration.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            guard latch.trip() else { return }
+            completion(nil, "The vvhisper helper did not respond within 3 seconds.")
+        }
         guard let helper = proxy(onError: { message in
+            guard latch.trip() else { return }
             completion(nil, message)
         }) else { return }
         helper.helperVersion { version in

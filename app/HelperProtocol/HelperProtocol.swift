@@ -18,7 +18,7 @@ public enum HelperConstants {
 
     /// Bumped whenever the helper's capabilities change so the app can prompt for a
     /// re-registration instead of talking to a stale daemon.
-    public static let version = 4
+    public static let version = 5
 
     /// Minimum capture implementation: v2 introduced the XPC method; v3 fixes first-run
     /// plist creation on current macOS. An approved daemon retains its old binary until
@@ -26,7 +26,7 @@ public enum HelperConstants {
     public static let packetLoggerCaptureMinimumVersion = 3
 
     /// Team identifier the helper requires of any connecting client.
-    public static let expectedTeamIdentifier = "SM96W8VVK9"
+    public static let expectedTeamIdentifier = "Q9MD524YL5"
 
     /// Bundle identifier the helper requires of any connecting client.
     public static let expectedClientBundleID = "com.viberemote.app"

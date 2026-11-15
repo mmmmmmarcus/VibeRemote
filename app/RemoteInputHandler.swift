@@ -89,6 +89,8 @@ final class RemoteInputHandler {
     /// A button mapped to Computer Use asks for the agent panel. (Holding TV did too until
     /// 2026-11-13, when every hold action but Siri's was removed at the user's request.)
     var onAgentRequested: (() -> Void)?
+    var onSiriDoublePress: (() -> Void)?
+    private var siriTaps: [String: ComputerUseDoubleTap] = [:]
     /// Observe the native HID edge before menu/AX/bridge work can re-enter the event loop.
     var onHIDMediaButton: ((String, Bool, UInt64, UInt64) -> Void)?
     var usesPassiveButtonCapture: ((RemoteGeneration) -> Bool)?
@@ -958,6 +960,22 @@ final class RemoteInputHandler {
             return
         }
 
+        let tapDevice = interfaceID.flatMap { interfaceDescriptors[$0]?.deviceKey } ?? "hid"
+        if buttonName == "siri" {
+            var taps = siriTaps[tapDevice] ?? ComputerUseDoubleTap()
+            let open = taps.update(down: isPressed, now: ProcessInfo.processInfo.systemUptime)
+            siriTaps[tapDevice] = taps
+            if !isPressed, taps.shortRelease {
+                siriLastReleaseAt = Date()
+                if DictationController.shared.recordingSource == .remote { DictationController.shared.cancel() }
+                releaseHeldKey(for: "siri")
+                if open { onSiriDoublePress?() }
+                return
+            }
+        } else if isPressed {
+            siriTaps[tapDevice]?.reset()
+        }
+
         // Volume keys on the Siri Remote also travel over BT AVRCP absolute-volume, which
         // coreaudiod honors below cghidEventTap. Track both press and release so the
         // CoreAudio listener snaps the level back to the pre-press value.
@@ -1538,6 +1556,7 @@ final class RemoteInputHandler {
             onDictationEnd?()
         }
         buttonState.removeAll()
+        siriTaps.removeAll()
     }
 
     private func releaseAllPendingTapKeys() {

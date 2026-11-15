@@ -15,7 +15,7 @@ private enum BridgeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .audioDeviceNotFound:
-            return "No VibeRemote (or BlackHole/Soundflower) virtual audio device was found."
+            return "No vvhisper (or legacy VibeRemote/ BlackHole/Soundflower) virtual audio device was found."
         case .audioDeviceQuery(let status):
             return "Could not enumerate audio devices (OSStatus \(status))."
         case .audioDeviceSelection(let status):
@@ -88,7 +88,7 @@ private func preferredOutputDevice() throws -> (AudioDeviceID, String) {
 
     // Prefer the VibeRemote driver we install ourselves; the others keep an existing
     // BlackHole/Soundflower setup working. Must stay in sync with the app's device list.
-    for expectedName in ["VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"] {
+    for expectedName in ["vvhisper", "VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"] {
         if let device = devices.first(where: { audioDeviceName($0) == expectedName }) {
             return (device, expectedName)
         }
@@ -238,7 +238,7 @@ private final class VirtualAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     /// several render cycles between receiving a packet and delivering it to dictation.
     /// Unsupported requests keep the existing setting; never alter a fallback or headset.
     private func configureBuffer(deviceID: AudioDeviceID, deviceName: String) {
-        guard deviceName == "VibeRemote" else { return }
+        guard ["vvhisper", "VibeRemote"].contains(deviceName) else { return }
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyBufferFrameSize,
             mScope: kAudioObjectPropertyScopeGlobal,

@@ -1,4 +1,4 @@
-# VibeRemote website
+# vvhisper website
 
 The official site: one static page, no build step.
 
@@ -16,6 +16,19 @@ python3 -m http.server 8000 --directory website
 ```
 
 Then open http://localhost:8000. Opening `index.html` directly also works.
+
+## Product direction
+
+The next design and content iteration should present vvhisper as a general voice interface
+for macOS. The Mac’s built-in microphone and keyboard are the baseline; Siri Remote and
+future supported devices are optional enhancements. Lead with Dictation and Computer Use,
+then explain the benefits of accessories without making them a prerequisite.
+
+Follow the four priorities in [Product direction](../app/Design/ProductDirection.md):
+general dictation, faster and easier Computer Use, more device support, and product design
+that fits that direction. The current page remains centered on Siri Remote; this document
+records the intended redesign, not a claim that the live page has already been redesigned.
+Only advertise additional device integrations once they are implemented and verified.
 
 ## Design notes
 

@@ -5,15 +5,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
-APP_NAME="VibeRemote"
+APP_NAME="vvhisper"
+EXECUTABLE_NAME="VibeRemote"
 APP_BUNDLE="${APP_NAME}.app"
-ENTITLEMENTS="${APP_NAME}.entitlements"
-ICON_SOURCE="${APP_NAME}.icon"
+ENTITLEMENTS="VibeRemote.entitlements"
+ICON_SOURCE="VibeRemote.icon"
 ICON_INFO_PLIST="$ROOT_DIR/.build/app-icon-info.plist"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.viberemote.app}"
 APP_VERSION="${APP_VERSION:-0.3.4}"
 BUILD_NUMBER="${BUILD_NUMBER:-11}"
-SIGNING_MODE="${SIGNING_MODE:-local}"
+SIGNING_MODE="${SIGNING_MODE:-developer}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Haolin Fei (Q9MD524YL5)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-VVHISPER_NOTARY}"
 INCLUDE_VOICE_HELPER="${INCLUDE_VOICE_HELPER:-1}"
 
 case "$SIGNING_MODE" in
@@ -70,7 +73,7 @@ echo "Creating app bundle: $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources" "${APP_BUNDLE}/Contents/Frameworks"
 ditto ".build/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
-cp "$APP_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
+cp "$EXECUTABLE_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
 
 echo "Compiling Icon Composer app icon: $ICON_SOURCE"
@@ -78,7 +81,7 @@ DEVELOPER_DIR="$icon_developer_dir" xcrun actool "$ICON_SOURCE" \
     --compile "${APP_BUNDLE}/Contents/Resources" \
     --platform macosx \
     --minimum-deployment-target 27.0 \
-    --app-icon "$APP_NAME" \
+    --app-icon "VibeRemote" \
     --output-partial-info-plist "$ICON_INFO_PLIST" \
     --output-format human-readable-text
 
@@ -202,13 +205,13 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
+	<string>vvhisper uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>VibeRemote uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
+	<string>vvhisper uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>VibeRemote Dictation records the Siri Remote microphone while you hold Siri, then types what you said.</string>
+	<string>vvhisper Dictation records the Siri Remote microphone while you hold Siri, then types what you said.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>VibeRemote Dictation can turn your speech into text with Apple's on-device speech recognition.</string>
+	<string>vvhisper Dictation can turn your speech into text with Apple's on-device speech recognition.</string>
 </dict>
 </plist>
 EOF
@@ -263,6 +266,17 @@ codesign --force --options runtime \
     --sign "$signing_identity" \
     "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+
+if [ "$signing_identity" != "-" ]; then
+    # The root helper accepts only this team; reject an incompatible signed bundle.
+    # Capture first: grep -q can close the pipe before codesign finishes its diagnostics,
+    # making pipefail reject a correctly signed build with an intermittent SIGPIPE.
+    if ! bundle_signature="$(codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1)" ||
+       ! grep -qx 'TeamIdentifier=Q9MD524YL5' <<< "$bundle_signature"; then
+        echo "Error: app and helper require personal signing team Q9MD524YL5." >&2
+        exit 1
+    fi
+fi
 
 if [ "$SIGNING_MODE" = "release" ]; then
     archive_path=".build/${APP_NAME}-notarization.zip"

@@ -1,10 +1,29 @@
-# VibeRemote
+# vvhisper
 
-VibeRemote is an experimental macOS menu-bar app that turns an Apple Siri Remote into an
-input device for AI agent apps such as Claude and ChatGPT. Every button sends the keys those
-apps need, per app, with profiles; the remote's microphone becomes dictation that types as
-you speak; and a Computer Use agent can operate the Mac from a spoken task. The menu bar
-shows the remote's connection and battery.
+vvhisper is an experimental macOS menu-bar app becoming a general voice interface for
+the Mac: dictate text into apps and give Computer Use spoken tasks. The baseline is the
+Mac’s built-in microphone and keyboard, without a dedicated accessory. Siri Remote and
+future supported devices enhance the experience with additional controls and audio inputs.
+
+Development focuses on four priorities: **general dictation**, **faster and easier
+Computer Use**, **more device support**, and **product design that fits this direction**.
+[Product direction](Design/ProductDirection.md) records the intended experience and
+separates current functionality from planned work.
+
+## Using the Mac alone
+
+In Settings › Dictation, choose a service and configure the keyboard modifier under
+**Alternative Dictation Hotkey** (its current UI name). Hold that key alone to dictate
+through the Mac’s microphone; release it to finish. The Microphone menu can follow the
+system input or select the built-in microphone explicitly.
+
+Open **Computer Use** from the menu bar, type or dictate into its input field, and press
+Return to submit. Configure its OpenRouter models and key in Settings › Computer Use. Auto Computer Use
+currently applies only to Siri Remote dictation holds; the keyboard path uses the bar
+and explicit submission. The first-run guide still emphasizes remote setup and is part
+of the planned product-design work.
+
+## Optional Siri Remote integration
 
 Both Siri Remote hardware families are supported:
 
@@ -28,7 +47,7 @@ paired at the same time and each keeps its own mapping.
   opener, the clickpad / touch surface and the directions keep fixed roles.
 - **Per-app button profiles** (see [Button profiles](#button-profiles)): General for every
   app, plus Claude and ChatGPT out of the box, and any installed app you add.
-- **VibeRemote Dictation** (see [Dictation](#dictation)): choose Dictation for Siri and the
+- **vvhisper Dictation** (see [Dictation](#dictation)): choose Dictation for Siri and the
   app transcribes the remote's microphone itself — streaming text as you speak with Seed
   ASR — with an orange cursor at the insertion point while you hold Siri.
 - Automatic per-generation layouts. The 1st-gen remote has no Mute and no Power key, so
@@ -37,7 +56,7 @@ paired at the same time and each keeps its own mapping.
   applies only to the physical Siri button, and the remote microphone transmits only while
   that button is held.
 - Press-and-hold Siri mappings for Space, Right Command and Right Option (for your own
-  dictation app), or VibeRemote Dictation.
+  dictation app), or vvhisper Dictation.
 - Back/Menu deletes a word immediately on every press, including rapid repeated presses;
   holding repeats word deletion. Use Advanced Menu to clear the full input.
 - Aluminum Play/Pause opens Computer Use (pressed again it closes the bar or stops its command);
@@ -55,20 +74,26 @@ paired at the same time and each keeps its own mapping.
 
 ## Requirements
 
-- macOS 27 or newer on Apple Silicon.
-- Xcode Command Line Tools (full Xcode to compile the app icon; see [App icon](#app-icon)).
-- A paired Siri Remote.
-- Accessibility, Input Monitoring and Bluetooth permission for the built app; Microphone for
-  Dictation, and Speech Recognition for its Apple service.
+For the baseline Mac experience:
 
-The microphone bridge and Dictation additionally use:
+- macOS 27 or newer on Apple Silicon, with a microphone and keyboard. The Mac’s built-in
+  microphone is sufficient; no Siri Remote is required.
+- Microphone permission for Mac-microphone dictation, Accessibility for text insertion
+  and computer actions, and Speech Recognition permission when using the Apple service.
+- Any credentials or setup needed by the selected service: Apple and WhisperKit dictation
+  need no API key; OpenAI and Seed ASR use your own keys. Computer Use requires its chosen
+  OpenRouter key for model-backed tasks (see [Computer Use](#computer-use)).
+- To build from source: Xcode Command Line Tools, plus full Xcode to compile the app icon
+  (see [App icon](#app-icon)).
 
-- VibeRemote's own virtual audio device, installed from Settings › Siri Remote (or the Fix button in
-  Settings' corner). BlackHole 2ch or Soundflower (2ch) work as fallbacks.
-- The privileged helper, approved once in System Settings › General › Login Items &
-  Extensions, so the bridge starts without a password prompt.
-- Apple's PacketLogger, embedded in personal builds (see [Microphone bridge](#microphone-bridge)).
-- For Dictation, your own key for the chosen service (Apple and WhisperKit need none).
+The optional Siri Remote integration additionally uses:
+
+- A paired Siri Remote, Bluetooth permission, and Input Monitoring for remote input.
+- For its microphone bridge: vvhisper’s virtual audio device (legacy VibeRemote,
+  BlackHole 2ch, and Soundflower (2ch) are supported), the privileged helper for prompt-free
+  capture, and Apple’s PacketLogger. See [Microphone bridge](#microphone-bridge).
+
+The remote bridge components are not required for Mac-microphone dictation.
 
 ## First launch and Settings
 
@@ -78,7 +103,7 @@ unfinished. Existing configured installations keep their mapping without a force
 Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
 the menu bar.
 
-The Settings sidebar has two groups. **System** holds what VibeRemote itself does: Dictation and
+The Settings sidebar has two groups. **System** holds what vvhisper itself does: Dictation and
 Computer Use. **Device** holds the Siri Remote: Controls (the profile switcher, the remote and its
 pills with a Normal | Advanced switch, and the text-cursor guide) and Siri Remote (status, Auto
 Disconnect and diagnostics). About (version, updates and links) sits at the bottom of the sidebar.
@@ -104,7 +129,7 @@ the way it pressed.
 
 ## Dictation
 
-Choose **Dictation** on the Siri pill (in any profile) to have VibeRemote transcribe the
+Choose **Dictation** on the Siri pill (in any profile) to have vvhisper transcribe the
 remote's microphone instead of holding a key for a third-party dictation app; Settings ›
 Dictation picks the service (Apple, WhisperKit on device, OpenAI, or Seed ASR from
 ByteDance/Volcengine) and the language, and stores your own API keys in the keychain.
@@ -132,17 +157,17 @@ while holding it counts as a shortcut and records nothing.
 Once a hotkey is set, its **Microphone** menu chooses what it records:
 
 - **Same as System** (the default) follows the Mac's input setting. The menu names the
-  microphone this means right now. While the system input is VibeRemote's own device, it uses
+  microphone this means right now. While the system input is vvhisper's own device, it uses
   the built-in microphone, or another real microphone on a Mac without one.
 - **A specific microphone**: any connected input, such as a USB mic or a Bluetooth headset.
-  VibeRemote's own device, BlackHole and Soundflower are not listed, because they carry only the
+  vvhisper's own device, BlackHole and Soundflower are not listed, because they carry only the
   remote's voice. A chosen microphone that is not connected shows as "(Not Connected)", and
   holds use Same as System until it comes back.
 
 The hotkey never changes the system input; it records the chosen microphone directly. Opening a
 Bluetooth headset's microphone usually switches the headset to its call profile for the hold, so
 its playback may sound lower quality until the hold ends. The hotkey needs Microphone access for
-VibeRemote; the Dictation pane shows a Microphone Access row once a hotkey is chosen; the remote does not.
+vvhisper; the Dictation pane shows a Microphone Access row once a hotkey is chosen; the remote does not.
 
 While you hold Siri, an orange copy of the caret-positioning cursor stands at the insertion
 point. Its mic fills with the live input level, so a stopped bridge reads visibly empty, it
@@ -152,34 +177,43 @@ composers; an editor that exposes no caret geometry shows no cursor, but dictati
 
 ## Computer Use
 
-Press Play/Pause on the aluminum remote (or any button set to **Computer Use** in Settings ›
-Controls; the 1st-gen remote has none by default) or choose **Computer Use** in the menu bar.
-An input bar pops up from VibeRemote's Dock icon and takes focus; type or dictate the task and
-press Select or Return to run it. While the agent works, focus goes back to the app you were
-in, the bar shows its latest step and the Dock icon turns green; the outcome then shows with a
-✓ or ! for a few seconds. Pressing the Computer Use button again stops a running task, or
-closes the bar.
+Choose **Computer Use** in the menu bar, type or dictate into the input bar, and press
+Return to run the task. A Siri Remote button mapped to Computer Use opens the same bar;
+Select submits it. The bar accepts input immediately while its position is adjusted to
+vvhisper’s Dock icon. While a task runs, focus returns to the previous app, the bar shows
+progress and a Stop button, and the Dock icon turns green. The outcome shows briefly with
+a ✓ or !. Pressing the Computer Use remote button again stops a running task or closes the bar.
 
-**Auto Computer Use** (Settings › Computer Use, off by default) lets Siri decide. With Siri set
-to Dictation, holding Siri while a text field has the focus dictates into it as usual; holding
-it anywhere else opens the bar, fills it with what you say, and sends the cleaned-up text as
-the task when you let go.
+Computer Use chooses its execution path automatically:
 
-The agent operates the Mac through [agent-desktop](https://github.com/vercel-labs/agent-desktop),
-bundled in the app, which acts on native accessibility trees without moving the pointer.
-Choose the backend and its model in Settings › Computer Use:
+- **Local actions first.** Recognized app-opening and explicit web-address commands use
+  native Mac actions without a model request.
+- **Jev for judgment.** For a named conversation in ChatGPT, Codex, or Claude, the quick
+  path looks only at conversation navigation exposed by the app’s current accessibility
+  tree. An exact unique title is selected locally; Jev can match a topic against the
+  observed candidates through OpenRouter’s Decisions API. It does not search an entire
+  hidden chat history. Unresolved targets can pass to the automation model before any
+  conversation selection is dispatched. After a selection is sent, an uncertain result
+  stops with a status message rather than replaying the request through another route.
+- **An automation model for planning.** Tasks outside the direct capabilities use the
+  selected OpenRouter model with [agent-desktop](https://github.com/vercel-labs/agent-desktop),
+  bundled in the app. It observes native accessibility trees and executes tool commands.
 
-- **Claude Code** runs `claude -p` with only Bash, and only `agent-desktop` commands
-  pre-approved. Sign in to the `claude` CLI first.
-- **Codex** runs `codex exec`. Codex's sandbox blocks agent-desktop, so it runs with
-  full access and no approval prompts; it is told, not forced, to use only agent-desktop.
-- **OpenRouter** calls the chosen model directly (default `anthropic/claude-sonnet-5.5`)
-  with a single `agent_desktop` tool; VibeRemote runs each command. The API key is stored
-  in the login keychain.
+Settings › Computer Use has **Automation Model**, **Decision Model**, and one **OpenRouter
+API Key** shared by both. The decision model defaults to `typesafe/jev-1.14`; it must support
+OpenRouter’s Decisions API. The automation model must support tool calls. The key stays in
+the login Keychain. Previous CLI-specific settings are retained for compatibility, but the
+current Computer Use interface uses OpenRouter for model requests.
 
-The agent is told not to send, post, buy, delete or change settings unless the task asks
-for that exact action. Each run stops after ten minutes. agent-desktop uses VibeRemote's
-Accessibility permission; screenshots additionally need Screen Recording.
+**Auto Computer Use** (off by default) applies to Siri Remote dictation holds. With Siri set
+to Dictation, holding it outside a text field opens the bar and sends the finalized transcript
+as a task on release; in a text field, Siri dictates as usual. The Mac keyboard dictation
+hotkey can dictate into the open bar, followed by Return to submit.
+
+The automation model is instructed not to send, post, buy, delete, or change settings unless
+the task asks for that exact action. Each run stops after ten minutes. agent-desktop uses
+vvhisper’s Accessibility permission; screenshots additionally need Screen Recording.
+See [Computer Use routing](Design/ComputerUseRouting.md) for boundaries and validation.
 
 ## Advanced Menu
 
@@ -259,25 +293,33 @@ must be tested on each hardware/app combination.
 
 ## Build
 
-Build, sign, and install over `/Applications/VibeRemote.app`:
+Build, sign, and install over `/Applications/vvhisper.app`:
 
 ```bash
 ./install.sh
 ```
 
-`install.sh` signs with the first Developer ID identity in the keychain. That matters
-for day-to-day use: macOS keys the Accessibility / Input Monitoring / Bluetooth grants to
-the code signature, so an ad-hoc signature — which changes on every build — revokes them
-on every rebuild, while a stable identity keeps them for the life of the app. Pass
-`CODESIGN_IDENTITY=...` to choose a different one. Builds target Apple Silicon (arm64) only;
+`install.sh` signs with Haolin Fei’s personal Developer ID (Q9MD524YL5), stages the new
+bundle, and checks that its signing requirements remain compatible with the installed
+app before quitting it. It exchanges the bundles atomically at `/Applications/vvhisper.app`
+and keeps the previous bundle available until verification and launch succeed. Failed
+verification restores the previous bundle; a failed rollback preserves recovery files.
+macOS uses the designated code requirement to remember privacy approvals across builds.
+The installer rejects a different team or incompatible requirement and never falls back
+to ad-hoc signing. Pass `CODESIGN_IDENTITY=...` to select another certificate on the same
+personal team.
+The team migration from the former company signature is covered in [Release/README.md](Release/README.md). Builds target Apple Silicon (arm64) only;
 Intel Macs and universal binaries are no longer supported.
 
-Or create an optimized arm64 local build without installing it:
+Or create an optimized, personally signed arm64 bundle without installing it:
 
 ```bash
 ./create_app_bundle.sh
-open VibeRemote.app
 ```
+
+Use `./install.sh` for permission and device testing so the running copy has one stable
+path. Do not run an older company-signed `VibeRemote.app` from the repository alongside
+vvhisper: both retain `com.viberemote.app`, but have different signing identities.
 
 `build.sh` uses SwiftPM in a fresh temporary directory and removes its compiler cache
 on success, failure, or a handled interruption. It retains the three output binaries
@@ -298,22 +340,25 @@ Do not create separate architecture or per-task scratch directories for routine 
 Direct `swift build` / `swift test` commands still create caches: clean them when finished.
 The tradeoff is that default builds recompile instead of accumulating gigabytes of cache.
 
-Local bundles are ad-hoc signed. For a Developer ID build, explicitly provide
-the identity:
+Bundle creation defaults to the personal Developer ID. This explicit command is equivalent:
 
 ```bash
 SIGNING_MODE=developer \
-CODESIGN_IDENTITY="Developer ID Application: Example Corp (TEAMID)" \
+CODESIGN_IDENTITY="Developer ID Application: Haolin Fei (Q9MD524YL5)" \
 ./create_app_bundle.sh
 ```
+
+`SIGNING_MODE=local ./create_app_bundle.sh` explicitly creates an ad-hoc development
+bundle. Do not install it over the personally signed app; changing code identity can
+require fresh privacy approvals.
 
 Distribution builds also require a `notarytool` keychain profile; release mode
 signs with secure timestamps, submits the archive, and staples the result:
 
 ```bash
 SIGNING_MODE=release \
-CODESIGN_IDENTITY="Developer ID Application: Example Corp (TEAMID)" \
-NOTARY_PROFILE="viberemote-notary" \
+CODESIGN_IDENTITY="Developer ID Application: Haolin Fei (Q9MD524YL5)" \
+NOTARY_PROFILE="VVHISPER_NOTARY" \
 ./create_app_bundle.sh
 ```
 
@@ -322,9 +367,11 @@ The microphone helper is built from the local Swift source in
 
 ## Permissions
 
-After each new local ad-hoc build, macOS may require the rebuilt app to be
-approved again in System Settings (`./install.sh` keeps a stable signature, so this is
-needed only once):
+Approve the required capabilities on first use in System Settings. Moving from the
+former company signing team to the personal team can require one-time reapproval.
+Normal updates installed with `./install.sh` should retain these approvals; repeated
+requests after compatible signed updates need investigation. Ad-hoc builds have a
+different code identity and can prompt again after every rebuild:
 
 1. Privacy & Security > Accessibility
 2. Privacy & Security > Input Monitoring
@@ -347,7 +394,7 @@ With the app open, the bridge automatically starts when its dependencies and the
 approved, current privileged helper are available. A stopped capture pipeline is
 retried with bounded backoff; reconnect and Mac wake also request recovery.
 Automatic recovery never falls back to an administrator password prompt. Complete
-missing setup in Settings › Siri Remote, or with the Fix button in Settings' corner. Quitting VibeRemote stops recovery and capture.
+missing setup in Settings › Siri Remote, or with the Fix button in Settings' corner. Quitting vvhisper stops recovery and capture.
 
 The working microphone engine is PacketLogger (select with
 `defaults write com.viberemote.app microphoneBridgeEngine packetlogger`). It uses
@@ -357,7 +404,7 @@ session. The Direct HID engine is retained but does not deliver audio on the tes
 macOS configuration. Audio is emitted only while the physical Siri button is held.
 
 Some black-glass remotes also expose a dedicated audio collection (observed with
-product 0x026D / hardware revision 0A00), which VibeRemote prefers. Only older remotes
+product 0x026D / hardware revision 0A00), which vvhisper prefers. Only older remotes
 without that collection use report sniffing on interfaces large enough to hold a
 20 ms Opus frame; the voice helper validates framing per report.
 Both generations encode CELT-only, single-frame Opus (`0xB8` — wideband, 20 ms), which is
@@ -376,7 +423,7 @@ remotes emit real audio only while the Siri button is held, so the bridge cannot
 capture audio hands-free regardless of app settings.
 
 **Audio path.** The voice helper sends decoded 48 kHz mono Float32 samples through a
-two-second shared-memory ring directly into the VibeRemote audio driver's input callback.
+two-second shared-memory ring directly into the vvhisper audio driver's input callback.
 The file is created by helper v4 for the authenticated user's UID under
 `/Library/Application Support/VibeRemote/Audio/`, mode 0660 for that user and
 `_coreaudiod`, inside root-owned directories. No public `/tmp` file is used. The
@@ -425,7 +472,7 @@ Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
 
 ## Automatic updates
 
-VibeRemote 0.3 adds Sparkle, with daily update checks and a manual **Check for Updates…**
+vvhisper 0.3 adds Sparkle, with daily update checks and a manual **Check for Updates…**
 action. Downloads/installations use Sparkle's standard UI and signed archives.
 The first Sparkle-enabled version needs a manual installation. Release preparation
 and update verification are documented in [Release/README.md](Release/README.md).
@@ -442,5 +489,12 @@ each supported Siri Remote generation.
 
 ## License
 
-The VibeRemote source is available under the MIT License. Third-party
+The vvhisper source is available under the MIT License. Third-party
 components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Open Computer Use with a double press
+
+Double-press Siri on the remote, or double-press your selected Alternative Dictation
+Hotkey, to open the Computer Use bar above the Dock. Hold either trigger for ordinary
+dictation. Use two quick taps (each under 220 ms, with the second release within 450 ms
+of the first). Keyboard shortcuts using the modifier do not count as double presses.

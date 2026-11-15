@@ -67,7 +67,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
                               backing: .buffered, defer: false)
         super.init(window: window)
         // The title stays for the Window menu and accessibility but is never drawn.
-        window.title = "VibeRemote"
+        window.title = "vvhisper"
         window.titleVisibility = .hidden
         window.identifier = .init("VibeRemote.Onboarding")
         window.titlebarAppearsTransparent = true
@@ -140,7 +140,7 @@ struct OnboardingView: View {
 
     private var title: String {
         switch page {
-        case .welcome: return "VibeRemote"
+        case .welcome: return "vvhisper"
         case .setup: return "Connect your remote."
         case .siri: return "Make Siri yours."
         case .deleteWord: return "Delete a word."

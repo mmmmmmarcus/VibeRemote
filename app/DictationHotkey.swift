@@ -114,6 +114,28 @@ struct DictationHotkeyGate {
     }
 }
 
+/// Two short, isolated taps; holds and intervening chords never count.
+struct ComputerUseDoubleTap {
+    private var downAt: TimeInterval?
+    private var firstRelease: TimeInterval?
+    private(set) var shortRelease = false
+    mutating func reset() { downAt = nil; firstRelease = nil; shortRelease = false }
+    mutating func update(down: Bool, now: TimeInterval) -> Bool {
+        shortRelease = false
+        if down { if downAt == nil { downAt = now }; return false }
+        guard let start = downAt else { return false }
+        downAt = nil
+        guard now >= start, now - start <= 0.22 else { firstRelease = nil; return false }
+        shortRelease = true
+        if let previous = firstRelease, start >= previous, now - previous <= 0.45 {
+            firstRelease = nil
+            return true
+        }
+        firstRelease = now
+        return false
+    }
+}
+
 /// Watches the keyboard for the chosen hotkey and drives `DictationController`. Global monitors
 /// cover other apps (they need the Accessibility grant VibeRemote already has); local monitors
 /// cover VibeRemote's own windows. Events VibeRemote posts itself (a Siri mapping that holds Right
@@ -122,6 +144,9 @@ struct DictationHotkeyGate {
 final class DictationHotkeyMonitor {
     static let shared = DictationHotkeyMonitor()
 
+    var onComputerUseRequested: (() -> Void)?
+    private var taps = ComputerUseDoubleTap()
+    private var lastHotkey: DictationHotkey = .none
     private var gate = DictationHotkeyGate()
     private var monitors: [Any] = []
 
@@ -141,6 +166,7 @@ final class DictationHotkeyMonitor {
         if let source = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID),
            source == Int64(ProcessInfo.processInfo.processIdentifier) { return }
         let hotkey = DictationHotkey.load()
+        if hotkey != lastHotkey { taps.reset(); lastHotkey = hotkey }
         let effect: DictationHotkeyGate.Effect
         switch event.type {
         case .flagsChanged:
@@ -151,14 +177,22 @@ final class DictationHotkeyMonitor {
         default:
             return
         }
+        if event.type == .keyDown || (event.type == .flagsChanged && Int(event.keyCode) != hotkey.keyCode) { taps.reset() }
         switch effect {
         case .none: break
         case .begin:
+            _ = taps.update(down: true, now: event.timestamp)
             rmDebug("🗣 Dictation hotkey \(hotkey.title) down")
             DictationController.shared.begin(source: .macMicrophone)
         case .end:
-            if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.end() }
+            let open = taps.update(down: false, now: event.timestamp)
+            if DictationController.shared.recordingSource == .macMicrophone {
+                if taps.shortRelease { DictationController.shared.cancel() }
+                else { DictationController.shared.end() }
+            }
+            if open { onComputerUseRequested?() }
         case .cancel:
+            taps.reset()
             if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.cancel() }
         }
     }

@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
-APP_PATH="${1:-$ROOT_DIR/VibeRemote.app}"
+APP_PATH="${1:-$ROOT_DIR/vvhisper.app}"
 OUTPUT_DIR="${2:-$ROOT_DIR/Release/artifacts}"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")
 BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP_PATH/Contents/Info.plist")
@@ -17,7 +17,7 @@ if [ ! -x "$TOOLS/generate_appcast" ]; then
     swift package --scratch-path .build/swiftpm resolve
 fi
 mkdir -p "$OUTPUT_DIR"
-ARCHIVE="$OUTPUT_DIR/VibeRemote-$VERSION-$BUILD.zip"
+ARCHIVE="$OUTPUT_DIR/vvhisper-$VERSION-$BUILD.zip"
 if [ -e "$ARCHIVE" ]; then
     echo "Refusing to replace an existing release archive: $ARCHIVE" >&2
     exit 1

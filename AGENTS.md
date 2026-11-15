@@ -1,19 +1,37 @@
 # AGENTS.md
 
+## Product identity (2026-11-15)
+
+The product is now **vvhisper** (lowercase, intentional double v). New app bundles and
+release archives use vvhisper. Default signing is Haolin Fei, team `Q9MD524YL5`;
+notarization defaults to `VVHISPER_NOTARY`, which must be configured for the personal
+account. The helper trust requirement must match this team. Preserve legacy
+`com.viberemote.*` identifiers, SwiftPM targets/resources, storage paths, persisted action
+values, and GitHub/Sparkle URLs for compatibility. Older VibeRemote wording below is
+historical. See `app/Release/README.md` for the signing-team migration and validation.
+
+
 Guidance for AI coding agents working in the VibeRemote repository. Read this
 before making changes — several subsystems depend on hard-won, non-obvious
 platform behavior that is easy to break.
 
 ## What this project is
 
-VibeRemote is an experimental macOS **menu-bar app** (`LSUIElement`, Dock icon
-shown while Settings is open) that:
+vvhisper is an experimental macOS **menu-bar app** (`LSUIElement`) whose product direction
+is a general voice interface to the Mac: speak to write, or speak to get something done.
+The Mac’s built-in microphone and keyboard are the baseline; no dedicated accessory is
+required. Siri Remote and future supported devices enhance the experience.
 
-- Maps Apple Siri Remote buttons to keyboard actions, aimed at driving AI agent apps
-  (arrows, Enter, Shift+Enter, Backspace, bullet-list control, app switching).
-- Shows the paired remote's connection and battery state.
-- **Bridges the Siri Remote microphone** into its own virtual audio device
-  ("VibeRemote") so the remote can be used as a system mic.
+The four priorities are general dictation; faster and easier Computer Use; more device
+support; and product design that fits this direction. See `Design/ProductDirection.md`
+(under `app/`) for scope, current foundations, and planned work.
+
+Current capabilities include Mac-microphone keyboard dictation, transcription and text
+insertion, a Computer Use agent, and Siri Remote buttons, touch, connection/battery status,
+and microphone bridging. Keep device-specific capture requirements separate from the
+core voice experience. The existing remote-first onboarding and Siri-only Auto Computer
+Use routing are current implementation details, not requirements for the future product.
+Do not claim additional devices or redesigned flows are implemented before they are.
 
 It is a three-executable SwiftPM package (app, voice bridge, privileged helper) plus a
 shared library target and shell scripts that build the audio driver and assemble/sign the
@@ -63,7 +81,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `Vendor/SiriRemoteVoiceControl/` | Prebuilt legacy helper binaries (compatibility fallbacks). |
 | `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
 | `build.sh` | SwiftPM build → arm64-only `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
-| `install.sh` | Developer-ID-signed build deployed over `/Applications/VibeRemote.app`; the stable signature is what preserves the TCC grants. |
+| `install.sh` | Developer-ID-signed build deployed over `/Applications/vvhisper.app`; checks signing continuity before atomically replacing the installed bundle. |
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
 | `Dictation.swift`, `DictationEngines.swift`, `DictationPane.swift` | VibeRemote Dictation: recorder, typer, controller; Apple/WhisperKit/OpenAI/Seed ASR engines; Settings pane. |
@@ -98,9 +116,10 @@ source deliberately when preparing a driver distribution under GPL-3.0.
 # Audio driver (only needed when it changes; output is gitignored)
 ./build_audio_driver.sh
 
-# Apple Silicon signed bundle (what actually gets installed)
-./create_app_bundle.sh                 # ad-hoc signed (local "-")
-open VibeRemote.app
+# Apple Silicon bundle signed with the personal Developer ID; does not install
+./create_app_bundle.sh
+# Install and launch the stable /Applications copy for permission/device testing
+./install.sh
 
 # Unit tests + strict concurrency (CI runs both)
 swift test
@@ -112,27 +131,27 @@ swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
 no helper until those scripts run; the app degrades gracefully (falls back to an existing
 BlackHole/Soundflower device and to admin prompts).
 
-**Use `./install.sh` when installing for real testing.** It wraps the Developer ID
-signing command and the deploy-and-relaunch dance below, because ad-hoc signatures change
-every build, which revokes the app's Accessibility / Input Monitoring / Bluetooth TCC
-grants and forces re-approval each time. A stable identity preserves them:
+**Use `./install.sh` when installing for real testing.** It signs with Haolin Fei's
+personal Developer ID (team `Q9MD524YL5`), stages on the destination volume, and verifies
+the source, staged and installed bundles before quitting `/Applications/vvhisper.app`.
+The installer rejects signing-team or designated-requirement changes, then atomically
+exchanges bundles and retains the previous bundle until validation and launch succeed.
+It never silently falls back to ad-hoc signing. A stable designated requirement lets
+macOS recognize the same app across builds; an ad-hoc build can require fresh approvals.
 
 ```bash
-./install.sh                          # picks the first Developer ID identity
-KEEP_BUILD_CACHE=1 ./install.sh      # optional incremental development only
+./install.sh                         # personal Developer ID, fixed installed path
+KEEP_BUILD_CACHE=1 ./install.sh       # optional incremental development only
+python3 -B -m unittest discover -s scripts/tests -p 'test_replace_app_bundle.py'
 ```
 
-Equivalent by hand:
-
-```bash
-SIGNING_MODE=developer \
-CODESIGN_IDENTITY="Developer ID Application: <your identity>" \
-./create_app_bundle.sh
-osascript -e 'tell application "VibeRemote" to quit'
-rm -rf /Applications/VibeRemote.app
-ditto VibeRemote.app /Applications/VibeRemote.app
-open /Applications/VibeRemote.app
-```
+Do not replace this with `rm -rf` followed by a copy, or quit/launch by bundle ID or
+product name: a legacy company-signed development bundle can share `com.viberemote.app`.
+Do not run that legacy copy alongside the personal build. A company-to-personal migration
+requires one-time reapproval and helper migration; see `Release/README.md`. Repeated
+permission loss after matching personal-signed updates is a bug to investigate, not an
+expected reinstall step. `SIGNING_MODE=local ./create_app_bundle.sh` explicitly builds
+ad-hoc code for isolated development only; do not install it over the personal build.
 
 CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27, inside `app/`) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
@@ -604,6 +623,13 @@ reused, so a held ID that no longer resolves is definitive — and re-arms the w
 detection path, which re-seizes the fresh interfaces and re-writes `0xAF`. Do not
 replace this polling probe with IOKit removal notifications alone; the entire reason it
 exists is that the removal callback provably does not arrive in this scenario.
+
+The missing-interface connection lookup must remain authorization-gated and off the main
+actor. During the personal-signing migration on 2026-11-15, `IOBluetoothDevice.pairedDevices()`
+blocked inside its coordinator while Bluetooth permission was unresolved, freezing the whole
+app at the first watchdog tick. `RemoteConnectionRecoveryProbe` permits only one background
+query at a time and invalidates stale results after topology, idle-disconnect and shutdown
+changes. Dictation and Computer Use must remain usable without Bluetooth permission.
 
 ## The virtual audio device
 
@@ -1095,6 +1121,55 @@ makes Dictation per app; the Dictation pane lists the profiles whose Siri resolv
   Auto Disconnect is on the Device pane and is not part of it. The user confirmed the Profile row, Add App and per-app buttons work
   on 2026-11-10.
 
+### Computer Use routing (2026-11-15)
+
+Computer Use now runs local actions first, bounded Jev decisions for ambiguous visible
+conversation targets, and a general OpenRouter agent for remaining tasks. Every model call
+uses the existing OpenRouter Keychain key. Settings exposes Automation Model and Decision
+Model; old CLI preferences are retained but no longer select the runtime backend.
+`AgentLocalActions.swift` owns anchored command parsing and native app/URL dispatch.
+`AgentDecision.swift` uses OpenRouter's Decisions API (not chat completions), validates
+candidate IDs and probabilities, and has a three-second deadline. Candidate text is data,
+never authorization or executable arguments. `AgentConversationActions.swift` observes
+only the focused window's visible conversation navigation in supported chat apps. Semantic
+navigation landmarks and exact-title button/group rows are supported; those buttons/groups
+must never enter Jev's fuzzy choice set. Main/editor content and action controls are excluded.
+Batch metadata reads and child-label reads share a bounded deadline. A truncated scan cannot
+prove uniqueness. `AgentConversationTraversal` is the production traversal used by fixtures:
+64 wrapper levels, 600 total queued nodes, reference deduplication, and distinct depth/node/
+time/read failure diagnostics. Do not restore a separate 200-child cutoff or report every
+early scan failure merely as `scan_limit`; user trials exposed that ambiguity. Verify the
+target's selected/current state or the focused-window title;
+neither keyboard focus nor a selected enclosing project/group proves conversation selection.
+Record reason codes/counts and phase timings without titles or UI text. A request
+may fall back before conversation selection; uncertain dispatched actions must never be
+replayed automatically. Cancellation and app/window focus changes invalidate selection.
+User-confirmed conversation aliases live only in the local `agentConversationAliases`
+preference (bundle ID → shorthand → full title), never as personal titles in source.
+Resolve once before observation; normalized alias collisions stop selection. A resolved
+alias stays exact-only, including when its destination is missing or renamed, and retains
+all navigation/visibility/action/uniqueness/verification checks. Never infer an alias from
+an unverified model completion. The planner fallback keeps the original command.
+An alias target may include a user-confirmed section (`title`/`section` record). Section
+membership comes from an explicitly named container or semantic heading boundaries within
+the same navigation scope, never a guessed sidebar order. Hidden ancestors prune descendants;
+disabled, indented and unreadable headings must not silently lose their boundary. Recheck
+scope before dispatch and after re-rendering. Scoped duplicate titles require the target's
+own selected/current state; a same-name window title cannot prove the intended entry opened.
+User-confirmed app names can pin a bundle ID through local `agentApplicationAliases`;
+do not bake personal app-name preferences into the resolver. Explicit bundle IDs bypass
+these aliases (including IDs ending in `.app`), missing pinned targets never substitute
+another same-name app, and normalized alias collisions stay ambiguous. Routing diagnostics
+record parse/result codes and match counts without commands, app names, titles or keys.
+Popup controls exposing `AXExpanded` are not section headings: honor both `AXHasPopup`
+and `AXPopupValue` before treating a button as a disclosure heading.
+The command bar uses a fixed bottom-center anchor above the Dock, with no icon tracking
+or arrow (2026-11-15). Capture the active screen's visible frame when opening; subsequent
+text/status resizing keeps that anchor. Placement must never reactivate it. Timing logs contain phases/durations only, no commands, titles or keys. The first-action
+metric is a dispatch request, not measured visible UI change. See `Design/ComputerUseRouting.md`
+for supported scope and remaining live verification. The older backend description below is
+historical; preserve remote button and voice invariants while changing this pipeline.
+
 ### Computer-use agent (2026-11-01)
 
 Rebuilt from scratch at the user's request on top of
@@ -1475,3 +1550,43 @@ Build numbers must increase for every published update. Release/README.md descri
 notarization, signed appcast preparation and publication. Preparation never publishes.
 A working build/signature check is not evidence of a public feed or an actual installed
 update. Verify download/install/relaunch from an older signed build before acceptance.
+
+### Computer Use double press (2026-11-15)
+
+Double-tapping Siri or the selected alternative dictation keyboard modifier opens/focuses
+the fixed Computer Use bar. Each tap is at most 220 ms; the second release must arrive
+within 450 ms of the first. Holds keep their dictation behavior. Keyboard chords and other
+remote buttons invalidate the pending tap; physical remotes keep separate tap state.
+Short built-in dictation recordings are cancelled, not submitted. Opening the bar never
+stops an already-running Computer Use command. Synthetic app-generated keyboard events
+remain excluded from the alternative hotkey monitor.
+
+### Helper repair entry point (2026-11-15)
+
+Settings → Siri Remote always offers Set Up / Repair Helper while the daemon is stopped;
+the status menu also offers Repair Helper for an enabled-but-stopped registration.
+Registration status alone is not proof of XPC health. The explicit repair action probes
+the version first, awaits unregistering a stale helper before registering the installed
+bundle, opens Login Items for approval when required, and verifies the current version
+when enabled. The 15-second watchdog rechecks registration: pending approval opens Login
+Items without a failure alert; actual failures remain visible. Version-probe error/reply
+callbacks share a one-shot latch and the version probe has a three-second deadline so a
+non-launching stale job cannot prevent repair from reaching unregister. Do not claim success on
+registration alone. Ordinary manual and automatic daemon starts are prompt-free and show
+setup guidance when the helper is unavailable. They must not silently fall back to an
+administrator-password script. Audio-driver installation remains a separate explicit action.
+
+Verified locally after repair on 2026-11-15: launchd runs the replacement helper under
+personal team Q9MD524YL5; Settings shows Running, and Restart Daemon starts the PacketLogger
+supervisor via XPC without an administrator-script prompt. During migration macOS initially
+returned EPERM immediately after unregister; a subsequent explicit setup succeeded. Do not
+interpret this single-machine result as proof of a seamless migration on every installation.
+
+### Computer Use display selection (2026-11-15)
+
+Every explicit Computer Use `show` (including Siri and alternative-hotkey double presses)
+selects the screen containing the pointer before changing activation policy or taking focus.
+This also moves an already-visible bar when invoked from another monitor. The bar remains
+bottom-centered in that screen's visible frame, above the Dock, and keeps that anchor during
+text/status resizing. Do not use vvhisper's key window / NSScreen.main as the primary screen
+selector; Settings or the previously opened bar can belong to another monitor.

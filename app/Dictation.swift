@@ -679,10 +679,10 @@ final class DictationController: ObservableObject {
                 break
             case .notDetermined:
                 AVCaptureDevice.requestAccess(for: .audio) { _ in }
-                fail("Allow VibeRemote to use the microphone, then try again.")
+                fail("Allow vvhisper to use the microphone, then try again.")
                 return
             default:
-                fail("Microphone access is off for VibeRemote. Turn it on in System Settings › Privacy & Security › Microphone.")
+                fail("Microphone access is off for vvhisper. Turn it on in System Settings › Privacy & Security › Microphone.")
                 return
             }
         }

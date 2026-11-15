@@ -8,8 +8,53 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+@preconcurrency import CoreBluetooth
 import Darwin
 import IOBluetooth
+
+/// IOBluetooth can block indefinitely while its coordinator waits for authorization.
+/// Keep that synchronous API off the main actor, and never accumulate watchdog reads
+/// behind a stalled query. Only value snapshots cross back to the HID owner.
+@MainActor
+final class RemoteConnectionRecoveryProbe {
+    private let queue = DispatchQueue(label: "com.viberemote.connection-recovery", qos: .utility)
+    private let read: @Sendable () -> Set<String>
+    private var inFlight = false
+    private var revision: UInt64 = 0
+
+    init(read: @escaping @Sendable () -> Set<String> = { RemoteConnectionRecoveryProbe.readConnectedAddresses() }) {
+        self.read = read
+    }
+
+    func refresh(authorization: BluetoothAccessState,
+                 receive: @escaping @MainActor @Sendable (Set<String>) -> Void) {
+        guard authorization == .allowed else { invalidate(); return }
+        guard !inFlight else { return }
+        inFlight = true
+        let revision = revision
+        let read = read
+        queue.async { [weak self] in
+            let connected = read()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.inFlight = false
+                guard self.revision == revision else { return }
+                receive(connected)
+            }
+        }
+    }
+
+    /// A query cannot be cancelled inside IOBluetooth. Leave it in flight until it
+    /// returns, but reject its result after shutdown or a newer topology/idle edge.
+    func invalidate() { revision &+= 1 }
+
+    private nonisolated static func readConnectedAddresses() -> Set<String> {
+        // Authorization may have changed while the work was waiting on its queue.
+        guard CBManager.authorization == .allowedAlways else { return [] }
+        let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        return Set(paired.compactMap { $0.isConnected() ? $0.addressString : nil })
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -37,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var initialBluetoothConnections: Set<String> = []
     private var initialBluetoothConnectionTimer: Timer?
     private var pendingIdleDisconnects: Set<String> = []
+    private let remoteConnectionRecoveryProbe = RemoteConnectionRecoveryProbe()
     private var inputAccessPollTimer: Timer?
     private var controlAccessPollTimer: Timer?
     private var hidDetectionStarted = false
@@ -46,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var caretVoiceSuppressed = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🚀 VibeRemote starting...")
+        print("🚀 vvhisper starting...")
 
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
@@ -139,6 +185,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.advancedMenu.dismiss()
             self?.agentPanel.remotePress()
         }
+        let openComputerUse: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.caretController.cancel()
+            self.advancedMenu.dismiss()
+            self.agentPanel.show(fresh: !self.agentPanel.agent.isRunning)
+        }
+        remoteInputHandler?.onSiriDoublePress = openComputerUse
+        DictationHotkeyMonitor.shared.onComputerUseRequested = openComputerUse
         // Auto Computer Use: a Siri dictation hold with no text field in focus fills this bar
         // instead, and its polished transcript is sent as the command on release.
         let agentPanel = self.agentPanel
@@ -187,6 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if state == .allowed {
                 self?.remoteHIDChannel?.startIfAuthorized()
                 self?.startBluetoothConnectionMonitoringIfAuthorized()
+            } else {
+                self?.remoteConnectionRecoveryProbe.invalidate()
             }
         }
         menuBarManager.updateBluetoothAccessState(bluetoothAccessManager.state)
@@ -275,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         rmDebug("🛰 HID watchdog: held interfaces vanished from the IOKit registry; re-arming detection")
+        remoteConnectionRecoveryProbe.invalidate()
         remoteInputHandler.resetForRediscovery()
         remoteDetector?.stopDetection()
         hidDetectionStarted = false
@@ -284,16 +341,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Also handles zero open interfaces after an idle disconnect, which the registry-ID
     /// watchdog cannot detect. Read connection state without initiating any Bluetooth link.
     private func recoverMissingRemoteInterfaces() {
-        guard let remoteInputHandler else { return }
-        let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
-        let connected = Set(paired.compactMap { device -> String? in
-            device.isConnected() ? device.addressString : nil
-        })
-        remoteDetector?.recoverMissingInterfaces(
-            opened: remoteInputHandler.openedInterfaceIDs,
-            connectedAddresses: connected,
-            disconnectingAddresses: pendingIdleDisconnects
-        )
+        guard !didCleanUp, remoteInputHandler != nil else { return }
+        remoteConnectionRecoveryProbe.refresh(authorization: bluetoothAccessManager.state) { [weak self] connected in
+            guard let self, !self.didCleanUp, self.bluetoothAccessManager.state == .allowed,
+                  let remoteInputHandler = self.remoteInputHandler else { return }
+            // Use current handle/idle ownership, never the state from before the query.
+            self.remoteDetector?.recoverMissingInterfaces(
+                opened: remoteInputHandler.openedInterfaceIDs,
+                connectedAddresses: connected,
+                disconnectingAddresses: self.pendingIdleDisconnects
+            )
+        }
     }
 
     /// PacketLogger can remain alive while its local HCI capture session silently stops
@@ -302,7 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arriving and every PID remains valid. Observe the system's connection notification and
     /// debounce recovery until the Bluetooth stack has finished its short reconfiguration.
     private func startBluetoothConnectionMonitoringIfAuthorized() {
-        guard bluetoothAccessManager.state == .allowed,
+        guard !didCleanUp, bluetoothAccessManager.state == .allowed,
               bluetoothConnectNotification == nil else { return }
         // IOBluetooth may immediately replay devices that were already connected when the
         // observer registered. Seed a short-lived suppression set so app launch does not cause
@@ -351,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeDisconnect(address: String) {
+        guard !didCleanUp, bluetoothAccessManager.state == .allowed else { return }
         let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         guard let device = devices.first(where: { $0.addressString?.lowercased() == address }) else { return }
         observeDisconnect(of: device)
@@ -392,6 +451,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleBluetoothDeviceDisconnected(deviceDescription: String, address: String?) {
+        guard !didCleanUp else { return }
+        remoteConnectionRecoveryProbe.invalidate()
         caretController.reset()
         if let address {
             // The notification is spent once it fires; the connect handler re-arms it.
@@ -405,6 +466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleBluetoothDeviceConnected(deviceDescription: String, address: String?) {
+        guard !didCleanUp else { return }
+        remoteConnectionRecoveryProbe.invalidate()
         recoverMissingRemoteInterfaces()
         if let address,
            initialBluetoothConnections.remove(address) != nil {
@@ -426,6 +489,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// only that paired device after its idle timer expires; if lookup fails, HID
     /// keepalive has already stopped and the remote can still enter its normal firmware sleep.
     private func disconnectIdleRemote(deviceKey: String) {
+        guard !didCleanUp else { return }
+        remoteConnectionRecoveryProbe.invalidate()
         pendingIdleDisconnects.insert(deviceKey)
         remoteHIDChannel?.suspendForIdleDisconnect()
         // CoreBluetooth cancellation completes asynchronously. Give it a short head start so
@@ -439,6 +504,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func closeIdleBluetoothConnection(deviceKey: String) {
         defer { pendingIdleDisconnects.remove(deviceKey) }
+        guard !didCleanUp, bluetoothAccessManager.state == .allowed else { return }
+        remoteConnectionRecoveryProbe.invalidate()
         let normalizedKey = deviceKey.lowercased().filter(\.isHexDigit)
         let pairedDevices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         guard let device = pairedDevices.first(where: {
@@ -527,6 +594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cleanup() {
         guard !didCleanUp else { return }
         didCleanUp = true
+        remoteConnectionRecoveryProbe.invalidate()
 
         bridgeHealthTimer?.invalidate()
         bridgeHealthTimer = nil

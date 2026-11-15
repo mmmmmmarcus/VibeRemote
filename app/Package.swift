@@ -52,7 +52,7 @@ let package = Package(
                 "create_app_bundle.sh",
                 "install.sh",
                 "VibeRemote",
-                "VibeRemote.app",
+                "VibeRemote.app", "vvhisper.app",
                 "VibeRemoteVoiceBridge",
                 "VibeRemoteHelper",
                 "VibeRemoteAppIcon.png",
@@ -86,7 +86,7 @@ let package = Package(
                 "RemoteInputHandler.swift",
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
-                "SystemVolume.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
+                "SystemVolume.swift", "AgentLocalActions.swift", "AgentDecision.swift", "AgentConversationModel.swift", "AgentConversationAliases.swift", "AgentConversationSections.swift", "AgentConversationTraversal.swift", "AgentConversationAttributes.swift", "AgentConversationActions.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
                 "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),

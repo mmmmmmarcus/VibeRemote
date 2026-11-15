@@ -371,7 +371,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         super.init(window: window)
         window.delegate = self
-        window.title = "Vibe Remote"
+        window.title = "vvhisper"
         window.identifier = NSUserInterfaceItemIdentifier("VibeRemote.Settings")
         window.isReleasedWhenClosed = false
         // Content runs edge to edge under the transparent title bar; the traffic lights

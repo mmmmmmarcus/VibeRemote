@@ -6,11 +6,15 @@ config = json.loads((root / 'Release/update-config.json').read_text())
 with (app / 'Contents/Info.plist').open('rb') as f:
     info = plistlib.load(f)
 for name, expected in [('SUFeedURL', config['feedURL']), ('SUPublicEDKey', config['publicKey']),
+                       ('CFBundleName', 'vvhisper'), ('CFBundleExecutable', 'vvhisper'),
                        ('CFBundleIdentifier', 'com.viberemote.app'), ('LSMinimumSystemVersion', '27.0')]:
     if info.get(name) != expected:
         raise SystemExit(f'Release configuration mismatch: {name}')
 if not str(info.get('CFBundleVersion', '')).isdigit() or int(info['CFBundleVersion']) < 2:
     raise SystemExit('A monotonically increasing integer build number is required')
+signature = subprocess.run(['codesign', '-dv', '--verbose=2', str(app)], capture_output=True, text=True, check=True)
+if 'TeamIdentifier=Q9MD524YL5' not in signature.stderr.splitlines():
+    raise SystemExit('Release must be signed by the personal Developer ID team Q9MD524YL5')
 framework = app / 'Contents/Frameworks/Sparkle.framework'
 if not framework.exists():
     raise SystemExit('Missing embedded Sparkle framework')

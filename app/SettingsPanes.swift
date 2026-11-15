@@ -299,21 +299,21 @@ enum SetupGuide {
             return "The helper is registered, but macOS is still waiting for you to allow it."
         case .audioDriverMissing(let installable):
             return installable
-                ? "Your voice plays into the VibeRemote audio device, which Mac apps then use as a microphone. That device isn't installed yet."
-                : "Your voice plays into the VibeRemote audio device, which Mac apps then use as a microphone. This build doesn't include the driver."
+                ? "Your voice plays into the vvhisper audio device, which Mac apps then use as a microphone. That device isn't installed yet."
+                : "Your voice plays into the vvhisper audio device, which Mac apps then use as a microphone. This build doesn't include the driver."
         }
     }
 
     static func steps(_ issue: Issue) -> [String] {
         switch issue {
         case .helperNotSetUp:
-            return ["Make sure VibeRemote is running from the Applications folder.",
+            return ["Make sure vvhisper is running from the Applications folder.",
                     "Click Set Up Helper.",
-                    "In Login Items & Extensions, turn on VibeRemote under Allow in the Background.",
+                    "In Login Items & Extensions, turn on vvhisper under Allow in the Background.",
                     "Come back to Settings. This alert clears by itself."]
         case .helperAwaitingApproval:
             return ["Click Open Login Items.",
-                    "Under Allow in the Background, turn on VibeRemote.",
+                    "Under Allow in the Background, turn on vvhisper.",
                     "Enter your password if macOS asks, then come back to Settings."]
         case .audioDriverMissing(true):
             return ["Click Install Audio Driver.",
@@ -321,7 +321,7 @@ enum SetupGuide {
                     "Sound pauses for a moment while macOS restarts its audio service."]
         case .audioDriverMissing(false):
             return ["In the app folder, run ./build_audio_driver.sh.",
-                    "Reinstall VibeRemote with ./install.sh.",
+                    "Reinstall vvhisper with ./install.sh.",
                     "Open Settings again and click Install Audio Driver."]
         }
     }
@@ -605,9 +605,15 @@ private struct DevicePane: View {
                 Text(batteryText(snapshot)).foregroundStyle(.secondary)
             }
         }
-        SettingsRow(title: "Vibe Remote Daemon", subtitle: diagnostics.attention) {
+        SettingsRow(title: "vvhisper Daemon", subtitle: diagnostics.attention) {
             Text(diagnostics.bridgeRunning ? "Running" : "Stopped")
                 .foregroundStyle(diagnostics.bridgeRunning ? Color.secondary : Color.orange)
+        }
+        if !diagnostics.bridgeRunning {
+            SettingsRow(title: "Helper Setup") {
+                Button("Set Up / Repair Helper…", action: actions.setUpHelper)
+                    .controlSize(.small)
+            }
         }
         ForEach(diagnostics.setupIssues) { issue in
             SettingsRow(title: issue.isHelper ? "Helper" : "Audio Driver",
@@ -1023,7 +1029,6 @@ private final class ProfileMenuTarget: NSObject {
 private final class AgentSettingsStore: ObservableObject {
     @Published var settings = AgentSettings.load() { didSet { if settings != oldValue { settings.save() } } }
     @Published private(set) var hasOpenRouterKey = AgentKeychain.openRouterKey() != nil
-    let codexModels = AgentModelCatalog.codex()
 
     func saveOpenRouterKey(_ key: String) {
         AgentKeychain.setOpenRouterKey(key)
@@ -1166,7 +1171,7 @@ private struct AgentPane: View {
                     .padding(.vertical, SettingsMetrics.md)
                     .accessibilityHidden(true)
             } footer: {
-                Text("Press Play/Pause, or any button set to Computer Use — or pick Computer Use in the menu bar. A field pops up from VibeRemote's Dock icon; type or dictate what you want done and send it. The icon turns green while the agent works in the app that was in front.")
+                Text("Open Computer Use from the menu bar, then type or dictate what you want done. A remote button set to Computer Use opens the same bar. The Dock icon turns green while a task is running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1187,71 +1192,57 @@ private struct AgentPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section {
-                SettingsRow(title: "Backend") {
-                    Picker("", selection: $store.settings.backend) {
-                        ForEach(AgentBackend.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityIdentifier("settings.agent.backend")
+                SettingsRow(title: "Automation Model") { modelControl }
+                SettingsRow(title: "Decision Model", subtitle: "Jev chooses between matching targets.") {
+                    TextField("", text: $store.settings.decisionModel,
+                              prompt: Text(AgentSettings.defaultDecisionModel))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 240)
+                        .accessibilityIdentifier("settings.agent.decisionModel")
                 }
-                SettingsRow(title: "Model") { modelControl }
+                SettingsRow(title: "API Key", subtitle: store.hasOpenRouterKey ? "Saved in Keychain" : nil) {
+                    HStack(spacing: SettingsMetrics.md) {
+                        SecureField("", text: $keyDraft, prompt: Text(store.hasOpenRouterKey ? "Replace key" : "sk-or-…"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 200)
+                            .onSubmit(saveKey)
+                        Button("Save", action: saveKey).disabled(keyDraft.isEmpty)
+                    }
+                }
+            } header: {
+                Text("OpenRouter")
             } footer: {
-                SettingsListActions {
-                    Button("Open Agent Panel", action: openPanel)
-                }
-            }
-            if store.settings.backend == .openRouter {
-                Section("OpenRouter") {
-                    SettingsRow(title: "API Key", subtitle: store.hasOpenRouterKey ? "Saved in Keychain" : nil) {
-                        HStack(spacing: SettingsMetrics.md) {
-                            SecureField("", text: $keyDraft, prompt: Text(store.hasOpenRouterKey ? "Replace key" : "sk-or-…"))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 200)
-                                .onSubmit(saveKey)
-                            Button("Save", action: saveKey).disabled(keyDraft.isEmpty)
-                        }
+                VStack(alignment: .leading, spacing: SettingsMetrics.sm) {
+                    Text("Routine actions run on your Mac. When judgment or planning is needed, both models use your OpenRouter key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsListActions {
+                        Button("Open Computer Use", action: openPanel)
                     }
                 }
             }
         }
     }
 
-    @ViewBuilder private var modelControl: some View {
-        switch store.settings.backend {
-        case .claudeCode:
-            modelPicker(AgentModelCatalog.choices(AgentModelCatalog.claudeCode, keeping: store.settings.claudeModel),
-                        selection: $store.settings.claudeModel)
-        case .codex:
-            modelPicker(AgentModelCatalog.choices(store.codexModels, keeping: store.settings.codexModel),
-                        selection: $store.settings.codexModel)
-        case .openRouter:
-            HStack(spacing: SettingsMetrics.xs) {
-                TextField("", text: $store.settings.openRouterModel, prompt: Text(AgentSettings.defaultOpenRouterModel))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
-                Menu {
-                    ForEach(AgentModelCatalog.openRouterSuggestions, id: \.self) { model in
-                        Button(model) { store.settings.openRouterModel = model }
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
+    private var modelControl: some View {
+        HStack(spacing: SettingsMetrics.xs) {
+            TextField("", text: $store.settings.openRouterModel, prompt: Text(AgentSettings.defaultOpenRouterModel))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .accessibilityIdentifier("settings.agent.model")
+            Menu {
+                ForEach(AgentModelCatalog.openRouterSuggestions, id: \.self) { model in
+                    Button(model) { store.settings.openRouterModel = model }
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("Suggested models")
+            } label: {
+                Image(systemName: "chevron.down")
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Suggested automation models")
         }
-    }
-
-    private func modelPicker(_ choices: [AgentModelChoice], selection: Binding<String>) -> some View {
-        Picker("", selection: selection) {
-            ForEach(choices, id: \.id) { Text($0.title).tag($0.id) }
-        }
-        .labelsHidden()
-        .fixedSize()
-        .accessibilityIdentifier("settings.agent.model")
     }
 
     private func saveKey() {
@@ -1360,7 +1351,7 @@ private struct AboutPane: View {
                         .frame(width: 88, height: 88)
                         .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
                     VStack(spacing: SettingsMetrics.sm) {
-                        Text("Vibe Remote").font(.title.weight(.bold))
+                        Text("vvhisper").font(.title.weight(.bold))
                         Text(version)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
