@@ -77,8 +77,8 @@ cp "$EXECUTABLE_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
 ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
 
 echo "Compiling Icon Composer app icon: $ICON_SOURCE"
-DEVELOPER_DIR="$icon_developer_dir" xcrun actool "$ICON_SOURCE" \
-    --compile "${APP_BUNDLE}/Contents/Resources" \
+DEVELOPER_DIR="$icon_developer_dir" xcrun actool "$ROOT_DIR/$ICON_SOURCE" \
+    --compile "$ROOT_DIR/${APP_BUNDLE}/Contents/Resources" \
     --platform macosx \
     --minimum-deployment-target 27.0 \
     --app-icon "VibeRemote" \
