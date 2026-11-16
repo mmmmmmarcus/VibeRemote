@@ -1,6 +1,6 @@
 //
 //  SystemVolume.swift
-//  VibeRemote
+//  vvhisper
 //
 //  CoreAudio volume read/write + a listener-based revert guard that reverses
 //  AVRCP-origin volume changes during a short window after a remote volume HID press.

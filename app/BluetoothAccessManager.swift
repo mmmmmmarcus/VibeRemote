@@ -1,6 +1,6 @@
 //
 //  BluetoothAccessManager.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Keeps Bluetooth authorization optional and explicitly user initiated.
 //

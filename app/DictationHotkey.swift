@@ -137,8 +137,8 @@ struct ComputerUseDoubleTap {
 }
 
 /// Watches the keyboard for the chosen hotkey and drives `DictationController`. Global monitors
-/// cover other apps (they need the Accessibility grant VibeRemote already has); local monitors
-/// cover VibeRemote's own windows. Events VibeRemote posts itself (a Siri mapping that holds Right
+/// cover other apps (they need the Accessibility grant vvhisper already has); local monitors
+/// cover vvhisper's own windows. Events vvhisper posts itself (a Siri mapping that holds Right
 /// Option, the typewriter's keystrokes) are ignored, so the remote can never trigger the hotkey.
 @MainActor
 final class DictationHotkeyMonitor {
@@ -183,17 +183,20 @@ final class DictationHotkeyMonitor {
         case .begin:
             _ = taps.update(down: true, now: event.timestamp)
             rmDebug("🗣 Dictation hotkey \(hotkey.title) down")
-            DictationController.shared.begin(source: .macMicrophone)
+            DictationController.shared.begin(source: SoundcoreManager.shared.useForHotkey ? .soundcore : .macMicrophone)
         case .end:
             let open = taps.update(down: false, now: event.timestamp)
-            if DictationController.shared.recordingSource == .macMicrophone {
+            if DictationController.shared.recordingSource == .soundcore {
+                SoundcoreManager.shared.endDictation(cancel: taps.shortRelease)
+            } else if DictationController.shared.recordingSource == .macMicrophone {
                 if taps.shortRelease { DictationController.shared.cancel() }
                 else { DictationController.shared.end() }
             }
             if open { onComputerUseRequested?() }
         case .cancel:
             taps.reset()
-            if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.cancel() }
+            if DictationController.shared.recordingSource == .soundcore { SoundcoreManager.shared.endDictation(cancel: true) }
+            else if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.cancel() }
         }
     }
 }

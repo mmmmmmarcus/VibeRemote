@@ -4,7 +4,7 @@ import Security
 
 // Computer Use: local actions, bounded Jev decisions, and an OpenRouter planner operate the Mac
 // through the bundled agent-desktop CLI, which reads and acts on native accessibility trees.
-// VibeRemote only collects the spoken command, starts the planner and shows its progress.
+// vvhisper only collects the spoken command, starts the planner and shows its progress.
 
 enum AgentBackend: String, CaseIterable, Sendable {
     case claudeCode, codex, openRouter

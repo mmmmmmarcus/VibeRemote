@@ -1,6 +1,6 @@
 //
 //  SiriRemoteApp.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Menu bar application for controlling Mac with Siri Remote
 //
@@ -17,7 +17,7 @@ import IOBluetooth
 /// behind a stalled query. Only value snapshots cross back to the HID owner.
 @MainActor
 final class RemoteConnectionRecoveryProbe {
-    private let queue = DispatchQueue(label: "com.viberemote.connection-recovery", qos: .utility)
+    private let queue = DispatchQueue(label: "com.vvhisper.connection-recovery", qos: .utility)
     private let read: @Sendable () -> Set<String>
     private var inFlight = false
     private var revision: UInt64 = 0
@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         // The keyboard dictation hotkey; idle until one is chosen in Settings › Dictation.
         DictationHotkeyMonitor.shared.start()
+        SoundcoreManager.shared.start()
         
         // Create menu bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -119,6 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         // Which Siri Remote family is attached decides the button profile and the microphone
         // path, and it is only knowable once its HID interfaces are open.
+        remoteInputHandler?.onConnectedFamiliesChanged = { [weak self] families in
+            self?.menuBarManager.updateConnectedFamilies(families)
+        }
         remoteInputHandler?.onGenerationChanged = { [weak self] generation in
             self?.menuBarManager.updateRemoteGeneration(generation)
             self?.microphoneBridgeManager.updateRemoteGeneration(generation)
@@ -132,7 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteInputHandler?.onDictationBegin = { generation in
             DictationController.shared.begin(followsLaterSessions: generation == .glassTouchSurface)
         }
-        remoteInputHandler?.onDictationEnd = { DictationController.shared.end() }
+        remoteInputHandler?.onDictationEnd = {
+            if DictationController.shared.recordingSource == .remote { DictationController.shared.end() }
+        }
         
         // Start remote detection
         remoteDetector = RemoteDetector(
@@ -595,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !didCleanUp else { return }
         didCleanUp = true
         remoteConnectionRecoveryProbe.invalidate()
+        SoundcoreManager.shared.shutdown()
 
         bridgeHealthTimer?.invalidate()
         bridgeHealthTimer = nil
@@ -656,7 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func usesPassiveButtonCapture(generation: RemoteGeneration) -> Bool {
         RemoteButtonMapping.usesPassiveCapture(generation: generation,
-            packetLogger: UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger",
+            packetLogger: MicrophoneBridgeEngine.usesPacketLogger,
             mediaTap: mediaKeyInterceptorStarted)
     }
 

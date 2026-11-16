@@ -1,6 +1,6 @@
 //
 //  PrivilegedHelperClient.swift
-//  VibeRemote
+//  vvhisper
 //
 //  App-side access to the privileged helper daemon. Registering the daemon asks the user for
 //  approval once (System Settings › Login Items & Extensions); after that the app performs

@@ -3,7 +3,7 @@ import Foundation
 import RemoteAudioProtocol
 
 /// Writes each allowed voice session's decoded PCM to `DictationAudioFile` as it decodes, so
-/// VibeRemote Dictation can transcribe it at protocol end instead of re-recording the virtual
+/// vvhisper Dictation can transcribe it at protocol end instead of re-recording the virtual
 /// device after its output drains. It is fed beside the audio output, never instead of it:
 /// mapped dictation keys still follow the output drain, because a third-party dictation app
 /// hears only what the device plays.
@@ -18,7 +18,7 @@ final class DictationAudioWriter: @unchecked Sendable {
     static let retention: TimeInterval = 10
 
     private let path: String
-    private let queue = DispatchQueue(label: "com.viberemote.dictationAudio")
+    private let queue = DispatchQueue(label: "com.vvhisper.dictationAudio")
     private var handle: FileHandle?
     private var header: DictationAudioFile.Header?
     private var writtenSamples = 0

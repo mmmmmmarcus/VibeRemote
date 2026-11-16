@@ -1,6 +1,6 @@
 //
 //  main.swift
-//  VibeRemoteHelper
+//  vvhisperHelper
 //
 //  A root LaunchDaemon registered through SMAppService. The user approves it once, and it
 //  then performs the privileged work the microphone bridge needs — installing the virtual
@@ -87,7 +87,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     // MARK: - Privileged capabilities (invoked via HelperRequestHandler)
 
     func installAudioDriver(fromPath sourcePath: String, reply: @escaping (Bool, String?) -> Void) {
-        // The source must be a driver bundle inside a signed VibeRemote app; refuse anything
+        // The source must be a driver bundle inside a signed vvhisper app; refuse anything
         // else so this cannot be used to drop arbitrary code into the system HAL directory.
         guard sourcePath.hasSuffix("/\(audioDriverBundleName)"),
               FileManager.default.fileExists(atPath: sourcePath),
@@ -249,7 +249,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             throw NSError(
-                domain: "VibeRemote.Helper",
+                domain: "vvhisper.Helper",
                 code: Int(process.terminationStatus),
                 userInfo: [NSLocalizedDescriptionKey: "Restarting coreaudiod failed."]
             )
@@ -306,7 +306,7 @@ final class HelperRequestHandler: NSObject, HelperProtocol {
     }
 }
 
-helperLog("VibeRemote helper starting (version \(HelperConstants.version))")
+helperLog("vvhisper helper starting (version \(HelperConstants.version))")
 let service = HelperService()
 let listener = NSXPCListener(machServiceName: HelperConstants.machServiceName)
 listener.delegate = service

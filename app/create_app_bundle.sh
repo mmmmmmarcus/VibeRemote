@@ -6,10 +6,10 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
 APP_NAME="vvhisper"
-EXECUTABLE_NAME="VibeRemote"
+EXECUTABLE_NAME="vvhisper"
 APP_BUNDLE="${APP_NAME}.app"
-ENTITLEMENTS="VibeRemote.entitlements"
-ICON_SOURCE="VibeRemote.icon"
+ENTITLEMENTS="vvhisper.entitlements"
+ICON_SOURCE="vvhisper.icon"
 ICON_INFO_PLIST="$ROOT_DIR/.build/app-icon-info.plist"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.viberemote.app}"
 APP_VERSION="${APP_VERSION:-0.3.4}"
@@ -74,19 +74,19 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources" "${APP_BUNDLE}/Contents/Frameworks"
 ditto ".build/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
 cp "$EXECUTABLE_NAME" "${APP_BUNDLE}/Contents/MacOS/$APP_NAME"
-ditto ".build/VibeRemote_VibeRemote.bundle" "${APP_BUNDLE}/Contents/Resources/VibeRemote_VibeRemote.bundle"
+ditto ".build/vvhisper_vvhisper.bundle" "${APP_BUNDLE}/Contents/Resources/vvhisper_vvhisper.bundle"
 
 echo "Compiling Icon Composer app icon: $ICON_SOURCE"
 DEVELOPER_DIR="$icon_developer_dir" xcrun actool "$ROOT_DIR/$ICON_SOURCE" \
     --compile "$ROOT_DIR/${APP_BUNDLE}/Contents/Resources" \
     --platform macosx \
     --minimum-deployment-target 27.0 \
-    --app-icon "VibeRemote" \
+    --app-icon "vvhisper" \
     --output-partial-info-plist "$ICON_INFO_PLIST" \
     --output-format human-readable-text
 
 voice_resources="${APP_BUNDLE}/Contents/Resources/SiriRemoteVoiceControl"
-voice_bridge_binary="VibeRemoteVoiceBridge"
+voice_bridge_binary="vvhisperVoiceBridge"
 if [ "$INCLUDE_VOICE_HELPER" = "1" ] && [ -x "$voice_bridge_binary" ]; then
     mkdir -p "$voice_resources"
     cp "$voice_bridge_binary" "$voice_resources/"
@@ -101,10 +101,12 @@ fi
 # Bundle the privileged helper daemon and its launchd plist. SMAppService requires the
 # executable in Contents/MacOS and the plist in Contents/Library/LaunchDaemons, with the
 # plist's Label matching its filename and BundleProgram pointing at the executable.
+# Preserve the registered launchd executable path across the source/target rename.
+helper_build_binary="vvhisperHelper"
 helper_daemon_binary="VibeRemoteHelper"
 helper_daemon_label="com.viberemote.helper"
-if [ "${INCLUDE_PRIVILEGED_HELPER:-1}" = "1" ] && [ -x "$helper_daemon_binary" ]; then
-    cp "$helper_daemon_binary" "${APP_BUNDLE}/Contents/MacOS/$helper_daemon_binary"
+if [ "${INCLUDE_PRIVILEGED_HELPER:-1}" = "1" ] && [ -x "$helper_build_binary" ]; then
+    cp "$helper_build_binary" "${APP_BUNDLE}/Contents/MacOS/$helper_daemon_binary"
     chmod 755 "${APP_BUNDLE}/Contents/MacOS/$helper_daemon_binary"
     mkdir -p "${APP_BUNDLE}/Contents/Library/LaunchDaemons"
     cat > "${APP_BUNDLE}/Contents/Library/LaunchDaemons/${helper_daemon_label}.plist" <<PLIST
@@ -205,11 +207,11 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>vvhisper uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
+	<string>vvhisper uses Bluetooth to connect supported voice devices, receive microphone audio, and read battery state.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>vvhisper uses Bluetooth to receive Siri Remote microphone audio and read battery state.</string>
+	<string>vvhisper uses Bluetooth to connect supported voice devices, receive microphone audio, and read battery state.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>vvhisper Dictation records the Siri Remote microphone while you hold Siri, then types what you said.</string>
+	<string>vvhisper uses your selected microphone for voice input while you hold your dictation shortcut or run a microphone test.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>vvhisper Dictation can turn your speech into text with Apple's on-device speech recognition.</string>
 </dict>
@@ -229,7 +231,7 @@ fi
 
 python3 scripts/sign-sparkle.py "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" "$signing_identity"
 
-helper="${voice_resources}/VibeRemoteVoiceBridge"
+helper="${voice_resources}/vvhisperVoiceBridge"
 if [ -f "$helper" ]; then
     if [ "$signing_identity" != "-" ]; then
         codesign --force --options runtime "${timestamp_args[@]}" --sign "$signing_identity" "$helper"

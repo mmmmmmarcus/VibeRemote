@@ -25,7 +25,7 @@ final class DictationBridgeAudioReader: DictationAudioSource, @unchecked Sendabl
     private let excluded: Set<UUID>
     private let followsLaterSessions: Bool
     private let onSamples: (@Sendable ([Float]) -> Void)?
-    private let queue = DispatchQueue(label: "com.viberemote.dictation.bridgeAudio")
+    private let queue = DispatchQueue(label: "com.vvhisper.dictation.bridgeAudio")
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: DictationAudioFile.sampleRate,
                                        channels: 1, interleaved: false)!
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: DictationAudio.sampleRate,

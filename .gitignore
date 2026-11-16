@@ -1,6 +1,7 @@
 # Build artifacts
 VibeRemote
 VibeRemoteVoiceBridge
+vvhisperVoiceBridge
 VibeRemote.app/
 
 # Xcode
@@ -44,3 +45,8 @@ VibeRemoteHelper
 app/Release/artifacts/
 
 vvhisper.app/
+
+# Current product build outputs
+app/vvhisper
+app/vvhisperVoiceBridge
+app/vvhisperHelper

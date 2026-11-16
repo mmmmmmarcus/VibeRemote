@@ -3,8 +3,8 @@ import Foundation
 import Speech
 import WhisperKit
 
-// VibeRemote Dictation's speech-to-text services. Every engine receives the same finished
-// clip — 16 kHz mono float samples recorded from the VibeRemote input device while Siri was
+// vvhisper Dictation's speech-to-text services. Every engine receives the same finished
+// clip — 16 kHz mono float samples recorded from the vvhisper input device while Siri was
 // held — and returns plain text. One clip per hold keeps the engines interchangeable: the
 // remote only streams audio while Siri is physically down, so there is never an open-ended
 // session to stream partial results from.
@@ -265,7 +265,7 @@ struct OpenAIDictationEngine: DictationEngine {
 
     /// Multipart form exactly as the transcription endpoint documents it.
     static func request(audio: DictationAudio, apiKey: String, model: String, language: String, prompt: String? = nil,
-                        boundary: String = "VibeRemote-\(UUID().uuidString)") -> URLRequest {
+                        boundary: String = "vvhisper-\(UUID().uuidString)") -> URLRequest {
         var request = URLRequest(url: endpoint, timeoutInterval: 60)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

@@ -1,6 +1,6 @@
 //
 //  RemoteInputHandler.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Processes HID input events from Siri Remote
 //
@@ -97,6 +97,7 @@ final class RemoteInputHandler {
     private(set) var generation: RemoteGeneration = .unknown
 
     var onGenerationChanged: ((RemoteGeneration) -> Void)?
+    var onConnectedFamiliesChanged: (([RemoteGeneration: String]) -> Void)?
     /// The Bluetooth name of the remote the menu describes, or nil when it cannot be read.
     var onRemoteNameChanged: ((String?) -> Void)?
     private var lastReportedName: String?
@@ -113,7 +114,7 @@ final class RemoteInputHandler {
     private var pendingVoiceTailReleaseTimers: [String: Timer] = [:]
     private var voiceEndedObserver: NSObjectProtocol?
     private var dictationAudioObserver: NSObjectProtocol?
-    /// VibeRemote Dictation, keyed like `heldKeys`: begin on Siri down, end once the voice
+    /// vvhisper Dictation, keyed like `heldKeys`: begin on Siri down, end once the voice
     /// tail drains (the same moment a mapped dictation key is released).
     /// Receives the remote's generation: the first-generation tail re-press continues a hold.
     var onDictationBegin: ((RemoteGeneration) -> Void)?
@@ -166,7 +167,7 @@ final class RemoteInputHandler {
                 self.finishPendingVoiceTailRelease()
             }
         }
-        // VibeRemote Dictation reads the helper's session file, which is complete at protocol
+        // vvhisper Dictation reads the helper's session file, which is complete at protocol
         // end, so its hold ends then instead of waiting for the output to drain. Mapped
         // dictation keys still wait for the drain: their app hears only what is played.
         dictationAudioObserver = DistributedNotificationCenter.default().addObserver(
@@ -294,6 +295,12 @@ final class RemoteInputHandler {
         // reports.
         deviceGenerations = RemoteGeneration.classifyAll(interfaces: descriptors)
         generation = RemoteGeneration.primary(interfaces: descriptors)
+        var families: [RemoteGeneration: String] = [:]
+        for (key, family) in deviceGenerations where family != .unknown {
+            let interfaces = descriptors.filter { $0.deviceKey == key }
+            families[family] = RemoteGeneration.primaryName(interfaces: interfaces) ?? family.displayName
+        }
+        onConnectedFamiliesChanged?(families)
         // The name belongs to the same physical remote as `generation`, but it can change
         // without it: interfaces arrive one at a time, and swapping between two remotes of
         // the same family never moves the generation. Report it before the guard below.
@@ -1157,7 +1164,7 @@ final class RemoteInputHandler {
             // Quick tap types the focused app's skill-picker trigger; holding
             // arms the button as a modifier for the chords in `modifierChord(for:)`.
             beginModifierHold(button: button) { [weak self] in self?.sendSkillPickerTrigger() }
-        case .spaceKey, .rightCmd, .rightOpt, .vibeDictation:
+        case .spaceKey, .rightCmd, .rightOpt, .vvhisperDictation:
             break // handled above
         }
     }
@@ -1454,7 +1461,7 @@ final class RemoteInputHandler {
 
     /// Press a virtual key and retain its exact specification until this HID button is released.
     private func beginHoldAction(_ action: ButtonAction, button: String, generation: RemoteGeneration) {
-        if action == .vibeDictation {
+        if action == .vvhisperDictation {
             if beginDictationHold(button: button, generation: generation) { markSiriHoldStarted(button) }
             return
         }

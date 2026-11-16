@@ -4,10 +4,10 @@ import AVFoundation
 import CoreAudio
 import Speech
 
-// VibeRemote Dictation: Siri held = record, Siri released (after the bridge drains) = turn the
+// vvhisper Dictation: Siri held = record, Siri released (after the bridge drains) = turn the
 // clip into text and type it into the focused app. The mechanism mirrors mapping Siri to a
 // third-party dictation app — the remote still streams audio only while Siri is physically
-// held — but VibeRemote records the bridge's own virtual device and runs the speech service
+// held — but vvhisper records the bridge's own virtual device and runs the speech service
 // itself, so no other app or shortcut is involved. Transcripts are never logged.
 
 /// The user's dictation choices. Keys live in the Keychain, everything else in defaults.
@@ -468,7 +468,7 @@ enum DictationLevelMeter {
 }
 
 /// The orange twin of the caret cursor. While a hold is recording it stands at the insertion
-/// point with a mic that fills with the live input level, so the user can see that VibeRemote
+/// point with a mic that fills with the live input level, so the user can see that vvhisper
 /// is hearing them and where the words will land. While the clip is transcribed, a spinner
 /// replaces the mic. Reuses `CaretOverlay`, so it is the same silhouette the user already
 /// knows from caret positioning; a Siri press cancels positioning, so the two are never on
@@ -662,7 +662,7 @@ final class DictationController: ObservableObject {
 
     /// Where a hold's audio comes from: the remote (Siri held, through the bridge's virtual
     /// device) or the Mac's own microphone (the keyboard hotkey).
-    enum Source: Equatable { case remote, macMicrophone }
+    enum Source: Equatable { case remote, macMicrophone, soundcore }
     private var source: Source = .remote
     /// The source of the hold that is recording, if any: the hotkey only ends or cancels its own.
     var recordingSource: Source? { recorder == nil ? nil : source }
@@ -709,7 +709,7 @@ final class DictationController: ObservableObject {
         // Auto Computer Use: a hold into the open, waiting bar goes there at once; otherwise, with
         // the switch on, the focused element decides once the probe below answers.
         let target = HoldTarget()
-        if source == .remote, AutoComputerUse.isEnabled, let handoff = computerUse, !handoff.isBusy() {
+        if source != .macMicrophone, AutoComputerUse.isEnabled, let handoff = computerUse, !handoff.isBusy() {
             if handoff.isComposing() {
                 target.kind = .computerUse
                 target.base = handoff.text()
@@ -733,7 +733,16 @@ final class DictationController: ObservableObject {
             Task { @MainActor in self?.indicator.hear(rms: rms) }
         }
         let capture: any DictationAudioSource
-        if let device {
+        if source == .soundcore {
+            do { capture = try SoundcoreManager.shared.makeCapture(onSamples: onSamples) }
+            catch {
+                live?.cancel()
+                live?.typewriter.stop("Soundcore unavailable")
+                refinement?.cancel()
+                fail(error.localizedDescription)
+                return
+            }
+        } else if let device {
             let recorder = DictationRecorder()
             do {
                 try recorder.start(deviceID: device, onSamples: onSamples)
@@ -940,6 +949,7 @@ final class DictationController: ObservableObject {
             live?.typewriter.stop("no audio")
             if hold == holdCount {
                 fail(source == .remote ? "No audio arrived. Check that the voice bridge is running."
+                                       : source == .soundcore ? "No audio arrived from Soundcore Work."
                                        : "No audio arrived from the Mac's microphone.")
             }
             return
@@ -1147,7 +1157,7 @@ enum DictationEditorContext {
     }
 
     /// Reads off the main thread; `then` runs on that background queue once the box is filled
-    /// (at once, with nil, when VibeRemote itself is in front).
+    /// (at once, with nil, when vvhisper itself is in front).
     static func read(then: (@Sendable (String?) -> Void)? = nil) -> Box {
         let box = Box()
         guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,

@@ -1,6 +1,6 @@
 //
 //  main.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Application entry point
 //

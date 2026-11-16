@@ -69,7 +69,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         // The title stays for the Window menu and accessibility but is never drawn.
         window.title = "vvhisper"
         window.titleVisibility = .hidden
-        window.identifier = .init("VibeRemote.Onboarding")
+        window.identifier = .init("vvhisper.Onboarding")
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -105,7 +105,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
 @MainActor
 func restoreAccessoryPolicy(closing window: NSWindow?) {
-    let setupIDs = ["VibeRemote.Settings", "VibeRemote.Onboarding"]
+    let setupIDs = ["vvhisper.Settings", "vvhisper.Onboarding", "vvhisper.Diagnostics"]
     let otherWindow = NSApp.windows.contains {
         $0 !== window && ($0.isVisible || $0.isMiniaturized) && setupIDs.contains($0.identifier?.rawValue ?? "")
     }

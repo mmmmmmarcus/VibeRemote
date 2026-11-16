@@ -15,7 +15,7 @@ private enum BridgeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .audioDeviceNotFound:
-            return "No vvhisper (or legacy VibeRemote/ BlackHole/Soundflower) virtual audio device was found."
+            return "No supported virtual audio device was found."
         case .audioDeviceQuery(let status):
             return "Could not enumerate audio devices (OSStatus \(status))."
         case .audioDeviceSelection(let status):
@@ -86,7 +86,7 @@ private func preferredOutputDevice() throws -> (AudioDeviceID, String) {
     }
     guard status == noErr else { throw BridgeError.audioDeviceQuery(status) }
 
-    // Prefer the VibeRemote driver we install ourselves; the others keep an existing
+    // Prefer the vvhisper driver we install ourselves; the others keep an existing
     // BlackHole/Soundflower setup working. Must stay in sync with the app's device list.
     for expectedName in ["vvhisper", "VibeRemote", "BlackHole 2ch", "Soundflower (2ch)"] {
         if let device = devices.first(where: { audioDeviceName($0) == expectedName }) {
@@ -181,7 +181,7 @@ private final class VirtualAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     private let lock = NSLock()
     /// Rebuilds run here so a burst of audio-hardware changes cannot overlap, and so the
     /// retry backoff never blocks the decode loop.
-    private let controlQueue = DispatchQueue(label: "com.viberemote.voicebridge.audioControl")
+    private let controlQueue = DispatchQueue(label: "com.vvhisper.voicebridge.audioControl")
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var rebuildInFlight = false

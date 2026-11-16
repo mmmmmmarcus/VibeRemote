@@ -42,10 +42,11 @@ struct ButtonProfileSet: Equatable, Sendable {
         return bundleID
     }
 
-    func siriAction(profile id: String) -> ButtonAction {
-        let fallback = general.siriAction ?? Self.siriDefault
-        guard id != ButtonProfile.generalID else { return fallback }
-        return profile(id: id)?.siriAction ?? fallback
+    func siriAction(profile id: String, generation: RemoteGeneration? = nil) -> ButtonAction {
+        let base = general.siriAction ?? Self.siriDefault
+        let fallback = generation.flatMap { general.overrides[$0]?["siri"] } ?? base
+        guard id != ButtonProfile.generalID, let app = profile(id: id) else { return fallback }
+        return generation.flatMap { app.overrides[$0]?["siri"] } ?? app.siriAction ?? fallback
     }
 
     /// General's choices with the app's explicit ones on top.
@@ -58,14 +59,14 @@ struct ButtonProfileSet: Equatable, Sendable {
     }
 
     func action(button: String, generation: RemoteGeneration, profile id: String) -> ButtonAction {
-        RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriAction(profile: id),
+        RemoteButtonMapping.action(button: button, generation: generation, siriAction: siriAction(profile: id, generation: generation),
                                    overrides: overrides(profile: id, generation: generation))
     }
 
     /// Whether `key` ("siri" or an override key) follows General in this app profile.
     func inherits(_ key: String, profile id: String, generation: RemoteGeneration) -> Bool {
         guard id != ButtonProfile.generalID, let app = profile(id: id) else { return false }
-        if key == "siri" { return app.siriAction == nil }
+        if key == "siri" { return app.overrides[generation]?["siri"] == nil && app.siriAction == nil }
         return app.overrides[generation]?[RemoteButtonMapping.overrideKey(key)] == nil
     }
 
@@ -94,7 +95,22 @@ struct ButtonProfileSet: Equatable, Sendable {
         }
     }
 
-    mutating func setSiri(_ action: ButtonAction?, profile id: String) {
+    mutating func setSiri(_ action: ButtonAction?, profile id: String, generation: RemoteGeneration? = nil) {
+        if let generation {
+            if let action, !action.isAssignableToSiriButton { return }
+            update(id) { profile in
+                // Materialize legacy per-profile choices for both models before splitting.
+                if let legacy = profile.siriAction {
+                    for family in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] where profile.overrides[family]?["siri"] == nil {
+                        profile.overrides[family, default: [:]]["siri"] = legacy
+                    }
+                    profile.siriAction = profile.isGeneral ? Self.siriDefault : nil
+                }
+                profile.overrides[generation, default: [:]]["siri"] = action ?? (profile.isGeneral ? Self.siriDefault : nil)
+                if profile.overrides[generation]?.isEmpty == true { profile.overrides[generation] = nil }
+            }
+            return
+        }
         if let action, !action.isAssignableToSiriButton { return }
         update(id) { profile in profile.siriAction = profile.isGeneral ? (action ?? Self.siriDefault) : action }
     }
@@ -112,7 +128,14 @@ struct ButtonProfileSet: Equatable, Sendable {
 
     /// Restore Defaults for one profile: General loses every choice, an app profile returns to
     /// its seed.
-    mutating func restore(_ id: String) {
+    mutating func restore(_ id: String, generation: RemoteGeneration? = nil) {
+        if let generation {
+            setSiri(id == ButtonProfile.generalID ? Self.siriDefault : nil, profile: id, generation: generation)
+            update(id) { profile in
+                profile.overrides[generation] = profile.isGeneral ? ["siri": Self.siriDefault] : nil
+            }
+            return
+        }
         if id == ButtonProfile.generalID {
             general.siriAction = Self.siriDefault
             general.overrides = [:]
@@ -231,7 +254,7 @@ enum ButtonProfileStore {
                   let buttons = value as? [String: String] else { continue }
             for (button, rawAction) in buttons {
                 guard let action = ButtonAction(rawValue: rawAction),
-                      RemoteButtonMapping.choices(button: button, generation: generation)?.contains(action) == true
+                      (button == "siri" ? action.isAssignableToSiriButton : RemoteButtonMapping.choices(button: button, generation: generation)?.contains(action) == true)
                 else { continue }
                 result[generation, default: [:]][button] = action
             }
@@ -270,7 +293,7 @@ struct ButtonProfileLatch {
 // MARK: - Installed apps
 
 /// The apps Settings' Add App menu offers: every application bundle in the standard folders,
-/// one entry per bundle identifier, sorted by name. VibeRemote itself is left out.
+/// one entry per bundle identifier, sorted by name. vvhisper itself is left out.
 struct InstalledApp: Equatable, Sendable {
     let bundleID: String
     let name: String

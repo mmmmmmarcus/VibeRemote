@@ -13,7 +13,7 @@ separates current functionality from planned work.
 ## Using the Mac alone
 
 In Settings › Dictation, choose a service and configure the keyboard modifier under
-**Alternative Dictation Hotkey** (its current UI name). Hold that key alone to dictate
+**Voice Input**. Hold that key alone to dictate
 through the Mac’s microphone; release it to finish. The Microphone menu can follow the
 system input or select the built-in microphone explicitly.
 
@@ -22,6 +22,17 @@ Return to submit. Configure its OpenRouter models and key in Settings › Comput
 currently applies only to Siri Remote dictation holds; the keyboard path uses the bar
 and explicit submission. The first-run guide still emphasizes remote setup and is part
 of the planned product-design work.
+
+## Settings and diagnostics
+
+Dictionary has its own Settings tab and uses the same saved vocabulary across voice inputs.
+Open **About → Open Diagnostics…** for hardware reports, helper/daemon repair, logs and
+Soundcore microphone testing. Diagnostics opens in a separate retained window; it can
+stay open when Settings closes. It shares the app's existing hardware connections.
+
+Build targets and source assets now use vvhisper. A small set of old identifiers is kept
+for installed permissions, saved data and driver compatibility; see
+[Naming compatibility](Design/NamingCompatibility.md).
 
 ## Optional Siri Remote integration
 
@@ -33,13 +44,13 @@ Both Siri Remote hardware families are supported:
 | Buttons | Menu, TV, Play/Pause, Siri, Volume ± | adds Power and Mute |
 | Microphone | HID report sniffing (see below) | dedicated `0xFA` audio collection |
 
-The app detects which one is attached and switches layout automatically; both can be
-paired at the same time and each keeps its own mapping.
+Both can be paired at the same time and each keeps its own mapping. Settings has separate **Siri Remote · Black Glass** and **Siri Remote · Aluminum** tabs,
+each editable while disconnected.
 
 ## Features
 
 - A native settings window (System Settings style) opened from the menu bar's **Settings…**
-  item, also while the remote is disconnected. The Controls pane shows the remote as a 3D
+  item, also while the remote is disconnected. The Siri Remote pane shows the remote as a 3D
   model built from the supplied STEP CAD assemblies (second/third generation share one
   model); drag to turn it, release to restore the guide pose.
 - Every button's function sits in a glass pill beside the remote. Click a pill to choose
@@ -63,7 +74,8 @@ paired at the same time and each keeps its own mapping.
   Esc and Skill (`/`, `$` or the frontmost app's trigger) are choices for any button. Mute opens Advanced Menu.
 - Slide on the touch surface / clickpad ring to position the text cursor; see
   [Text-cursor positioning](#text-cursor-positioning).
-- Siri Remote connection and battery status in the menu bar.
+- A static voice-balloon menu-bar icon, with connection and battery rows for Siri Remote
+  and Soundcore Work when available. No disconnected-device row when neither is connected.
 - Suppression of duplicate HID/media-key delivery without globally unloading macOS's
   remote-control daemon.
 - Microphone bridge with diagnostics (see [Microphone bridge](#microphone-bridge)).
@@ -100,17 +112,17 @@ The remote bridge components are not required for Mac-microphone dictation.
 New users get a short introduction: features, Bluetooth/permission and helper setup, the
 Siri mapping, then the main gestures. Finish saves the choice; closing leaves setup
 unfinished. Existing configured installations keep their mapping without a forced tour.
-Reopen the guide with **Getting Started** in Settings › About, or **Restart Onboarding** in
-the menu bar.
+Reopen the guide with **Getting Started** in Settings › Siri Remote.
 
-The Settings sidebar has two groups. **System** holds what vvhisper itself does: Dictation and
-Computer Use. **Device** holds the Siri Remote: Controls (the profile switcher, the remote and its
-pills with a Normal | Advanced switch, and the text-cursor guide) and Siri Remote (status, Auto
-Disconnect and diagnostics). About (version, updates and links) sits at the bottom of the sidebar.
+The Settings sidebar has two groups. **System** holds Dictation, Dictionary and Computer
+Use. **Device** holds separate Black Glass and Aluminum Siri Remote tabs, plus Soundcore
+Work. Each Siri tab contains its own model, profiles, controls, cursor guide and connection
+settings. About sits at the bottom and opens the separate Diagnostics window. Settings
+opens to Dictation by default.
 
 ## Button profiles
 
-The Controls pane edits one profile at a time, picked from the profile switcher in the
+The Siri Remote pane edits one profile at a time, picked from the profile switcher in the
 window's top-right corner. **General** applies in every app that has no profile of its own. The menu lists
 every profile with its app icon, **Add App** offers every installed application, and an
 app profile can be removed from the same menu. Claude and ChatGPT come preinstalled and start
@@ -119,9 +131,9 @@ what each button does, or what it does while the Advanced Menu is open.
 
 An app profile keeps only the buttons you change for it. Every other button does what
 General does, and keeps following later changes to General; a pill's **Same as General**
-choice undoes an app-specific change. Siri is per profile too, so Dictation can be on in
-one app and off in another. Restore Defaults restores the profile on screen (an app profile
-goes back to following General); Auto Disconnect lives on the Siri Remote pane.
+choice undoes an app-specific change. Siri is per profile and per model too, so Dictation can be on in
+one app or model and off in another. Restore Defaults restores only the selected model in
+the profile on screen (an app profile goes back to following General).
 
 The profile is chosen by the app in front when a button goes down and kept until it comes
 back up, so a press that switches apps — or a hold you carry into another app — releases
@@ -134,12 +146,12 @@ remote's microphone instead of holding a key for a third-party dictation app; Se
 Dictation picks the service (Apple, WhisperKit on device, OpenAI, or Seed ASR from
 ByteDance/Volcengine) and the language, and stores your own API keys in the keychain.
 
-With Seed ASR and **Type While Speaking** on, the words stream into the focused editor as you
+With Seed ASR and **Streaming Output** on, the words stream into the focused editor as you
 speak. Text already typed is never deleted while you hold Siri; when you let go, the whole clip is recognized once more by the accurate recognizer and
 the text is refined in place. That accurate pass is uploaded while you speak, so it usually lands within a second of letting go, and it places periods by meaning, not by how long you paused to think. Without it the clip is transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
 corrections only ever delete what the current hold typed.
 
-**Dictionary.** Settings › Dictation › Dictionary lists names and terms dictation tends to get
+**Dictionary.** Settings › Dictionary lists names and terms dictation tends to get
 wrong. Seed ASR listens for them when it refines the text after you let go, OpenAI is given them
 as its vocabulary, and every engine writes them with your capitalization.
 
@@ -149,7 +161,7 @@ Cursor** sends up to 500 characters already in the field along with the audio, s
 topics you have already typed come out right (that text goes to Volcengine with the recording;
 password fields are never read).
 
-**Alternative hotkey.** Settings › Dictation can also assign one keyboard modifier (Left or
+**Hotkey.** Settings › Dictation › Voice Input assigns one keyboard modifier (Left or
 Right Option, Command or Control). Hold it to dictate exactly as with Siri, through a Mac
 microphone (the remote's microphone only works while Siri is held). Pressing another key
 while holding it counts as a shortcut and records nothing.
@@ -159,6 +171,11 @@ Once a hotkey is set, its **Microphone** menu chooses what it records:
 - **Same as System** (the default) follows the Mac's input setting. The menu names the
   microphone this means right now. While the system input is vvhisper's own device, it uses
   the built-in microphone, or another real microphone on a Mac without one.
+- **Soundcore Work**: uses its BLE microphone directly in vvhisper when connected. The
+  same hotkey drives this source; there is no separate device hotkey setup. After the
+  first successful connection, vvhisper reconnects automatically when the device is
+  nearby and available, including after restarting the app. Disconnect pauses this
+  until Reconnect or the next app launch. Keep its phone Bluetooth connection off.
 - **A specific microphone**: any connected input, such as a USB mic or a Bluetooth headset.
   vvhisper's own device, BlackHole and Soundflower are not listed, because they carry only the
   remote's voice. A chosen microphone that is not connected shows as "(Not Connected)", and
@@ -243,7 +260,7 @@ On the first-generation glass remote, a quick one-way swipe and lift outside car
 mode sends one arrow key. Accumulating 1000 units of touch travel still enters caret
 mode; lift then only settles its preview, and center click or idle confirms it.
 
-Settings › Controls › **Advanced** shows what each button does while the menu is open, and
+Settings › Siri Remote › **Advanced** shows what each button does while the menu is open, and
 lets you change it per remote family. Outside the menu, Siri performs its configured action;
 Advanced Menu and active caret positioning take priority over it.
 
@@ -394,14 +411,15 @@ With the app open, the bridge automatically starts when its dependencies and the
 approved, current privileged helper are available. A stopped capture pipeline is
 retried with bounded backoff; reconnect and Mac wake also request recovery.
 Automatic recovery never falls back to an administrator password prompt. Complete
-missing setup in Settings › Siri Remote, or with the Fix button in Settings' corner. Quitting vvhisper stops recovery and capture.
+missing setup in About › Diagnostics. Quitting vvhisper stops recovery and capture.
 
-The working microphone engine is PacketLogger (select with
-`defaults write com.viberemote.app microphoneBridgeEngine packetlogger`). It uses
+The default microphone engine is PacketLogger, including when no engine preference
+is saved. It uses
 Apple's separately installed PacketLogger, enables Bluetooth debug capture, and
 runs only the capture supervisor as root. The voice decoder remains in the user
-session. The Direct HID engine is retained but does not deliver audio on the tested
-macOS configuration. Audio is emitted only while the physical Siri button is held.
+session. The Direct HID engine is retained as an explicit diagnostic override
+(`defaults write com.viberemote.app microphoneBridgeEngine directhid`), but does not
+deliver audio on the tested macOS configuration. Audio is emitted only while the physical Siri button is held.
 
 Some black-glass remotes also expose a dedicated audio collection (observed with
 product 0x026D / hardware revision 0A00), which vvhisper prefers. Only older remotes
@@ -442,7 +460,7 @@ HAL read completion does not prove that the receiving app transcribed the audio.
 
 After changing the shared driver, run `./build_audio_driver.sh`, build and install the
 signed app, and restart an already running privileged daemon
-(`sudo launchctl kickstart -k system/com.viberemote.helper`). Settings › Siri Remote offers
+(`sudo launchctl kickstart -k system/com.viberemote.helper`). About › Diagnostics offers
 **Install Audio Driver** while no supported audio device is present; installing restarts
 CoreAudio. Check `voice-helper.log` for `Audio output: shared-memory HAL` and
 `Voice buffer drained` during an actual recording.
@@ -464,7 +482,7 @@ xcrun clang -isysroot "$(xcrun --show-sdk-path)" -std=c11 -Wall -Wextra -Werror 
 
 ## App icon
 
-`VibeRemote.icon` is the Icon Composer source for the application icon. Bundle creation
+`vvhisper.icon` is the Icon Composer source for the application icon. Bundle creation
 uses Xcode's `actool` to compile its layers and appearances into `Assets.car` and a
 compatibility `.icns`, then merges the generated icon metadata into `Info.plist`.
 Full Xcode is required for this step; `ICON_DEVELOPER_DIR` can select its
@@ -494,7 +512,7 @@ components retain their own terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTI
 
 ### Open Computer Use with a double press
 
-Double-press Siri on the remote, or double-press your selected Alternative Dictation
+Double-press Siri on the remote, or double-press your selected dictation
 Hotkey, to open the Computer Use bar above the Dock. Hold either trigger for ordinary
 dictation. Use two quick taps (each under 220 ms, with the second release within 450 ms
 of the first). Keyboard shortcuts using the modifier do not count as double presses.

@@ -1,12 +1,13 @@
 //
 //  MenuBarManager.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Manages the menu bar icon and button mapping menu.
 //
 
 import AppKit
 import HelperProtocol
+import Combine
 
 enum RemoteStatusBadge: Equatable, Sendable {
     case none, starting, disconnected
@@ -117,8 +118,8 @@ enum ButtonAction: String, CaseIterable, Sendable {
     case commandEnter = "Command + Enter: Send"
     case undo = "Undo"
     case redo = "Redo"
-    /// Siri only (2026-11-08): VibeRemote records the hold and types the transcript itself.
-    case vibeDictation = "VibeRemote Dictation"
+    /// Siri only (2026-11-08): vvhisper records the hold and types the transcript itself.
+    case vvhisperDictation = "VibeRemote Dictation"
     /// Per-app profiles (2026-11-10): the Skill trigger pinned to one host's character instead
     /// of `skillPicker`'s detection of the frontmost app. Claude's seed uses `/`, ChatGPT's `$`.
     case slashSkill = "Skill Picker: /"
@@ -139,11 +140,11 @@ enum ButtonAction: String, CaseIterable, Sendable {
     /// Siri drives the microphone while it is physically held, so it only takes the held
     /// keys dictation apps listen for (user's choice, 2026-11-08). Composite actions are
     /// assigned by the generation profile and are never offered here either.
-    var isAssignableToSiriButton: Bool { requiresHold || self == .vibeDictation }
+    var isAssignableToSiriButton: Bool { requiresHold || self == .vvhisperDictation }
 
     /// Actions whose hold is a dictation session: the release waits for the bridge's voice
     /// tail to drain, so the end of the sentence is not cut off.
-    var holdsDictation: Bool { requiresHold || self == .vibeDictation }
+    var holdsDictation: Bool { requiresHold || self == .vvhisperDictation }
 
     var actionDescription: String {
         switch self {
@@ -153,7 +154,7 @@ enum ButtonAction: String, CaseIterable, Sendable {
             return "Create a bullet list, or indent the current item"
         case .bulletOutdent:
             return "Outdent, or remove the current list item"
-        case .vibeDictation:
+        case .vvhisperDictation:
             return "vvhisper transcribes what you say while Siri is held and types it"
         case .skillPicker:
             return "Types the frontmost app's skill trigger: $ in ChatGPT / Codex, / elsewhere"
@@ -258,6 +259,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     var touchStatus = "Waiting for a remote touch surface"
     private var remoteConnected = false
     private var remoteGeneration: RemoteGeneration = .unknown
+    private var editingGeneration: RemoteGeneration = .aluminumClickpad
+    private var connectedFamilies: [RemoteGeneration: String] = [:]
+    private var soundcoreObserver: AnyCancellable?
     /// The remote's own Bluetooth name, shown under the connection state. nil falls back to
     /// the hardware family, which is all we know before any interface opens.
     private var remoteName: String?
@@ -288,42 +292,43 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
         menu.delegate = self
         setupMenuBar()
+        soundcoreObserver = SoundcoreManager.shared.$status.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
+            self?.rebuildMenu()
+        }
     }
 
     /// The menu-bar glyph: the Apple TV remote SF Symbol, with a status badge notched into
     /// the bottom-right corner (slash for disconnected, refresh for bridge startup). Falls
     /// back to a hand-drawn remote if the symbol is unavailable (older macOS). The image
     /// stays a template so macOS keeps tinting it for light/dark menu bars.
+    /// Static template drawn from Voice Balloon.svg and Voice Bars.svg in vvhisper.icon.
+    /// Badge is retained only for source compatibility; device state never changes the glyph.
     static func makeRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        guard let symbol = NSImage(systemSymbolName: "appletvremote.gen4", accessibilityDescription: "vvhisper")?
-            .withSymbolConfiguration(config) else {
-            return makeFallbackRemoteIcon(badge: badge)
-        }
-        guard badge != .none else {
-            symbol.isTemplate = true
-            return symbol
-        }
-        let size = symbol.size
-        let badged = NSImage(size: size, flipped: false) { rect in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            symbol.draw(in: rect)
-            // The symbol bitmap is a tight canvas: anything past its edges is clipped, so
-            // the disc must sit tangent to the corner, never overhang it.
-            let r = size.width * 0.34
-            let cx = size.width - r
-            let cy = r
-
-            // Notch a transparent moat so the badge reads as a separate element.
-            ctx.setBlendMode(.clear)
-            ctx.fillEllipse(in: CGRect(x: cx - r * 1.2, y: cy - r * 1.2, width: r * 2.4, height: r * 2.4))
-
-            ctx.setBlendMode(.normal)
-            drawStatusBadge(badge, in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+        let image = NSImage(size: NSSize(width: 22, height: 20), flipped: true) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.translateBy(x: 3, y: 0)
+            context.scaleBy(x: 20 / 216, y: 20 / 216)
+            let balloon = NSBezierPath()
+            balloon.move(to: NSPoint(x: 86, y: 0))
+            balloon.curve(to: NSPoint(x: 172, y: 86), controlPoint1: NSPoint(x: 133.496, y: 0), controlPoint2: NSPoint(x: 172, y: 38.5035))
+            balloon.curve(to: NSPoint(x: 131.502, y: 158.988), controlPoint1: NSPoint(x: 172, y: 116.788), controlPoint2: NSPoint(x: 155.821, y: 143.796))
+            balloon.curve(to: NSPoint(x: 90, y: 215.848), controlPoint1: NSPoint(x: 110.649, y: 172.015), controlPoint2: NSPoint(x: 90, y: 191.261))
+            balloon.line(to: NSPoint(x: 82, y: 215.848))
+            balloon.curve(to: NSPoint(x: 40.4981, y: 158.988), controlPoint1: NSPoint(x: 82, y: 191.261), controlPoint2: NSPoint(x: 61.3507, y: 172.015))
+            balloon.curve(to: NSPoint(x: 0, y: 86), controlPoint1: NSPoint(x: 16.1786, y: 143.796), controlPoint2: NSPoint(x: 0, y: 116.788))
+            balloon.curve(to: NSPoint(x: 86, y: 0), controlPoint1: NSPoint(x: 0, y: 38.5035), controlPoint2: NSPoint(x: 38.5035, y: 0))
+            balloon.close()
+            NSColor.black.setFill()
+            balloon.fill()
+            context.setBlendMode(.clear)
+            for rect in [NSRect(x: 38, y: 65, width: 20, height: 44), NSRect(x: 76, y: 45, width: 20, height: 84), NSRect(x: 114, y: 65, width: 20, height: 44)] {
+                NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
+            }
             return true
         }
-        badged.isTemplate = true
-        return badged
+        image.isTemplate = true
+        image.accessibilityDescription = "vvhisper"
+        return image
     }
 
     /// Hand-drawn remote used only when the SF Symbol is unavailable.
@@ -480,18 +485,19 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         NSApp.windowsMenu = windowMenu
     }
 
-    private var settingsSnapshot: RemoteSettingsSnapshot { snapshot(profile: editingProfileID) }
+    private var settingsSnapshot: RemoteSettingsSnapshot { snapshot(profile: editingProfileID, generation: editingGeneration) }
 
     /// Onboarding only ever sets General's Siri, so it reads General whatever Settings shows.
-    private func snapshot(profile id: String) -> RemoteSettingsSnapshot {
-        RemoteSettingsSnapshot(
-            connected: remoteConnected,
-            batteryPercent: remoteBatteryPercent,
-            siriAction: profiles.siriAction(profile: id),
-            generation: remoteGeneration,
+    private func snapshot(profile id: String, generation: RemoteGeneration? = nil) -> RemoteSettingsSnapshot {
+        let generation = generation ?? remoteGeneration
+        return RemoteSettingsSnapshot(
+            connected: connectedFamilies[generation] != nil || (remoteConnected && generation == remoteGeneration),
+            batteryPercent: generation == remoteGeneration ? remoteBatteryPercent : nil,
+            siriAction: profiles.siriAction(profile: id, generation: generation),
+            generation: generation,
             idleTimeout: remoteIdleTimeout,
-            remoteName: remoteName,
-            buttonOverrides: profiles.overrides(profile: id, generation: remoteGeneration),
+            remoteName: connectedFamilies[generation] ?? (generation == remoteGeneration ? remoteName : nil),
+            buttonOverrides: profiles.overrides(profile: id, generation: generation),
             profiles: profiles,
             editingProfileID: id
         )
@@ -544,7 +550,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 snapshot: settingsSnapshot,
                 setSiriAction: { [weak self] action in
                     guard let self else { return }
-                    self.setSiriButtonAction(action, profile: self.editingProfileID)
+                    self.profiles.setSiri(action, profile: self.editingProfileID, generation: self.editingGeneration)
+                    self.saveProfiles()
                 },
                 resetSiriAction: { [weak self] in self?.restoreEditingProfile() },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
@@ -554,6 +561,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                     setButtonAction: { [weak self] button, action in self?.setButtonAction(action, for: button) },
                     followGeneral: { [weak self] button in self?.followGeneral(button) },
                     selectProfile: { [weak self] id in self?.selectProfile(id) },
+                    selectGeneration: { [weak self] generation in self?.editingGeneration = generation; self?.rebuildMenu() },
                     addProfile: { [weak self] bundleID, name in self?.addProfile(bundleID: bundleID, name: name) },
                     removeProfile: { [weak self] id in self?.removeProfile(id) },
                     restartBridge: { [weak self] in self?.startMicrophoneBridge() },
@@ -574,8 +582,8 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// Badges the menu-bar glyph whenever the remote is disconnected or its always-on bridge
     /// is still starting. There is no user-facing stopped state.
     private func updateStatusIcon(microphoneStatus: MicrophoneBridgeStatus) {
-        let badge = RemoteStatusBadge(remoteConnected: remoteConnected, bridgeRunning: microphoneStatus.running)
-        statusItem.button?.image = Self.makeRemoteIcon(badge: badge)
+        // The icon is installed once by setupMenuBar and stays static.
+
     }
 
     /// A double-height banner row: an SF Symbol glyph, a bold label, and an optional
@@ -646,15 +654,16 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     private static let statusRowPadding: CGFloat = 6.5
     private static let batteryGaugeDiameter: CGFloat = 34
 
-    private func makeDeviceStatusItem(microphoneStatus: MicrophoneBridgeStatus) -> NSMenuItem {
+    private func makeDeviceStatusItem(microphoneStatus: MicrophoneBridgeStatus, soundcore: Bool = false) -> NSMenuItem {
+        let connected = soundcore || remoteConnected
         let item = NSMenuItem()
         let padding = Self.statusRowPadding
 
         let statusTitle: String
-        if !remoteConnected {
+        if !connected {
             statusTitle = "Disconnected"
         } else {
-            statusTitle = microphoneStatus.running ? "Connected" : "Starting"
+            statusTitle = soundcore ? SoundcoreManager.shared.status : (microphoneStatus.running ? "Connected" : "Starting")
         }
         let title = NSTextField(labelWithString: statusTitle)
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -664,19 +673,19 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         var generation: NSTextField?
         var battery: RemoteBatteryRingView?
         let rowHeight: CGFloat
-        if remoteConnected {
+        if connected {
             let fallbackText: String
             switch remoteGeneration {
             case .glassTouchSurface: fallbackText = "1st Generation"
             case .aluminumClickpad: fallbackText = "2nd / 3rd Generation"
             case .unknown: fallbackText = "Generation Unknown"
             }
-            let subtitle = NSTextField(labelWithString: remoteName ?? fallbackText)
+            let subtitle = NSTextField(labelWithString: soundcore ? "Soundcore Work" : (remoteName ?? fallbackText))
             subtitle.translatesAutoresizingMaskIntoConstraints = false
             subtitle.font = .systemFont(ofSize: 11.5)
             subtitle.textColor = .secondaryLabelColor
 
-            let gauge = RemoteBatteryRingView(percent: remoteBatteryPercent)
+            let gauge = RemoteBatteryRingView(percent: soundcore ? SoundcoreManager.shared.info?.battery : remoteBatteryPercent)
             gauge.translatesAutoresizingMaskIntoConstraints = false
             generation = subtitle
             battery = gauge
@@ -727,8 +736,13 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         onboardingWindowController?.update(snapshot: snapshot(profile: ButtonProfile.generalID), access: onboardingAccess)
 
         let microphoneStatus = microphoneBridgeManager.menuStatus()
-        menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus))
-        menu.addItem(.separator())
+        if remoteConnected { menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus)) }
+        if SoundcoreManager.shared.ready || SoundcoreManager.shared.connecting {
+            menu.addItem(makeDeviceStatusItem(microphoneStatus: microphoneStatus, soundcore: true))
+        }
+        if remoteConnected || SoundcoreManager.shared.ready || SoundcoreManager.shared.connecting {
+            menu.addItem(.separator())
+        }
 
         // Settings must remain reachable before pairing and while the remote sleeps.
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
@@ -739,10 +753,6 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         let agentItem = NSMenuItem(title: "Computer Use", action: #selector(toggleAgentPanel), keyEquivalent: "")
         agentItem.target = self
         menu.addItem(agentItem)
-        // The guide starts with pairing, so it stays reachable while disconnected too.
-        let onboardingItem = NSMenuItem(title: "Restart Onboarding", action: #selector(restartOnboarding), keyEquivalent: "")
-        onboardingItem.target = self
-        menu.addItem(onboardingItem)
         menu.addItem(.separator())
         updateStatusIcon(microphoneStatus: microphoneStatus)
 
@@ -1111,7 +1121,7 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         requestDiagnostics(force: false) { diagnostics in
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
-            pasteboard.setString(diagnostics.copyText, forType: .string)
+            pasteboard.setString(diagnostics.copyText + "\n\n" + SoundcoreManager.shared.diagnosticSummary, forType: .string)
         }
     }
 
@@ -1248,16 +1258,16 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     /// Applies to the profile and remote family Settings is showing.
     private func setButtonAction(_ action: ButtonAction, for button: String) {
-        profiles.set(action, for: button, generation: remoteGeneration, profile: editingProfileID)
+        profiles.set(action, for: button, generation: editingGeneration, profile: editingProfileID)
         saveProfiles()
     }
 
     /// An app profile's "Same as General" choice for one pill.
     private func followGeneral(_ button: String) {
         if button == "siri" {
-            profiles.setSiri(nil, profile: editingProfileID)
+            profiles.setSiri(nil, profile: editingProfileID, generation: editingGeneration)
         } else {
-            profiles.set(nil, for: button, generation: remoteGeneration, profile: editingProfileID)
+            profiles.set(nil, for: button, generation: editingGeneration, profile: editingProfileID)
         }
         saveProfiles()
     }
@@ -1286,12 +1296,18 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
     /// Restore Defaults covers the button choices of the profile Settings shows. Auto Disconnect
     /// moved to the Device pane (2026-11-11) and is not part of it.
     private func restoreEditingProfile() {
-        profiles.restore(editingProfileID)
+        profiles.restore(editingProfileID, generation: editingGeneration)
         saveProfiles()
     }
 
     private func saveProfiles() {
         ButtonProfileStore.save(profiles)
+        rebuildMenu()
+    }
+
+    func updateConnectedFamilies(_ families: [RemoteGeneration: String]) {
+        guard connectedFamilies != families else { return }
+        connectedFamilies = families
         rebuildMenu()
     }
 

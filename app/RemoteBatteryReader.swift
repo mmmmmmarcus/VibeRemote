@@ -1,6 +1,6 @@
 //
 //  RemoteBatteryReader.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Reads Siri Remote battery level from macOS Bluetooth metadata, with a
 //  CoreBluetooth Battery Service fallback when system_profiler omits it.
@@ -34,11 +34,11 @@ final class RemoteBatteryReader: NSObject,
     private let batteryServiceUUID = CBUUID(string: "180F")
     private let batteryLevelUUID = CBUUID(string: "2A19")
     private let profilerWaitQueue = DispatchQueue(
-        label: "com.viberemote.battery.system-profiler.wait",
+        label: "com.vvhisper.battery.system-profiler.wait",
         qos: .utility
     )
     private let profilerIOQueue = DispatchQueue(
-        label: "com.viberemote.battery.system-profiler.io",
+        label: "com.vvhisper.battery.system-profiler.io",
         qos: .utility,
         attributes: .concurrent
     )

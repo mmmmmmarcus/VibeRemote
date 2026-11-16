@@ -1,6 +1,6 @@
 //
 //  RemoteDetector.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Detects Siri Remote via IOKit HID
 //
@@ -9,7 +9,7 @@ import Foundation
 import IOKit
 import IOKit.hid
 
-let vibeRemoteLogPath: String = {
+let vvhisperLogPath: String = {
     let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
         ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library", isDirectory: true)
     return libraryURL
@@ -18,7 +18,7 @@ let vibeRemoteLogPath: String = {
         .path
 }()
 
-private let rmLogQueue = DispatchQueue(label: "com.viberemote.log", qos: .utility)
+private let rmLogQueue = DispatchQueue(label: "com.vvhisper.log", qos: .utility)
 private let rmLogMaximumBytes: UInt64 = 1_048_576
 
 /// Enumeration and ownership are different: an idle disconnect closes our handles without
@@ -51,7 +51,7 @@ func rmDebug(_ message: String) {
     rmLogQueue.async {
         guard let data = line.data(using: .utf8) else { return }
         let fileManager = FileManager.default
-        let logURL = URL(fileURLWithPath: vibeRemoteLogPath)
+        let logURL = URL(fileURLWithPath: vvhisperLogPath)
         let directoryURL = logURL.deletingLastPathComponent()
         try? fileManager.createDirectory(
             at: directoryURL,

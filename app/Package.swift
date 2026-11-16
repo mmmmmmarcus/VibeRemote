@@ -3,16 +3,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "VibeRemote",
+    name: "vvhisper",
     platforms: [.macOS("27.0")],
     products: [
-        .executable(name: "VibeRemote", targets: ["VibeRemote"]),
-        .executable(name: "VibeRemoteVoiceBridge", targets: ["VibeRemoteVoiceBridge"]),
-        .executable(name: "VibeRemoteHelper", targets: ["VibeRemoteHelper"])
+        .executable(name: "vvhisper", targets: ["vvhisper"]),
+        .executable(name: "vvhisperVoiceBridge", targets: ["vvhisperVoiceBridge"]),
+        .executable(name: "vvhisperHelper", targets: ["vvhisperHelper"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
-        // On-device Whisper for VibeRemote Dictation; only its WhisperKit library is linked.
+        // On-device Whisper for vvhisper Dictation; only its WhisperKit library is linked.
         .package(url: "https://github.com/argmaxinc/WhisperKit", exact: "1.1.1"),
     ],
     targets: [
@@ -24,7 +24,7 @@ let package = Package(
             path: "HelperProtocol"
         ),
         .executableTarget(
-            name: "VibeRemoteHelper",
+            name: "vvhisperHelper",
             dependencies: ["HelperProtocol", "SharedAudio"],
             path: "PrivilegedHelper",
             exclude: ["Info.plist"],
@@ -42,7 +42,7 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "VibeRemote",
+            name: "vvhisper",
             dependencies: ["HelperProtocol", "NativeTouch", "RemoteAudioProtocol", .product(name: "Sparkle", package: "Sparkle"),
                            .product(name: "WhisperKit", package: "WhisperKit")],
             path: ".",
@@ -51,13 +51,13 @@ let package = Package(
                 "build.sh",
                 "create_app_bundle.sh",
                 "install.sh",
-                "VibeRemote",
-                "VibeRemote.app", "vvhisper.app",
-                "VibeRemoteVoiceBridge",
-                "VibeRemoteHelper",
-                "VibeRemoteAppIcon.png",
-                "VibeRemote.entitlements",
-                "VibeRemote.icon",
+                "VibeRemote", "vvhisper",
+                "VibeRemote.app", "vvhisper.app", "VibeRemoteHelper", "VibeRemoteVoiceBridge",
+                "vvhisperVoiceBridge",
+                "vvhisperHelper",
+                "vvhisperAppIcon.png",
+                "vvhisper.entitlements",
+                "vvhisper.icon",
                 "Vendor",
                 "VoiceBridgeHelper",
                 "RemoteAudioProtocol",
@@ -73,7 +73,7 @@ let package = Package(
             sources: [
                 "main.swift", "AppUpdater.swift", "OnboardingWindowController.swift",
                 "RemoteInputPolicy.swift", "ButtonProfiles.swift", "RemoteCaretController.swift",
-                "BluetoothAccessManager.swift",
+                "BluetoothAccessManager.swift", "SoundcoreManager.swift", "SoundcoreProtocol.swift", "SoundcoreAudio.swift",
                 "SiriRemoteApp.swift",
                 "MenuBarManager.swift",
                 "SettingsWindowController.swift", "SettingsPanes.swift", "RemoteModelView.swift",
@@ -106,7 +106,7 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "VibeRemoteVoiceBridge",
+            name: "vvhisperVoiceBridge",
             dependencies: ["RemoteAudioProtocol", "SharedAudio"],
             path: "VoiceBridgeHelper",
             linkerSettings: [
@@ -116,9 +116,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "VibeRemoteTests",
-            dependencies: ["VibeRemote", "HelperProtocol", "RemoteAudioProtocol", "SharedAudio"],
-            path: "Tests/VibeRemoteTests"
+            name: "vvhisperTests",
+            dependencies: ["vvhisper", "HelperProtocol", "RemoteAudioProtocol", "SharedAudio"],
+            path: "Tests/vvhisperTests"
         )
     ]
 )

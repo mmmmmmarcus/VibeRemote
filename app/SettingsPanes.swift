@@ -56,19 +56,18 @@ struct SettingsRootView: View {
             sidebar
             Group {
                 switch model.tab {
-                case .remote:
+                case .remote, .remoteGlass, .device:
                     RemotePane(model: model, setSiriAction: setSiriAction,
-                               restoreDefaults: restoreDefaults, actions: actions)
-                case .device:
-                    DevicePane(model: model, setIdleTimeout: { timeout in
-                        setIdleTimeout(timeout)
-                    }, actions: actions)
+                               restoreDefaults: restoreDefaults, actions: actions,
+                               setIdleTimeout: { timeout in setIdleTimeout(timeout) })
                 case .dictation:
-                    let using = model.snapshot.profiles.profiles(withSiri: .vibeDictation)
+                    let using = model.snapshot.profiles.profiles(withSiri: .vvhisperDictation)
                     DictationPane(profiles: using.map(\.name),
                                   everywhere: using.count == model.snapshot.profiles.all.count)
+                case .dictionary: DictionaryPane()
                 case .agent: AgentPane(generation: model.snapshot.generation,
                                        openPanel: actions.openAgentPanel)
+                case .soundcore: SoundcorePane()
                 case .about: AboutPane(updater: updater, actions: actions)
                 }
             }
@@ -80,8 +79,7 @@ struct SettingsRootView: View {
                 // The title-bar band's corner: the setup fix on every pane, and the Controls pane's
                 // profile switcher (user's request, 2026-11-11), both Liquid Glass capsules.
                 HStack(spacing: SettingsMetrics.sm) {
-                    SetupIssuePill(diagnostics: model.diagnostics, actions: actions)
-                    if model.tab == .remote {
+                    if model.tab.remoteGeneration != nil {
                         ProfilePicker(snapshot: model.snapshot, actions: actions)
                     }
                 }
@@ -96,7 +94,7 @@ struct SettingsRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// System (what VibeRemote does) then Device (the Siri Remote) from the top (2026-11-15,
+    /// System (what vvhisper does) then Device (the Siri Remote) from the top (2026-11-15,
     /// user's request); About is pinned to the bottom edge.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -139,7 +137,10 @@ struct SettingsRootView: View {
     private func rows(_ tabs: [SettingsTab]) -> some View {
         ForEach(tabs) { tab in
             SettingsSidebarRow(tab: tab, isSelected: model.tab == tab,
-                               badge: tab == .about && updater.updateAvailable) { model.tab = tab }
+                               badge: tab == .about && updater.updateAvailable) {
+                if let generation = tab.remoteGeneration { actions.selectGeneration(generation) }
+                model.tab = tab
+            }
         }
     }
 }
@@ -163,7 +164,7 @@ private struct SettingsSidebarRow: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(width: SettingsMetrics.rowIcon, height: SettingsMetrics.rowIcon)
-                Text(tab.title).font(.body).lineLimit(1)
+                Text(tab.sidebarTitle).font(.body).lineLimit(2)
                 Spacer(minLength: 0)
                 if badge {
                     Circle().fill(Color.accentColor).frame(width: 8, height: 8)
@@ -447,6 +448,7 @@ private struct RemotePane: View {
     let setSiriAction: (ButtonAction) -> Void
     let restoreDefaults: () -> Void
     let actions: SettingsActions
+    let setIdleTimeout: @MainActor @Sendable (RemoteIdleTimeout) -> Void
     @State private var mode: ControlsMode = .normal
     /// The Advanced Menu choices (global, per remote family), refreshed after every edit.
     @State private var advanced = AdvancedMenuMapping.load()
@@ -455,7 +457,7 @@ private struct RemotePane: View {
     private var advancedAtDefaults: Bool { (advanced[generation] ?? [:]).isEmpty }
 
     var body: some View {
-        SettingsPane(title: "Controls") {
+        SettingsPane(title: generation == .glassTouchSurface ? "Black Glass" : "Aluminum") {
             Section {
                 RemoteHero(snapshot: model.snapshot, mode: mode, advanced: advanced[generation] ?? [:],
                            setSiriAction: setSiriAction, setButtonAction: actions.setButtonAction,
@@ -487,6 +489,7 @@ private struct RemotePane: View {
                     }
             }
             TextCursorGuide(generation: generation)
+            DevicePane(model: model, setIdleTimeout: { timeout in setIdleTimeout(timeout) }, actions: actions)
         }
         .onAppear { advanced = AdvancedMenuMapping.load() }
     }
@@ -513,7 +516,7 @@ private struct DevicePane: View {
     let actions: SettingsActions
 
     var body: some View {
-        SettingsPane(title: SettingsTab.device.title, bottomInset: Self.cornerButtonClearance) {
+        Group {
             // Status first, then Auto Disconnect in its own group; neither has a header
             // (user's layout, 2026-11-12).
             Section { status }
@@ -532,58 +535,19 @@ private struct DevicePane: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            // Last: everything Diagnostics showed in About (moved here 2026-11-13, user's request).
             Section {
-                if let report = model.diagnostics.report {
-                    SettingsRow(title: "Remote", value: report.remoteAddress ?? "Not detected")
-                    SettingsRow(title: "Output Device", value: report.outputDevice ?? "Missing")
-                    SettingsRow(title: "Default Input", value: report.defaultInput ?? "Unknown")
-                    SettingsRow(title: "Voice Sessions", value: report.voiceSessions)
-                } else {
-                    SettingsRow(title: "Loading diagnostics…", value: "")
-                }
-                SettingsRow(title: "Helper", value: model.diagnostics.helper)
-                SettingsRow(title: "viberemote.log") {
-                    Button("Open", action: actions.openAppLog)
-                        .controlSize(.small)
-                        .disabled(model.diagnostics.report?.appLogAvailable == false)
-                }
-            } header: {
-                Text("Diagnostics")
-            } footer: {
-                SettingsListActions {
-                    Button("Refresh", action: actions.refreshDiagnostics)
-                    Button("Copy Diagnostics", action: actions.copyDiagnostics)
-                }
-            }
-            // No Needs Attention section here: the Vibe Remote Daemon row above already shows
-            // the same text as its subtitle.
-            if let issues = model.diagnostics.report?.blockingIssues, !issues.isEmpty {
-                Section("Blocking Issues") {
-                    ForEach(issues, id: \.self) { Text($0).textSelection(.enabled) }
+                SettingsRow(title: "Getting Started") {
+                    Button("Open Guide…", action: actions.showOnboarding)
                 }
             }
         }
-        // Pinned to the pane's bottom-right corner, not a section footer (user's request, 2026-11-11).
-        .overlay(alignment: .bottomTrailing) {
-            Button(model.diagnostics.bridgeRunning ? "Restart Daemon" : "Start Daemon", action: actions.restartBridge)
-                .accessibilityIdentifier("settings.restartDaemon")
-                .padding(SettingsMetrics.xxl)
-        }
-        // The bridge, setup and diagnostics rows all read the same async snapshot.
-        .onAppear(perform: actions.refreshDiagnostics)
     }
-
-    /// Room below the last section so its Refresh / Copy Diagnostics row scrolls clear of the
-    /// Restart Daemon button pinned over the pane's bottom-right corner.
-    private static let cornerButtonClearance: CGFloat = 52
 
     /// Connection, battery and the voice bridge always show. Helper and Audio Driver appear
     /// only while they need the user; when both are fine there is nothing to act on, and the
     /// Fix pill at the top of the window offers the step-by-step guide for either.
     @ViewBuilder private var status: some View {
         let snapshot = model.snapshot
-        let diagnostics = model.diagnostics
         // Label on the left, state on the right (user's layout, 2026-11-11): the remote's own name
         // with its connection light, the battery as plain text, the daemon's state; Restart Daemon
         // is pinned to the pane's corner.
@@ -603,28 +567,6 @@ private struct DevicePane: View {
         if snapshot.connected {
             SettingsRow(title: "Battery") {
                 Text(batteryText(snapshot)).foregroundStyle(.secondary)
-            }
-        }
-        SettingsRow(title: "vvhisper Daemon", subtitle: diagnostics.attention) {
-            Text(diagnostics.bridgeRunning ? "Running" : "Stopped")
-                .foregroundStyle(diagnostics.bridgeRunning ? Color.secondary : Color.orange)
-        }
-        if !diagnostics.bridgeRunning {
-            SettingsRow(title: "Helper Setup") {
-                Button("Set Up / Repair Helper…", action: actions.setUpHelper)
-                    .controlSize(.small)
-            }
-        }
-        ForEach(diagnostics.setupIssues) { issue in
-            SettingsRow(title: issue.isHelper ? "Helper" : "Audio Driver",
-                        statusDot: .red) {
-                HStack(spacing: SettingsMetrics.md) {
-                    Text(SetupGuide.statusText(issue)).foregroundStyle(.secondary)
-                    if let title = SetupGuide.actionTitle(issue) {
-                        Button(title) { SetupGuide.perform(issue, actions: actions) }
-                            .controlSize(.small)
-                    }
-                }
             }
         }
     }
@@ -1357,7 +1299,7 @@ private struct AboutPane: View {
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("settings.version")
                     }
-                    Text("Drive AI agents from an Apple TV Siri Remote.")
+                    Text("Speak to write or get things done on your Mac.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -1371,18 +1313,92 @@ private struct AboutPane: View {
                         .disabled(!(updater.canCheck || updater.updateAvailable))
                         .accessibilityIdentifier("settings.updates.install")
                 }
-                SettingsRow(title: "Getting Started") {
-                    Button("Open Guide…", action: actions.showOnboarding)
+            }
+            Section {
+                SettingsRow(title: "Diagnostics") {
+                    Button("Open Diagnostics…", action: actions.showDiagnostics)
+                        .accessibilityIdentifier("settings.about.diagnostics")
                 }
             }
             Section("Links") {
                 SettingsRow(title: "GitHub") {
-                    Link("github.com/mmmmmmarcus/VibeRemote", destination: Self.repository)
+                    Link("Source Code", destination: Self.repository)
                 }
                 SettingsRow(title: "Release Notes") {
                     Link("Releases", destination: Self.repository.appendingPathComponent("releases"))
                 }
             }
         }
+    }
+}
+
+struct HardwareDiagnosticsView: View {
+    @ObservedObject var model: RemoteSettingsModel
+    let actions: SettingsActions
+    private func diagnosticDeviceName(_ name: String?) -> String? {
+        name == "VibeRemote" ? "vvhisper (legacy driver)" : name
+    }
+    var body: some View {
+        Form {
+            Section("Siri Remote") {
+                let diagnostics = model.diagnostics
+        SettingsRow(title: "vvhisper Daemon", subtitle: diagnostics.attention) {
+            Text(diagnostics.bridgeRunning ? "Running" : "Stopped")
+                .foregroundStyle(diagnostics.bridgeRunning ? Color.secondary : Color.orange)
+        }
+        if !diagnostics.bridgeRunning {
+            SettingsRow(title: "Helper Setup") {
+                Button("Set Up / Repair Helper…", action: actions.setUpHelper)
+                    .controlSize(.small)
+            }
+        }
+        ForEach(diagnostics.setupIssues) { issue in
+            SettingsRow(title: issue.isHelper ? "Helper" : "Audio Driver",
+                        statusDot: .red) {
+                HStack(spacing: SettingsMetrics.md) {
+                    Text(SetupGuide.statusText(issue)).foregroundStyle(.secondary)
+                    if let title = SetupGuide.actionTitle(issue) {
+                        Button(title) { SetupGuide.perform(issue, actions: actions) }
+                            .controlSize(.small)
+                    }
+                }
+            }
+        }
+                Button(model.diagnostics.bridgeRunning ? "Restart Daemon" : "Start Daemon", action: actions.restartBridge)
+                    .accessibilityIdentifier("diagnostics.restartDaemon")
+            }
+            Section {
+                if let report = model.diagnostics.report {
+                    SettingsRow(title: "Remote", value: report.remoteAddress ?? "Not detected")
+                    SettingsRow(title: "Output Device", value: diagnosticDeviceName(report.outputDevice) ?? "Missing")
+                    SettingsRow(title: "Default Input", value: diagnosticDeviceName(report.defaultInput) ?? "Unknown")
+                    SettingsRow(title: "Voice Sessions", value: report.voiceSessions)
+                } else {
+                    SettingsRow(title: "Loading diagnostics…", value: "")
+                }
+                SettingsRow(title: "Helper", value: model.diagnostics.helper)
+                SettingsRow(title: "App Log") {
+                    Button("Open", action: actions.openAppLog)
+                        .controlSize(.small)
+                        .disabled(model.diagnostics.report?.appLogAvailable == false)
+                }
+            } header: {
+                Text("Audio and Logs")
+            } footer: {
+                SettingsListActions {
+                    Button("Refresh", action: actions.refreshDiagnostics)
+                    Button("Copy Diagnostics", action: actions.copyDiagnostics)
+                }
+            }
+
+            SoundcoreDiagnosticsSection()
+            if let issues = model.diagnostics.report?.blockingIssues, !issues.isEmpty {
+                Section("Blocking Issues") {
+                    ForEach(issues, id: \.self) { Text($0).textSelection(.enabled) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear(perform: actions.refreshDiagnostics)
     }
 }

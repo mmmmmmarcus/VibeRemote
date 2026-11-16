@@ -4,7 +4,7 @@ import Foundation
 
 // Streaming dictation ("flow output"), modeled on Doubao IME: recognition runs while Siri is
 // still held, partial text is typed into the editor as it arrives, and later revisions replace
-// only the tail that changed. Doubao shows partials as IMK marked text; VibeRemote is not an
+// only the tail that changed. Doubao shows partials as IMK marked text; vvhisper is not an
 // input method, so it types real keystrokes and guards every correction instead.
 
 // MARK: - Wire format
@@ -146,7 +146,7 @@ final class SeedStreamingSession: @unchecked Sendable {
         case failed(String)
     }
 
-    private let queue = DispatchQueue(label: "com.viberemote.dictation.seed-stream")
+    private let queue = DispatchQueue(label: "com.vvhisper.dictation.seed-stream")
     private let onEvent: @Sendable (Event) -> Void
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
@@ -744,7 +744,7 @@ final class DictationTypewriter {
 
 // MARK: - Command-line verification
 
-/// `VibeRemote --verify-seed-stream <audio file>` streams a file through the same session the
+/// `vvhisper --verify-seed-stream <audio file>` streams a file through the same session the
 /// app uses, paced in real time, with the app's own Keychain key — so the protocol can be
 /// checked end to end without the key ever leaving the app. Prints the transcript of the file
 /// it was given and the timings.

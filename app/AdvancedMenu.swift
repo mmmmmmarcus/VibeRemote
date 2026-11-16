@@ -411,7 +411,7 @@ final class AdvancedMenuController {
         let screen = screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) } ?? fallbackScreen
         let frame = Self.frame(anchor: anchor, size: size, screen: screen?.visibleFrame ?? fallbackFrame)
         let window = Panel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        window.identifier = NSUserInterfaceItemIdentifier("VibeRemote.AdvancedMenu")
+        window.identifier = NSUserInterfaceItemIdentifier("vvhisper.AdvancedMenu")
         window.title = "Advanced Menu"
         window.isOpaque = false; window.backgroundColor = .clear
         // A second WindowServer shadow can outline the translucent shadow pixels,

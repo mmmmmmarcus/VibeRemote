@@ -1,7 +1,7 @@
 import Foundation
 
 /// Filler-word cleanup for Seed ASR's final text (2026-11-12, user's request: Doubao IME drops
-/// 嗯, 那个 and stutters, VibeRemote kept them). Volcengine's `enable_ddc` (语义顺滑) does this
+/// 嗯, 那个 and stutters, vvhisper kept them). Volcengine's `enable_ddc` (语义顺滑) does this
 /// well on the live two-way stream, but measured the same day, the accurate model behind the
 /// refinement after release (flash and `bigmodel_nostream` alike) only drops 呃/uh and keeps
 /// 嗯, 那个 and repeats such as "我想我想" or "and then and then". The refinement replaces the

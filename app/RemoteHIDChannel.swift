@@ -1,6 +1,6 @@
 //
 //  RemoteHIDChannel.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Opens the Siri Remote HID-over-GATT service directly. macOS exposes the same
 //  service through IOHID, but its proxy does not reliably complete the Gen-3

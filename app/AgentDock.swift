@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
-// Computer Use lives on the Dock: while its callout is open, or a command runs, VibeRemote
+// Computer Use lives on the Dock: while its callout is open, or a command runs, vvhisper
 // keeps a Dock icon (the app is otherwise menu-bar only) and recolors it through NSDockTile,
 // macOS's live-tile API — blue while composing, green while the agent works. The callout pops
 // up from that icon the way a Dock stack or menu does.
@@ -67,9 +67,9 @@ struct DockCalloutPlacement: Equatable, Sendable {
     }
 }
 
-/// Finds VibeRemote's own Dock icon through the Dock's accessibility tree. There is no public
+/// Finds vvhisper's own Dock icon through the Dock's accessibility tree. There is no public
 /// API for a Dock icon's position; the Dock exposes each item as an AXDockItem with a frame,
-/// and VibeRemote already holds the Accessibility grant the remote's key events need.
+/// and vvhisper already holds the Accessibility grant the remote's key events need.
 enum DockIconLocator {
     /// The icon's frame in AppKit screen coordinates, or nil when the Dock, the grant or the
     /// item is unavailable (for example while the icon is still sliding in).
@@ -127,7 +127,7 @@ enum DockIconLocator {
 
 /// The app icon recolored through NSDockTile. The Icon Composer icon is a light remote on a
 /// dark tile; screening a colored squircle over it turns the dark tile into that color while
-/// the light remote stays light, so it still reads as VibeRemote's own icon.
+/// the light remote stays light, so it still reads as vvhisper's own icon.
 @MainActor
 final class AgentDockTile {
     enum Style: Equatable { case normal, composing, working }

@@ -1,6 +1,6 @@
 //
 //  MicrophoneBridgeManager.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Controls the Siri Remote microphone bridge.
 //
@@ -14,6 +14,17 @@ import Foundation
 import RemoteAudioProtocol
 import HelperProtocol
 import IOBluetooth
+
+/// Keep startup, button capture, health checks and Bluetooth recovery on the same engine.
+enum MicrophoneBridgeEngine {
+    static func usesPacketLogger(preference: String?) -> Bool {
+        (preference ?? "packetlogger") == "packetlogger"
+    }
+
+    static var usesPacketLogger: Bool {
+        usesPacketLogger(preference: UserDefaults.standard.string(forKey: "microphoneBridgeEngine"))
+    }
+}
 
 /// Retry timing is independent of process state: a stopped process still needs recovery.
 struct BridgeRetrySchedule {
@@ -175,12 +186,12 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     private var packetCapturePath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetCapture) }
     private var directHIDCapturePath: String { runtimePath("direct-hid-audio.log") }
     private var packetLoggerSessionPath: String { runtimePath(PacketLoggerBridge.RuntimeFile.packetLoggerSession) }
-    private var appLogPath: String { vibeRemoteLogPath }
+    private var appLogPath: String { vvhisperLogPath }
     private let packetLoggerHelperInstallPath = PacketLoggerBridge.systemHelperInstallPath
     private let packetLoggerHelperPlistPath = PacketLoggerBridge.systemHelperPlistPath
     private let bluetoothDebugPreferencesPath = PacketLoggerBridge.bluetoothDebugPreferencesPath
     private let appBundle: Bundle
-    private let workQueue = DispatchQueue(label: "com.viberemote.microphoneBridge", qos: .userInitiated)
+    private let workQueue = DispatchQueue(label: "com.vvhisper.microphoneBridge", qos: .userInitiated)
     private let workQueueKey = DispatchSpecificKey<Void>()
     // Accessed only on workQueue. Shutdown disables all queued automatic work.
     private var wantsBridgeRunning = false
@@ -543,12 +554,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     }
 
     private func startLocked(allowAdministratorPrompt: Bool = false) {
-        // macOS's IOHID proxy never delivers Siri Remote 0xFA audio reports to user space,
-        // so the PacketLogger capture bridge remains the only working audio path. The
-        // Direct HID engine stays the default while that conclusion is revalidated;
-        // opt into the capture engine with:
-        //   defaults write com.viberemote.app microphoneBridgeEngine packetlogger
-        if UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" {
+        // PacketLogger is the working audio path on macOS. Direct HID remains an
+        // explicit diagnostic override; an unset preference must not select it.
+        if MicrophoneBridgeEngine.usesPacketLogger {
             startPacketLoggerBridgeLocked(allowAdministratorPrompt: allowAdministratorPrompt)
             return
         }
@@ -577,7 +585,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         restoreDefaultInputDevice()
 
         guard let helperCandidate = helperExecutablePath() else {
-            setLastError("VibeRemoteVoiceBridge helper was not found.")
+            setLastError("vvhisperVoiceBridge helper was not found.")
             return
         }
         let helper = URL(fileURLWithPath: helperCandidate)
@@ -615,21 +623,21 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             helperInputPipe = inputPipe
             guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
                 throw NSError(
-                    domain: "VibeRemote.MicrophoneBridge",
+                    domain: "vvhisper.MicrophoneBridge",
                     code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Could not record the Direct HID helper identity."]
                 )
             }
             guard captureDefaultInputDevice() else {
                 throw NSError(
-                    domain: "VibeRemote.MicrophoneBridge",
+                    domain: "vvhisper.MicrophoneBridge",
                     code: 3,
                     userInfo: [NSLocalizedDescriptionKey: "Could not save the current default input device."]
                 )
             }
             guard setDefaultInputDevice(named: outputDeviceName) else {
                 throw NSError(
-                    domain: "VibeRemote.MicrophoneBridge",
+                    domain: "vvhisper.MicrophoneBridge",
                     code: 4,
                     userInfo: [NSLocalizedDescriptionKey: "Could not select \(outputDeviceName) as the default input device."]
                 )
@@ -746,7 +754,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
             helperPID = helperRunner.processIdentifier
             guard writePrivateFile("\(helperRunner.processIdentifier)\n", at: helperPIDFilePath) else {
                 throw NSError(
-                    domain: "VibeRemote.MicrophoneBridge",
+                    domain: "vvhisper.MicrophoneBridge",
                     code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "Could not record the voice-helper identity."]
                 )
@@ -1010,7 +1018,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     func maintainBridgeHealth() {
         workQueue.async { [weak self] in
             guard let self, self.wantsBridgeRunning else { return }
-            let packetLogger = UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger"
+            let packetLogger = MicrophoneBridgeEngine.usesPacketLogger
             let supervisorAlive = !packetLogger || self.packetLoggerIdentity.map(self.packetLoggerSupervisorMatches) == true
             if !self.isRunningLocked() || !supervisorAlive {
                 self.healthySince = nil
@@ -1037,7 +1045,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
     /// though the actual restart is briefly debounced to coalesce a burst of topology changes.
     /// Clear UI readiness now so the old live processes cannot masquerade as a recovered bridge.
     func markBluetoothRecoveryPending() {
-        guard UserDefaults.standard.string(forKey: "microphoneBridgeEngine") == "packetlogger" else { return }
+        guard MicrophoneBridgeEngine.usesPacketLogger else { return }
         bridgeReady = false
     }
 
@@ -1053,7 +1061,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
             let enginePreference = UserDefaults.standard.string(forKey: "microphoneBridgeEngine")
             let bridgeRunning = self.isRunningLocked()
-            guard self.wantsBridgeRunning, enginePreference == "packetlogger" else { return }
+            guard self.wantsBridgeRunning, MicrophoneBridgeEngine.usesPacketLogger(preference: enginePreference) else { return }
 
             let helperReady = PrivilegedHelperClient.shared.state == .ready
             let helperVersion = helperReady
@@ -1088,7 +1096,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         helperReady: Bool,
         helperVersion: Int?
     ) -> Bool {
-        enginePreference == "packetlogger"
+        MicrophoneBridgeEngine.usesPacketLogger(preference: enginePreference)
             && helperReady
             && (helperVersion ?? 0) >= HelperConstants.packetLoggerCaptureMinimumVersion
     }
@@ -1129,7 +1137,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
-    /// Installs the bundled VibeRemote audio driver into the system HAL plug-in directory and
+    /// Installs the bundled vvhisper audio driver into the system HAL plug-in directory and
     /// restarts coreaudiod so the device appears immediately. Prefers the privileged helper so
     /// no administrator prompt is needed; falls back to a one-off authorization otherwise.
     func installAudioDriver(completion: (@Sendable (Bool, String?) -> Void)? = nil) {
@@ -1413,7 +1421,7 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         removePrivateItem(at: packetLoggerFIFOPath)
     }
 
-    /// Where the voice helper writes each decoded session for VibeRemote Dictation
+    /// Where the voice helper writes each decoded session for vvhisper Dictation
     /// (`DictationAudioFile`); private like the rest of the runtime directory.
     static var dictationAudioPath: String {
         (defaultRuntimeDirectoryPath() as NSString).appendingPathComponent(DictationAudioFile.fileName)
@@ -2072,9 +2080,9 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
 
     private func helperExecutablePath() -> String? {
         let candidates = [
-            appBundle.resourcePath.map { "\($0)/SiriRemoteVoiceControl/VibeRemoteVoiceBridge" },
+            appBundle.resourcePath.map { "\($0)/SiriRemoteVoiceControl/vvhisperVoiceBridge" },
             appBundle.resourcePath.map { "\($0)/SiriRemoteVoiceControl/SiriRemoteVoiceControl-BlackHole" },
-            "\(FileManager.default.currentDirectoryPath)/VibeRemoteVoiceBridge",
+            "\(FileManager.default.currentDirectoryPath)/vvhisperVoiceBridge",
             "\(FileManager.default.currentDirectoryPath)/Vendor/SiriRemoteVoiceControl/SiriRemoteVoiceControl-BlackHole",
             appBundle.resourcePath.map { "\($0)/SiriRemoteVoiceControl/SiriRemoteVoiceControl" },
             "\(FileManager.default.currentDirectoryPath)/Vendor/SiriRemoteVoiceControl/SiriRemoteVoiceControl",

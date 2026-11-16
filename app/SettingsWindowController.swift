@@ -9,7 +9,7 @@ enum SettingsAssets {
     static let bundle: Bundle = bundledResources(in: .main) ?? .module
 
     static func bundledResources(in appBundle: Bundle) -> Bundle? {
-        guard let url = appBundle.resourceURL?.appendingPathComponent("VibeRemote_VibeRemote.bundle") else {
+        guard let url = appBundle.resourceURL?.appendingPathComponent("vvhisper_vvhisper.bundle") else {
             return nil
         }
         return Bundle(url: url)
@@ -42,7 +42,7 @@ struct RemoteSettingsSnapshot: Equatable, Sendable {
 
     /// What `key` does in General, for an app profile's "Same as General" choice.
     func generalAction(for key: String) -> ButtonAction {
-        key == "siri" ? profiles.siriAction(profile: ButtonProfile.generalID)
+        key == "siri" ? profiles.siriAction(profile: ButtonProfile.generalID, generation: generation)
             : profiles.action(button: key, generation: generation, profile: ButtonProfile.generalID)
     }
 
@@ -188,7 +188,7 @@ extension ButtonAction {
         case .commandEnter: return "Command + Enter"
         case .undo: return "Undo"
         case .redo: return "Redo"
-        case .vibeDictation: return "Dictation"
+        case .vvhisperDictation: return "Dictation"
         case .computerUse: return "Computer Use"
         case .none: return "None"
         }
@@ -234,7 +234,7 @@ struct SettingsDiagnostics: Equatable {
 
     /// The same health rules as the status menu's setup banners and onboarding: the helper
     /// needs action until it is approved, and the driver counts as present as soon as any
-    /// supported output device (VibeRemote, BlackHole, Soundflower) exists. `.unsupported`
+    /// supported output device (vvhisper, BlackHole, Soundflower) exists. `.unsupported`
     /// cannot happen on the macOS 27 deployment target and has nothing to fix, so it is no issue.
     static func setupIssues(helper: PrivilegedHelperState, outputDeviceName: String?,
                             driverInstallable: Bool) -> [SetupIssue] {
@@ -270,6 +270,7 @@ struct SettingsActions {
     /// An app profile's "Same as General" for one pill ("siri" or a button key).
     var followGeneral: (String) -> Void = { _ in }
     var selectProfile: (String) -> Void = { _ in }
+    var selectGeneration: (RemoteGeneration) -> Void = { _ in }
     /// Adds a profile for the app (bundle identifier, display name) and starts editing it.
     var addProfile: (String, String) -> Void = { _, _ in }
     var removeProfile: (String) -> Void = { _ in }
@@ -277,45 +278,52 @@ struct SettingsActions {
     var copyDiagnostics: () -> Void = {}
     var openAppLog: () -> Void = {}
     var refreshDiagnostics: () -> Void = {}
+    var showDiagnostics: () -> Void = {}
     var showOnboarding: () -> Void = {}
     var openAgentPanel: () -> Void = {}
 }
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    /// `agent` keeps its raw value so saved accessibility identifiers and any stored
-    /// selection survive the renames of its visible title (now "Computer Use"); `remote`
-    /// likewise keeps its raw value after becoming "Controls" (2026-11-11).
-    /// Declared in sidebar order: `systemTabs`, then `deviceTabs`, then `appTabs`.
-    case dictation, agent, remote, device, about
+    // Legacy raw values remain readable; only current tabs appear in the sidebar.
+    case dictation, dictionary, agent, remote, remoteGlass, device, soundcore, about
     var id: String { rawValue }
-
-    /// What VibeRemote itself does, whichever device drives it: first in the sidebar
-    /// (2026-11-15, user's request).
-    static let systemTabs: [SettingsTab] = [.dictation, .agent]
-    /// The Siri Remote. Controls is everything about what the buttons and the touch surface do
-    /// (button assignment, profiles, the text-cursor gesture); Siri Remote (`device`) is the
-    /// physical remote itself (its connection, battery, bridge and Auto Disconnect). Split on
-    /// 2026-11-11; the pane was renamed from "Device" on 2026-11-15 because more devices are
-    /// planned, and the group carrying it is now "Device".
-    static let deviceTabs: [SettingsTab] = [.remote, .device]
-    /// About the app rather than the remote, pinned to the bottom of the sidebar.
+    static let systemTabs: [SettingsTab] = [.dictation, .dictionary, .agent]
+    static let deviceTabs: [SettingsTab] = [.remoteGlass, .remote, .soundcore]
     static let appTabs: [SettingsTab] = [.about]
+    static let allCases = systemTabs + deviceTabs + appTabs
 
+    var remoteGeneration: RemoteGeneration? {
+        switch self {
+        case .remoteGlass: return .glassTouchSurface
+        case .remote, .device: return .aluminumClickpad
+        default: return nil
+        }
+    }
     var title: String {
         switch self {
-        case .remote: return "Controls"
-        case .device: return "Siri Remote"
+        case .remote, .device: return "Siri Remote · Aluminum"
+        case .remoteGlass: return "Siri Remote · Black Glass"
+        case .soundcore: return "Soundcore Work"
         case .dictation: return "Dictation"
+        case .dictionary: return "Dictionary"
         case .agent: return "Computer Use"
         case .about: return "About"
         }
     }
-
+    var sidebarTitle: String {
+        switch self {
+        case .remote, .device: return "Siri Remote\nAluminum"
+        case .remoteGlass: return "Siri Remote\nBlack Glass"
+        default: return title
+        }
+    }
     var systemImage: String {
         switch self {
-        case .remote: return "button.programmable"
-        case .device: return "appletvremote.gen4"
+        case .remote, .device: return "appletvremote.gen2"
+        case .remoteGlass: return "appletvremote.gen1"
+        case .soundcore: return "mic"
         case .dictation: return "waveform"
+        case .dictionary: return "character.book.closed"
         case .agent: return "cursorarrow.motionlines"
         case .about: return "info.circle"
         }
@@ -327,8 +335,8 @@ extension RemoteSettingsSnapshot {
     /// Disconnect lives on the Device pane with its own picker.
     var isAtDefaults: Bool {
         // For General the effective values above are its own choices.
-        guard editingProfileID == ButtonProfile.generalID else { return profiles.isAtDefaults(editingProfileID) }
-        return siriAction == ButtonProfileSet.siriDefault && buttonOverrides.isEmpty
+        guard editingProfileID == ButtonProfile.generalID else { return (editingProfile.overrides[generation] ?? [:]).isEmpty && editingProfile.siriAction == nil }
+        return siriAction == ButtonProfileSet.siriDefault && buttonOverrides.filter { $0.key != "siri" }.isEmpty
     }
 }
 
@@ -336,7 +344,7 @@ extension RemoteSettingsSnapshot {
 final class RemoteSettingsModel: ObservableObject {
     @Published var snapshot: RemoteSettingsSnapshot
     @Published var diagnostics = SettingsDiagnostics()
-    @Published var tab: SettingsTab = .remote
+    @Published var tab: SettingsTab = .dictation
 
     init(snapshot: RemoteSettingsSnapshot) {
         self.snapshot = snapshot
@@ -353,6 +361,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// `setContentSize`, so reusing the old name would bring the wider window back.
     private static let frameName = "VibeRemote.Settings.Compact"
     let model: RemoteSettingsModel
+    private var diagnosticsWindow: DiagnosticsWindowController?
 
     init(
         snapshot: RemoteSettingsSnapshot,
@@ -372,19 +381,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         window.title = "vvhisper"
-        window.identifier = NSUserInterfaceItemIdentifier("VibeRemote.Settings")
+        window.identifier = NSUserInterfaceItemIdentifier("vvhisper.Settings")
         window.isReleasedWhenClosed = false
         // Content runs edge to edge under the transparent title bar; the traffic lights
         // sit over the sidebar, as in System Settings.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
+        var windowActions = actions
+        windowActions.showDiagnostics = { [weak self] in self?.showDiagnostics(actions: actions) }
         let hosting = NSHostingView(rootView: SettingsRootView(
             model: model,
             setSiriAction: setSiriAction,
             restoreDefaults: resetSiriAction,
             setIdleTimeout: setIdleTimeout,
-            actions: actions
+            actions: windowActions
         ))
         // Keep the requested size instead of the SwiftUI fitting size; panes fill the frame.
         hosting.sizingOptions = []
@@ -393,6 +404,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if !window.setFrameUsingName(Self.frameName) { window.center() }
         window.setFrameAutosaveName(Self.frameName)
         update(snapshot)
+    }
+
+    private func showDiagnostics(actions: SettingsActions) {
+        if diagnosticsWindow == nil {
+            diagnosticsWindow = DiagnosticsWindowController(model: model, actions: actions)
+        }
+        diagnosticsWindow?.show()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -486,4 +504,38 @@ struct SiriActionPopUp: NSViewRepresentable {
             onSelect(action)
         }
     }
+}
+
+/// Shares the Settings snapshots and existing hardware managers; never owns another connection.
+@MainActor
+final class DiagnosticsWindowController: NSWindowController, NSWindowDelegate {
+    private let refresh: () -> Void
+    init(model: RemoteSettingsModel, actions: SettingsActions) {
+        refresh = actions.refreshDiagnostics
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "vvhisper Diagnostics"
+        window.identifier = NSUserInterfaceItemIdentifier("vvhisper.Diagnostics")
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        let hosting = NSHostingView(rootView: HardwareDiagnosticsView(model: model, actions: actions))
+        hosting.sizingOptions = []
+        window.contentView = hosting
+        window.minSize = NSSize(width: 560, height: 400)
+        window.setFrameAutosaveName("vvhisper.Diagnostics")
+        window.center()
+    }
+    required init?(coder: NSCoder) { nil }
+    func show() {
+        NSApp.setActivationPolicy(.regular)
+        showWindow(nil)
+        window?.deminiaturize(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        refresh()
+    }
+    func windowDidBecomeKey(_ notification: Notification) { refresh() }
+    func windowWillClose(_ notification: Notification) { restoreAccessoryPolicy(closing: window) }
 }

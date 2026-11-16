@@ -12,7 +12,7 @@ protocol VoiceAudioOutput: AnyObject {
 /// and allow that short tail to arrive before snapshotting the final drain target.
 final class SettlingAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     private let output: any VoiceAudioOutput
-    private let queue = DispatchQueue(label: "com.viberemote.voiceSession")
+    private let queue = DispatchQueue(label: "com.vvhisper.voiceSession")
     private var ending = false
     private var revision: UInt64 = 0
     init(_ output: any VoiceAudioOutput) { self.output = output }
@@ -91,7 +91,7 @@ final class AudioDelivery: @unchecked Sendable {
 /// No AVAudioEngine or virtual output stream: the HAL input callback consumes these frames.
 final class SharedAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     private let handle: OpaquePointer
-    private let queue = DispatchQueue(label: "com.viberemote.sharedAudio")
+    private let queue = DispatchQueue(label: "com.vvhisper.sharedAudio")
     private let timer: DispatchSourceTimer
     private let delivery = AudioDelivery()
     // Enqueue happens on the stdin decode thread. Shared ring counters are C atomics.

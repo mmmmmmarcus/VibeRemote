@@ -1,6 +1,6 @@
 //
 //  RemoteGeneration.swift
-//  VibeRemote
+//  vvhisper
 //
 //  Tells the two Siri Remote hardware families apart and captures every behavioral
 //  difference between them in one place.
@@ -106,7 +106,7 @@ struct RemoteIdleTracker: Sendable {
     var isEmpty: Bool { entries.isEmpty }
 }
 
-/// The two Siri Remote hardware families VibeRemote supports.
+/// The two Siri Remote hardware families vvhisper supports.
 ///
 /// Button profiles differ by generation. Audio collection availability must also be checked
 /// per physical device; report size alone is not a reliable generation discriminator.

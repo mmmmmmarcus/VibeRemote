@@ -1,6 +1,6 @@
 //
 //  HelperProtocol.swift
-//  VibeRemote
+//  vvhisper
 //
 //  The XPC contract between the menu-bar app and the privileged helper daemon.
 //  Shared by both targets so the interface cannot drift.
@@ -42,7 +42,7 @@ public enum HelperConstants {
 
     func prepareSharedAudio(reply: @escaping (Bool, String?) -> Void)
 
-    /// Installs the VibeRemote virtual audio driver from the given source path into the
+    /// Installs the vvhisper virtual audio driver from the given source path into the
     /// system HAL plug-in directory and restarts coreaudiod.
     func installAudioDriver(fromPath sourcePath: String, reply: @escaping (Bool, String?) -> Void)
 
@@ -180,9 +180,9 @@ public enum PacketLoggerBridge {
           /usr/bin/codesign --verify --strict -R='identifier "com.apple.bluetooth.PacketLoggerHelper" and anchor apple' "$1" >/dev/null 2>&1
         }
 
-        [ ! -L "$runtime" ] && [ -d "$runtime" ] || fail "Unsafe VibeRemote runtime directory."
-        [ "$(/usr/bin/stat -f '%u' "$runtime")" = "$expected_uid" ] || fail "VibeRemote runtime directory has the wrong owner."
-        [ "$(/usr/bin/stat -f '%Lp' "$runtime")" = "700" ] || fail "VibeRemote runtime directory permissions must be 0700."
+        [ ! -L "$runtime" ] && [ -d "$runtime" ] || fail "Unsafe vvhisper runtime directory."
+        [ "$(/usr/bin/stat -f '%u' "$runtime")" = "$expected_uid" ] || fail "vvhisper runtime directory has the wrong owner."
+        [ "$(/usr/bin/stat -f '%Lp' "$runtime")" = "700" ] || fail "vvhisper runtime directory permissions must be 0700."
         [ ! -L "$voice_fifo" ] && [ -p "$voice_fifo" ] || fail "Voice FIFO is missing or unsafe."
         [ ! -L "$packet_fifo" ] && [ -p "$packet_fifo" ] || fail "PacketLogger FIFO is missing or unsafe."
         [ "$(/usr/bin/stat -f '%u' "$voice_fifo")" = "$expected_uid" ] || fail "Voice FIFO has the wrong owner."

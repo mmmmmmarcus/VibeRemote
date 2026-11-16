@@ -1,6 +1,6 @@
 import Foundation
 
-/// The voice helper's private copy of each decoded voice session, read by VibeRemote Dictation
+/// The voice helper's private copy of each decoded voice session, read by vvhisper Dictation
 /// instead of re-recording the virtual device's loopback. The loopback only carries audio once
 /// it has been played out, so recording it meant waiting for the output drain plus a grace
 /// period after every hold; this file is complete as soon as the remote's protocol ends.

@@ -6,12 +6,13 @@ The product is now **vvhisper** (lowercase, intentional double v). New app bundl
 release archives use vvhisper. Default signing is Haolin Fei, team `Q9MD524YL5`;
 notarization defaults to `VVHISPER_NOTARY`, which must be configured for the personal
 account. The helper trust requirement must match this team. Preserve legacy
-`com.viberemote.*` identifiers, SwiftPM targets/resources, storage paths, persisted action
-values, and GitHub/Sparkle URLs for compatibility. Older VibeRemote wording below is
+`com.viberemote.*` identities, installed helper/driver paths, storage paths, persisted action
+values, and GitHub/Sparkle URLs for compatibility. SwiftPM targets, resource bundles and
+source assets now use vvhisper (2026-11-16); see `app/Design/NamingCompatibility.md`. Older VibeRemote wording below is
 historical. See `app/Release/README.md` for the signing-team migration and validation.
 
 
-Guidance for AI coding agents working in the VibeRemote repository. Read this
+Guidance for AI coding agents working in the vvhisper repository. Read this
 before making changes — several subsystems depend on hard-won, non-obvious
 platform behavior that is easy to break.
 
@@ -40,6 +41,56 @@ shared library target and shell scripts that build the audio driver and assemble
 This is a personal-use build targeting macOS 27.0. Keep the SwiftPM platform, build-script
 deployment target, and generated app bundle minimum system version aligned at 27.0.
 
+## Device-independent settings (2026-11-16)
+
+This section supersedes older Settings/menu descriptions below. Settings defaults to Dictation.
+The sidebar is System: Dictation, Dictionary, Computer Use; Device: Siri Remote Black Glass,
+Siri Remote Aluminum, Soundcore Work; About at bottom. `.remoteGlass` selects glass and
+legacy `.remote` selects aluminum; `.device` is accepted but excluded from sidebar/allCases.
+Selecting a model tab updates the existing editing-generation owner before editing mappings.
+No model picker remains. Dictionary retains the same saved entries/settings as Dictation.
+About opens one retained Diagnostics window, sharing the Settings model and existing managers.
+Hardware reports, logs, helper/daemon repair and local Soundcore audio testing live there.
+Connection/pairing, battery, mappings, Auto Disconnect and Getting Started stay in device tabs.
+Closing Settings must keep Dock presence while Diagnostics remains visible or minimized.
+
+Black Glass and Aluminum are separately selectable for editing, independently of the connected
+remote. Ordinary mappings and Siri mappings are scoped to model and app profile. The optional
+`"siri"` entry in each generation's existing overrides map preserves legacy profile decoding;
+first model-specific editing migrates legacy Siri choices without changing the other model.
+Restore Defaults affects only the selected model/profile. Runtime dispatch still uses the
+physical event's generation, never the Settings selector.
+
+Dictation owns the single Voice Input hotkey and Microphone picker (Mac inputs or Soundcore
+Work); Soundcore has no duplicate hotkey toggle. Seed shows API Key, Streaming Output, Remove
+Filler Words and Use Text Before the Cursor; no App ID field or explanatory supporting text.
+Preserve stored Seed App ID compatibility. Functional errors and permission controls may remain.
+
+The menu-bar icon is a static template voice balloon derived from the current app artwork;
+connection changes must not add a badge or replace it. Show Siri and Soundcore status/battery
+rows when connected (or actively connecting Soundcore), and no Disconnected row otherwise.
+Getting Started lives in Siri Remote Settings, not About or a Restart Onboarding menu item.
+
+## Soundcore automatic reconnect (2026-11-16)
+
+`SoundcoreManager.start()` resumes only a previously verified device at app launch.
+Persist `soundcoreVerifiedDevice` only after device info plus the secure handshake;
+match fresh advertisements by the saved address or CoreBluetooth UUID, never by name
+alone, and never connect arbitrary discovered Soundcore devices automatically. A
+system-connected lookup can supply the saved UUID; cached disconnected peripherals
+must not stand in for current discovery. Reconnect uses the existing single manager,
+30-second scans with duplicates disabled, a 3-second scan gap and capped failure
+backoff. Manual Disconnect/Stop Searching pauses it until Reconnect or app relaunch;
+shutdown cancels pending work. Automatic reconnection never starts microphone capture.
+
+Microphone holds and device transfers have different lifetimes. Preserve the verified
+Soundcore transfer/key across pause/release; never send another 1A/07 merely because a
+new hotkey hold starts. Arm the new hold's sequence boundary before resuming capture.
+Fetch subsequent metadata pages if the current recording is absent from a full page.
+Open new transfers with buffered offset zero, accepting only the current recording
+and discarding pre-hold frames. Clear transfer state on completion/disconnection.
+See `Design/Research/Soundcore/ReferenceParity.md` for protocol evidence and limits.
+
 ## Repository layout
 
 The repository has two top-level folders:
@@ -50,7 +101,7 @@ The repository has two top-level folders:
   `app/` (the scripts resolve paths from their own location, so `app/build.sh` also works).
 - `website/` — the static official site (`index.html`, `styles.css`, `assets/`). No build
   step, no JavaScript framework. Its paint texture and icons are derived from
-  `app/Resources/OnboardingSky.png` and `app/VibeRemoteAppIcon.png`; regenerate them with
+  `app/Resources/OnboardingSky.png` and `app/vvhisperAppIcon.png`; regenerate them with
   `sips` (see `website/README.md`) instead of committing the multi-megabyte originals twice.
 
 Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the overview
@@ -62,7 +113,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `SiriRemoteApp.swift` | `AppDelegate`: wires managers, permissions, lifecycle. |
 | `MenuBarManager.swift` | Status-item menu, mapping ownership and settings-window state updates. |
 | `SettingsWindowController.swift` | Retained native settings window, SwiftUI remote diagram, read-only button callouts, Siri action pop-up, live status snapshot. |
-| `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vibeRemoteLogPath` and `rmDebug`. |
+| `RemoteDetector.swift` | IOKit HID discovery of the remote; also defines `vvhisperLogPath` and `rmDebug`. |
 | `RemoteGeneration.swift` | Tells the 1st-gen remote from the 2nd/3rd-gen one and holds every behavioral difference between them. |
 | `ButtonProfiles.swift` | Per-app button profiles: `ButtonProfileSet` (General + app profiles, resolution, editing, seeds), `ButtonProfileStore`, `ButtonProfileLatch`, `InstalledApp` scan for Add App. |
 | `RemoteInputHandler.swift` | Opens HID interfaces, maps buttons, sends synthetic key events, performs the `0xAF` input-enable Feature write. |
@@ -74,13 +125,13 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `SystemVolume.swift` | CoreAudio volume read/set + revert guard. |
 | `MicrophoneBridgeManager.swift` | Orchestrates the mic bridge (both engines). The largest and most delicate file. |
 | `RemoteAudioProtocol/SiriRemotePacketParser.swift` | Shared, testable HID/ACL/L2CAP audio parser for both remote families. |
-| `VoiceBridgeHelper/main.swift` | **Separate executable** (`VibeRemoteVoiceBridge`): parses HCI/HID records, Opus-decodes, plays into the virtual audio device. |
-| `PrivilegedHelper/main.swift` | **Separate executable** (`VibeRemoteHelper`): root LaunchDaemon registered via `SMAppService`; performs privileged work over XPC. |
+| `VoiceBridgeHelper/main.swift` | **Separate executable** (`vvhisperVoiceBridge`): parses HCI/HID records, Opus-decodes, plays into the virtual audio device. |
+| `PrivilegedHelper/main.swift` | **Separate build product** (`vvhisperHelper`, installed as `VibeRemoteHelper` for launchd compatibility): root LaunchDaemon registered via `SMAppService`; performs privileged work over XPC. |
 | `HelperProtocol/HelperProtocol.swift` | Library target shared by the app and daemon: the XPC contract and shared identifiers. |
 | `PrivilegedHelperClient.swift` | App-side registration/status/XPC calls for the daemon. |
 | `Vendor/SiriRemoteVoiceControl/` | Prebuilt legacy helper binaries (compatibility fallbacks). |
-| `Tests/VibeRemoteTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
-| `build.sh` | SwiftPM build → arm64-only `VibeRemote`, `VibeRemoteVoiceBridge`, `VibeRemoteHelper` binaries. |
+| `Tests/vvhisperTests/ModelTests.swift` | Unit tests (pure model/enum logic; no hardware). |
+| `build.sh` | SwiftPM build → arm64-only `vvhisper`, `vvhisperVoiceBridge`, `vvhisperHelper` binaries. |
 | `install.sh` | Developer-ID-signed build deployed over `/Applications/vvhisper.app`; checks signing continuity before atomically replacing the installed bundle. |
 | `build_audio_driver.sh` | Builds the branded `VibeRemoteAudio.driver` from upstream BlackHole source. |
 | `create_app_bundle.sh` | Runs `build.sh`, assembles `.app` (incl. driver + daemon plist), signs, optionally notarizes. |
@@ -91,7 +142,7 @@ Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the 
 | `DictationFillers.swift` | Local filler-word cleanup of Seed's final text (hesitations, clause fillers, stutters), applied when Remove Filler Words is on. |
 | `DictationHotkey.swift` | The alternative dictation hotkey: modifier choices, `DictationHotkeyGate` (hold/chord logic), and the global+local event monitor driving `DictationController` with the Mac's microphone. |
 | `AutoComputerUse.swift` | Auto Computer Use: its switch, the focused-text-field probe at Siri down, and `ComputerUseHandoff` (how a dictation hold fills and sends the Computer Use bar). |
-| `VibeRemote.entitlements` | `com.apple.security.device.bluetooth` and `com.apple.security.device.audio-input` (Dictation records the virtual device under the hardened runtime). |
+| `vvhisper.entitlements` | `com.apple.security.device.bluetooth` and `com.apple.security.device.audio-input` (Dictation records the virtual device under the hardened runtime). |
 
 ## Build, run, test
 
@@ -183,7 +234,7 @@ it is not proof of generation. Classification uses the whole physical interface 
   confirm active caret positioning; outside it, old surface press is Enter and aluminum center is reserved. Do not remap the old surface to Siri again.
 - **Siri takes only dictation actions.** Siri only takes the held
   dictation keys (Space, Right Command, Right Option; user's choice 2026-11-08) plus
-  `vibeDictation` (`isAssignableToSiriButton` = `requiresHold || vibeDictation`), and `loadSiriButtonAction` re-checks it on read, so an
+  `vvhisperDictation` (`isAssignableToSiriButton` = `requiresHold || vvhisperDictation`), and `loadSiriButtonAction` re-checks it on read, so an
   older saved Siri choice outside that set falls back to Space.
 - **Per-button remapping (2026-11-08, user's request).** Settings' pills edit Back/Menu, TV,
   Play/Pause (aluminum), Volume Up/Down and Power. `RemoteButtonMapping.choices` is the one
@@ -388,7 +439,7 @@ This is where almost all the subtlety lives. The bridge runs as a pipeline:
 
 ```
 Siri Remote (Opus audio, HID report 0xFA / ATT "1B 35" voice frames, emitted ONLY while the Siri button is held)
-  → capture layer  → stdin of VibeRemoteVoiceBridge (user session)
+  → capture layer  → stdin of vvhisperVoiceBridge (user session)
   → SiriRemotePacketParser → OpusDecoder → AVAudioEngine → "VibeRemote" virtual device
   → that device's loopback appears as a system audio *input*
 ```
@@ -543,7 +594,7 @@ helper daemon current). Anything that would raise an administrator prompt stays 
 the explicit `Start`/`Restart` menu action — app launch must never surprise the user
 with a password dialog.
 
-For the PacketLogger engine, launch the user-session `VibeRemoteVoiceBridge` reader before
+For the PacketLogger engine, launch the user-session `vvhisperVoiceBridge` reader before
 starting the privileged PacketLogger supervisor. A reconnecting remote can emit its voice-start
 marker during supervisor startup; if the helper launches second, its replay filter discards that
 marker and the rest of the Siri hold is undecodable. Menu readiness is a separate state from
@@ -783,7 +834,7 @@ The black-glass remote sends ATT `1B 23 00` notifications. Start/end payloads ar
 at byte 9 and packet at byte 10. Reassemble L2CAP using the actual ACL connection
 handle (0x0043 observed), never hardcode 0x0040 or assume 31-byte ACL records.
 The shared RemoteAudioProtocol target tests fragmentation and interleaved generations.
-`VibeRemoteVoiceBridge --validate-capture < capture.log` decodes locally without opening
+`vvhisperVoiceBridge --validate-capture < capture.log` decodes locally without opening
 an audio device, reporting packet count and peak. Capture may contain speech; keep local.
 
 ## Direct shared-memory HAL experiment
@@ -1237,7 +1288,7 @@ its view and the `ComputerUseAgent` model; `AgentDock.swift` holds the Dock piec
 ### VibeRemote Dictation (2026-11-08)
 
 At the user's request VibeRemote can transcribe itself instead of holding a key for a third-party
-dictation app. Siri's `vibeDictation` action (pill title "Dictation"; the Siri pill is the only switch —
+dictation app. Siri's `vvhisperDictation` action (pill title "Dictation"; the Siri pill is the only switch —
 Settings › Dictation has no on/off toggle since 2026-11-09, user's request, and only says
 whether Siri uses it) begins `DictationController` on Siri down and ends it at the
 exact moment a mapped dictation key would be released: `holdsDictation` routes it through the

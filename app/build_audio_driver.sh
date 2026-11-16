@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Builds the VibeRemote virtual audio driver.
+# Builds the vvhisper virtual audio driver.
 #
 # The driver is BlackHole (github.com/ExistentialAudio/BlackHole, GPL-3.0) rebuilt with
-# VibeRemote branding so the user only ever sees one product: the CoreAudio device, driver,
-# and manufacturer are all named "VibeRemote". BlackHole exposes these as compile-time
+# vvhisper branding so the user only ever sees one product: the CoreAudio device, driver,
+# and manufacturer are all named "vvhisper". BlackHole exposes these as compile-time
 # constants. scripts/patch_audio_driver.py also adds the direct shared-memory input.
 #
 # GPL-3.0 compliance: the driver we ship is a modified BlackHole build. See
@@ -21,7 +21,7 @@ BUNDLE_ID="com.viberemote.audio"
 CHANNELS="${CHANNELS:-2}"
 BLACKHOLE_REF="${BLACKHOLE_REF:-ffcb74433fbcf8c8ca5c736677c1a4864384dc09}"
 if [ "${ARCHS:-arm64}" != "arm64" ]; then
-    echo "Error: VibeRemote supports arm64 only; remove the ARCHS override." >&2
+    echo "Error: vvhisper supports arm64 only; remove the ARCHS override." >&2
     exit 1
 fi
 # An explicit WORK_DIR is retained for driver debugging / corresponding-source export.
@@ -82,9 +82,9 @@ python3 "$ROOT_DIR/scripts/patch_audio_driver.py" "$src"
 
 # Ship our own icon. BlackHole references its icon by a fixed filename in the Xcode
 # project, so replace the file contents rather than rewiring the project.
-icon_png="$ROOT_DIR/VibeRemoteAppIcon.png"
+icon_png="$ROOT_DIR/vvhisperAppIcon.png"
 if [ -f "$icon_png" ]; then
-    iconset="$WORK_DIR/VibeRemote.iconset"
+    iconset="$WORK_DIR/vvhisper.iconset"
     rm -rf "$iconset"
     mkdir -p "$iconset"
     for size in 16 32 128 256 512; do
@@ -93,7 +93,7 @@ if [ -f "$icon_png" ]; then
             --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "$iconset" -o "$src/BlackHole/BlackHole.icns"
-    echo "Replaced driver icon with the VibeRemote icon"
+    echo "Replaced driver icon with the vvhisper icon"
 fi
 
 echo "Building $DRIVER_NAME.driver (device \"$DEVICE_NAME\", ${CHANNELS}ch)"

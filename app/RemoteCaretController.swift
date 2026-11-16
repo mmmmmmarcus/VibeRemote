@@ -499,7 +499,7 @@ struct CaretNavigationTouchGate {
 /// replies without waiting for a slow accessibility provider or queueing old motion.
 @MainActor
 final class CaretQueryPipeline<Request: Sendable, Reply: Sendable> {
-    private let queue = DispatchQueue(label: "com.viberemote.caret.read", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.vvhisper.caret.read", qos: .userInitiated)
     private let read: @Sendable (Request) -> Reply
     private let clear: @Sendable () -> Void
     private var epoch: UInt64 = 0
@@ -1039,7 +1039,7 @@ final class CaretInsertionPoint: @unchecked Sendable {
         /// ranges, observed in ChatGPT on 2026-11-10), the caret at the end of the text: the
         /// right edge of the last text element's frame, which Chromium still reports.
         case textEnd
-        /// The same, once that element wraps: its last line's end, laid out by VibeRemote (see
+        /// The same, once that element wraps: its last line's end, laid out by vvhisper (see
         /// `wrappedEnd`). The line is exact; the position along it is an estimate.
         case wrappedEnd
     }
@@ -1057,7 +1057,7 @@ final class CaretInsertionPoint: @unchecked Sendable {
         var shape = ""
     }
 
-    private let queue = DispatchQueue(label: "com.viberemote.caret-insertion", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.vvhisper.caret-insertion", qos: .userInitiated)
     private let query = CaretAXQuery()
     private var inFlight = false
     private var pending: (@MainActor @Sendable (Reading?) -> Void)?
@@ -1308,7 +1308,7 @@ final class CaretInsertionPoint: @unchecked Sendable {
     }
 }
 
-/// `VibeRemote --probe-caret`: one dictation-cursor read of whatever editor has focus, with the
+/// `vvhisper --probe-caret`: one dictation-cursor read of whatever editor has focus, with the
 /// query's step-by-step diagnostics in the app log (`Caret entry:` lines). For finding why an app shows no
 /// cursor without holding Siri. Prints geometry and capabilities only, never editor text.
 enum CaretProbe {
@@ -1739,7 +1739,7 @@ import QuartzCore
 /// Figma 1345:6560, exported at 4x; the source SVG is bundled alongside it.
 /// Only the straight 2 pt stem adapts to the editor's line height.
 /// The two things the same cursor can mean. One silhouette, two readings: the ordinary
-/// dark one positions the caret, and the orange one says VibeRemote is listening and shows
+/// dark one positions the caret, and the orange one says vvhisper is listening and shows
 /// where the transcript will land. Caret positioning cancels on a Siri press, so the user
 /// never sees both at once.
 @MainActor

@@ -67,7 +67,7 @@ From `app/`:
 KEEP_BUILD_CACHE=1 swift test
 swift build -Xswiftc -warn-concurrency -Xswiftc -strict-concurrency=complete
 bash -n build.sh create_app_bundle.sh build_audio_driver.sh install.sh scripts/clean-build.sh scripts/prepare-update.sh
-plutil -lint VibeRemote.entitlements
+plutil -lint vvhisper.entitlements
 python3 scripts/test_updates.py
 ```
 Any failure stops the release until it is fixed. Only warnings already present before

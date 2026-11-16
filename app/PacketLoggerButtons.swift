@@ -220,7 +220,7 @@ private final class PacketCaptureReader: @unchecked Sendable {
         case touch(RemoteTextTouchFrame)
     }
     private static let maximumCaptureBytes: UInt64 = 32 * 1024 * 1024
-    private let queue = DispatchQueue(label: "com.viberemote.capture-reader", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.vvhisper.capture-reader", qos: .userInitiated)
     private let path: String
     private let notify: @Sendable () -> Void
     private let startedAt = Date()

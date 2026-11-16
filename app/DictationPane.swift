@@ -3,7 +3,7 @@ import AVFoundation
 import CoreAudio
 import SwiftUI
 
-/// Settings › Dictation: whether Siri runs VibeRemote's own dictation, which speech service
+/// Settings › Dictation: whether Siri runs vvhisper's own dictation, which speech service
 /// it uses, and the user's own keys for the cloud ones. Reads and writes the same defaults
 /// and Keychain items `DictationController` reads at the start of every hold.
 @MainActor
@@ -126,40 +126,24 @@ struct DictationPane: View {
     /// Every profile resolves Siri to Dictation, so naming them adds nothing.
     var everywhere = false
     @StateObject private var store = DictationSettingsStore()
+    @ObservedObject private var soundcore = SoundcoreManager.shared
     @State private var keyDraft = ""
-
-    /// Only what the user needs to act on: how to turn Dictation on, or which profiles use it.
-    private var usage: String? {
-        guard !profiles.isEmpty else {
-            return "Siri holds the key your own dictation app listens for. To have vvhisper transcribe instead, choose Dictation for the Siri button in the Controls pane."
-        }
-        return everywhere ? nil : "Siri uses Dictation in: \(ListFormatter.localizedString(byJoining: profiles))."
-    }
 
     /// The remote's voice comes straight from the voice helper; only the hotkey, which records
     /// the Mac's own microphone, needs Microphone access.
     private var needsMicrophone: Bool {
-        store.microphone != .authorized && store.settings.hotkey != .none
+        store.microphone != .authorized && store.settings.hotkey != .none && !soundcore.useForHotkey
     }
 
     var body: some View {
         SettingsPane(title: "Dictation") {
-            if needsMicrophone || usage != nil {
+            if needsMicrophone {
                 Section {
                     if needsMicrophone {
-                        SettingsRow(title: "Microphone Access",
-                                    subtitle: "The dictation hotkey records the Mac's own microphone.",
-                                    statusDot: .red) {
+                        SettingsRow(title: "Microphone Access", statusDot: .red) {
                             Button(store.microphone == .notDetermined ? "Allow…" : "Open Settings…",
                                    action: store.requestMicrophone)
                         }
-                    }
-                } footer: {
-                    if let usage {
-                        Text(usage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -183,15 +167,7 @@ struct DictationPane: View {
                 providerRows
             } header: {
                 Text("Service")
-            } footer: {
-                if let serviceFooter {
-                    Text(serviceFooter)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
-            DictionarySection(entries: $store.settings.dictionary, provider: store.settings.provider)
             Section {
                 SettingsRow(title: "Hotkey") {
                     Picker("", selection: $store.settings.hotkey) {
@@ -201,28 +177,26 @@ struct DictationPane: View {
                     .fixedSize()
                     .accessibilityIdentifier("settings.dictation.hotkey")
                 }
-                if store.settings.hotkey != .none {
-                    SettingsRow(title: "Microphone") {
-                        Picker("", selection: $store.hotkeyMicrophoneUID) {
-                            Text(systemMicrophoneTitle).tag("")
-                            Divider()
-                            ForEach(store.microphones, id: \.uid) { Text($0.name).tag($0.uid) }
-                            if let missing = missingMicrophone {
-                                Text("\(missing.name.isEmpty ? "Microphone" : missing.name) (Not Connected)").tag(missing.uid)
-                            }
+                SettingsRow(title: "Microphone") {
+                    Picker("", selection: Binding(get: {
+                        soundcore.useForHotkey ? "__soundcore__" : store.hotkeyMicrophoneUID
+                    }, set: { value in
+                        soundcore.useForHotkey = value == "__soundcore__"
+                        if value != "__soundcore__" { store.hotkeyMicrophoneUID = value }
+                    })) {
+                        Text(systemMicrophoneTitle).tag("")
+                        ForEach(store.microphones, id: \.uid) { Text($0.name).tag($0.uid) }
+                        Text(soundcore.ready ? "Soundcore Work" : "Soundcore Work (Not Connected)").tag("__soundcore__")
+                        if let missing = missingMicrophone {
+                            Text("\(missing.name) (Not Connected)").tag(missing.uid)
                         }
-                        .labelsHidden()
-                        .fixedSize()
-                        .accessibilityIdentifier("settings.dictation.hotkeyMicrophone")
                     }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityIdentifier("settings.dictation.hotkeyMicrophone")
                 }
             } header: {
-                Text("Alternative Dictation Hotkey")
-            } footer: {
-                Text("Hold this key to dictate the same way as holding Siri, through the microphone you choose: the remote's microphone only works while Siri is held. Same as System uses the Mac's input setting, or another microphone while that is vvhisper, and a chosen microphone that is not connected falls back to it. Pressing another key while holding it is treated as a shortcut and records nothing.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text("Voice Input")
             }
         }
         .onAppear(perform: store.refresh)
@@ -242,15 +216,6 @@ struct DictationPane: View {
         guard let choice = store.settings.hotkeyMicrophone,
               !store.microphones.contains(where: { $0.uid == choice.uid }) else { return nil }
         return choice
-    }
-
-    private var serviceFooter: String? {
-        switch store.settings.provider {
-        case .apple: return "Runs on this Mac with Apple's speech model. It downloads its language the first time you dictate. Automatic uses your Mac's language."
-        case .whisperKit: return "Runs OpenAI's Whisper on this Mac. Download a model once; nothing leaves your Mac."
-        case .openAI: return "Sends each recording to OpenAI with your own API key."
-        case .seedASR: return nil
-        }
     }
 
     /// The chosen service's own settings, inside the Service group.
@@ -289,35 +254,28 @@ struct DictationPane: View {
             }
         case .seedASR:
             keyRow(provider: .seedASR, prompt: "API key or Access Token")
-            SettingsRow(title: "Type While Speaking",
-                        subtitle: "Words appear as you talk without being rewritten; when you let go, the whole clip is recognized once more and the text is refined.") {
+            SettingsRow(title: "Streaming Output") {
                 Toggle("", isOn: $store.settings.seedStreaming)
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
-            SettingsRow(title: "Remove Filler Words",
-                        subtitle: "Drops um, uh, 嗯, 那个 and repeated words.") {
+            SettingsRow(title: "Remove Filler Words") {
                 Toggle("", isOn: $store.settings.seedRemoveFillers)
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
-            SettingsRow(title: "Use Text Before the Cursor",
-                        subtitle: "Sends up to 500 characters already in the field with your audio, so names and topics come out right.") {
+            SettingsRow(title: "Use Text Before the Cursor") {
                 Toggle("", isOn: $store.settings.seedEditorContext)
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
-            SettingsRow(title: "App ID") {
-                TextField("", text: $store.settings.seedAppID, prompt: Text("Older console only"))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-            }
+
         }
     }
 
     private func keyRow(provider: DictationProvider, prompt: String) -> some View {
         let saved = store.savedKeys.contains(provider)
-        return SettingsRow(title: "API Key", subtitle: saved ? "Saved in Keychain" : nil) {
+        return SettingsRow(title: "API Key") {
             HStack(spacing: SettingsMetrics.md) {
                 SecureField("", text: $keyDraft, prompt: Text(saved ? "Replace key" : prompt))
                     .textFieldStyle(.roundedBorder)
@@ -371,21 +329,15 @@ private struct DictionarySection: View {
             .accessibilityIdentifier("settings.dictation.addWord")
         } header: {
             Text("Dictionary")
-        } footer: {
-            Text(footer)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
+}
 
-    private var footer: String {
-        let hint: String
-        switch provider {
-        case .seedASR: hint = "Seed ASR listens for these words when it refines the text after you let go (the first ~90 tokens' worth)."
-        case .openAI: hint = "OpenAI is given these words as the spellings to prefer."
-        case .apple, .whisperKit: hint = "This service takes no word hints, so only their capitalization is fixed."
+struct DictionaryPane: View {
+    @StateObject private var store = DictationSettingsStore()
+    var body: some View {
+        SettingsPane(title: "Dictionary") {
+            DictionarySection(entries: $store.settings.dictionary, provider: store.settings.provider)
         }
-        return "Names and terms dictation tends to get wrong. \(hint)"
     }
 }

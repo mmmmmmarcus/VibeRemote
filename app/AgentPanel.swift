@@ -106,7 +106,7 @@ final class ComputerUseAgent: ObservableObject {
     }
 }
 
-/// Computer Use pops up from VibeRemote's Dock icon. It takes focus while composing so the
+/// Computer Use pops up from vvhisper's Dock icon. It takes focus while composing so the
 /// user's dictation or input method types the command into it, then hands focus back to the
 /// target app while the agent works and the tile stays green. See AgentDock.swift.
 @MainActor
@@ -123,7 +123,7 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     private var previousApp: NSRunningApplication?
     private var presentationVisibleFrame: CGRect?
     private var resultDismissal: DispatchWorkItem?
-    /// True while VibeRemote shows its Dock icon on Computer Use's behalf.
+    /// True while vvhisper shows its Dock icon on Computer Use's behalf.
     private(set) var holdsDock = false
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -308,7 +308,7 @@ final class AgentPanelController: NSObject, NSWindowDelegate {
     private func makePanel() -> AgentCalloutPanel {
         let panel = AgentCalloutPanel(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 120),
                                       styleMask: [.borderless], backing: .buffered, defer: false)
-        panel.identifier = NSUserInterfaceItemIdentifier("VibeRemote.AgentPanel")
+        panel.identifier = NSUserInterfaceItemIdentifier("vvhisper.AgentPanel")
         panel.title = "Computer Use"
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -389,13 +389,13 @@ struct AgentCalloutView: View {
                     .onSubmit { agent.submit() }
                     .padding(.vertical, 4)
                     .accessibilityLabel("Computer Use")
-                    .accessibilityIdentifier("VibeRemote.Agent.Command")
-                barButton("arrow.up", label: "Send", id: "VibeRemote.Agent.Send") { agent.submit() }
+                    .accessibilityIdentifier("vvhisper.Agent.Command")
+                barButton("arrow.up", label: "Send", id: "vvhisper.Agent.Send") { agent.submit() }
                     .disabled(!agent.canSubmit)
             case .running:
                 ProgressView().controlSize(.small)
                 statusLine(agent.status ?? "Working…")
-                barButton("stop.fill", label: "Stop", id: "VibeRemote.Agent.Stop") { agent.stop() }
+                barButton("stop.fill", label: "Stop", id: "vvhisper.Agent.Stop") { agent.stop() }
             case .finished(let text):
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 statusLine(text)
@@ -431,7 +431,7 @@ struct AgentCalloutView: View {
             .truncationMode(.tail)
             .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
             .help(text)
-            .accessibilityIdentifier("VibeRemote.Agent.Status")
+            .accessibilityIdentifier("vvhisper.Agent.Status")
     }
 
     private func barButton(_ symbol: String, label: String, id: String,

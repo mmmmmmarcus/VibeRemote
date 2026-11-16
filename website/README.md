@@ -46,9 +46,9 @@ The texture and icons are downsized copies of files in `app/`:
 
 ```bash
 sips -s format jpeg -s formatOptions 62 -Z 1400 app/Resources/OnboardingSky.png --out website/assets/paint-sky.jpg
-sips -Z 256 app/VibeRemoteAppIcon.png --out website/assets/icon-256.png
-sips -Z 180 app/VibeRemoteAppIcon.png --out website/assets/apple-touch-icon.png
-sips -Z 64  app/VibeRemoteAppIcon.png --out website/assets/favicon.png
+sips -Z 256 app/vvhisperAppIcon.png --out website/assets/icon-256.png
+sips -Z 180 app/vvhisperAppIcon.png --out website/assets/apple-touch-icon.png
+sips -Z 64  app/vvhisperAppIcon.png --out website/assets/favicon.png
 ```
 
 ## Content upkeep

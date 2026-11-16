@@ -5,14 +5,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
-APP_NAME="VibeRemote"
-VOICE_BRIDGE_NAME="VibeRemoteVoiceBridge"
-HELPER_NAME="VibeRemoteHelper"
+APP_NAME="vvhisper"
+VOICE_BRIDGE_NAME="vvhisperVoiceBridge"
+HELPER_NAME="vvhisperHelper"
 CONFIGURATION="${CONFIGURATION:-release}"
 MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-27.0}"
 # This application targets Apple Silicon only. Reject old universal overrides.
 if [ "${ARCHS:-arm64}" != "arm64" ]; then
-    echo "Error: VibeRemote supports arm64 only; remove the ARCHS override." >&2
+    echo "Error: vvhisper supports arm64 only; remove the ARCHS override." >&2
     exit 1
 fi
 if ! command -v xcrun >/dev/null 2>&1 || ! xcrun --show-sdk-path --sdk macosx >/dev/null 2>&1; then
@@ -22,7 +22,7 @@ fi
 
 case "${KEEP_BUILD_CACHE:-0}" in
     0)
-        scratch_path="$(mktemp -d "${TMPDIR:-/tmp}/viberemote-build.XXXXXX")"
+        scratch_path="$(mktemp -d "${TMPDIR:-/tmp}/vvhisper-build.XXXXXX")"
         trap 'rm -rf -- "$scratch_path"' EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
@@ -48,16 +48,16 @@ done
 
 # The settings asset loader resolves this bundle inside the app's Resources directory.
 # Keep only this small staged resource bundle for create_app_bundle.sh.
-resource_bundle="$bin_path/VibeRemote_VibeRemote.bundle"
+resource_bundle="$bin_path/vvhisper_vvhisper.bundle"
 if [ ! -d "$resource_bundle" ]; then
     echo "Error: SwiftPM did not produce the settings resource bundle"
     exit 1
 fi
 # SwiftPM's native and Xcode build systems use different bundle layouts. Merging
 # them leaves a stale Contents/Resources that NSBundle prefers over fresh flat files.
-rm -rf "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
+rm -rf "$ROOT_DIR/.build/vvhisper_vvhisper.bundle"
 mkdir -p "$ROOT_DIR/.build"
-ditto "$resource_bundle" "$ROOT_DIR/.build/VibeRemote_VibeRemote.bundle"
+ditto "$resource_bundle" "$ROOT_DIR/.build/vvhisper_vvhisper.bundle"
 
 python3 scripts/stage-sparkle.py "$scratch_path" "$ROOT_DIR/.build/Sparkle.framework"
 
