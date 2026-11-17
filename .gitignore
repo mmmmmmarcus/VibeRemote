@@ -42,11 +42,18 @@ Thumbs.db
 AudioDriver/
 VibeRemoteHelper
 
-app/Release/artifacts/
+macos/Release/artifacts/
 
 vvhisper.app/
 
 # Current product build outputs
-app/vvhisper
-app/vvhisperVoiceBridge
-app/vvhisperHelper
+macos/vvhisper
+macos/vvhisperVoiceBridge
+macos/vvhisperHelper
+
+# iOS generated build outputs
+ios/build/
+ios/.derived/
+
+# Rebuilt by ios/scripts/compile-rime.py
+/ios/Typing/Resources/Rime/build/

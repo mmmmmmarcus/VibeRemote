@@ -8,8 +8,8 @@ notarization defaults to `VVHISPER_NOTARY`, which must be configured for the per
 account. The helper trust requirement must match this team. Preserve legacy
 `com.viberemote.*` identities, installed helper/driver paths, storage paths, persisted action
 values, and GitHub/Sparkle URLs for compatibility. SwiftPM targets, resource bundles and
-source assets now use vvhisper (2026-11-16); see `app/Design/NamingCompatibility.md`. Older VibeRemote wording below is
-historical. See `app/Release/README.md` for the signing-team migration and validation.
+source assets now use vvhisper (2026-11-16); see `macos/Design/NamingCompatibility.md`. Older VibeRemote wording below is
+historical. See `macos/Release/README.md` for the signing-team migration and validation.
 
 
 Guidance for AI coding agents working in the vvhisper repository. Read this
@@ -25,7 +25,7 @@ required. Siri Remote and future supported devices enhance the experience.
 
 The four priorities are general dictation; faster and easier Computer Use; more device
 support; and product design that fits this direction. See `Design/ProductDirection.md`
-(under `app/`) for scope, current foundations, and planned work.
+(under `macos/`) for scope, current foundations, and planned work.
 
 Current capabilities include Mac-microphone keyboard dictation, transcription and text
 insertion, a Computer Use agent, and Siri Remote buttons, touch, connection/battery status,
@@ -93,21 +93,22 @@ See `Design/Research/Soundcore/ReferenceParity.md` for protocol evidence and lim
 
 ## Repository layout
 
-The repository has two top-level folders:
+The repository has three platform/site folders:
 
-- `app/` — the macOS product: SwiftPM package, scripts, resources, tests, design/research
+- `macos/` — the macOS product: SwiftPM package, scripts, resources, tests, design/research
   material, release tooling and the product `README.md`. **Every path in this file is
-  relative to `app/` unless it says otherwise**, and every build/test command runs from
-  `app/` (the scripts resolve paths from their own location, so `app/build.sh` also works).
+  relative to `macos/` unless it says otherwise**, and every build/test command runs from
+  `macos/` (the scripts resolve paths from their own location, so `macos/build.sh` also works).
+- `ios/` — iOS host app and keyboard extension, generated with XcodeGen. Read `ios/AGENTS.md` before editing; macOS-only build and platform rules below do not apply to iOS.
 - `website/` — the static official site (`index.html`, `styles.css`, `assets/`). No build
   step, no JavaScript framework. Its paint texture and icons are derived from
-  `app/Resources/OnboardingSky.png` and `app/vvhisperAppIcon.png`; regenerate them with
+  `macos/Resources/OnboardingSky.png` and `macos/vvhisperAppIcon.png`; regenerate them with
   `sips` (see `website/README.md`) instead of committing the multi-megabyte originals twice.
 
 Only `.github/`, `.gitattributes`, `.gitignore`, `AGENTS.md`, `LICENSE` and the overview
-`README.md` stay at the repository root. CI sets `working-directory: app`.
+`README.md` stay at the repository root. CI sets `working-directory: macos`.
 
-| Path (under `app/`) | Role |
+| Path (under `macos/`) | Role |
 |------|------|
 | `main.swift` | App entry point (`NSApplicationMain`-style bootstrap). |
 | `SiriRemoteApp.swift` | `AppDelegate`: wires managers, permissions, lifecycle. |
@@ -204,7 +205,7 @@ permission loss after matching personal-signed updates is a bug to investigate, 
 expected reinstall step. `SIGNING_MODE=local ./create_app_bundle.sh` explicitly builds
 ad-hoc code for isolated development only; do not install it over the personal build.
 
-CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27, inside `app/`) runs: `swift build`, `swift test`,
+CI (`.github/workflows/ci.yml`, `xcode-27`, arm64 / macOS 27, inside `macos/`) runs: `swift build`, `swift test`,
 the strict-concurrency build, `bash -n` on both scripts, and `plutil -lint` on
 the entitlements. Keep all of these green.
 
@@ -1641,3 +1642,10 @@ This also moves an already-visible bar when invoked from another monitor. The ba
 bottom-centered in that screen's visible frame, above the Dock, and keeps that anchor during
 text/status resizing. Do not use vvhisper's key window / NSScreen.main as the primary screen
 selector; Settings or the previously opened bar can belong to another monitor.
+
+## iOS platform addition (2026-11-16)
+
+The old root `app/` directory is now `macos/`; preserve all bundle IDs and installed
+paths. iOS lives in `ios/` with its own AGENTS.md, XcodeGen project and build/test
+scripts. macOS remains SwiftPM-only. iOS uses the phone microphone and Seed ASR;
+accessory support and Computer Use are outside this first iOS prototype.

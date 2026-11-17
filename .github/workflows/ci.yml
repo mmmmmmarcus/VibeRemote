@@ -9,8 +9,8 @@ jobs:
     runs-on: xcode-27
     defaults:
       run:
-        # The product lives in app/; website/ is static and has no build step.
-        working-directory: app
+        # The product lives in macos/; website/ is static and has no build step.
+        working-directory: macos
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain

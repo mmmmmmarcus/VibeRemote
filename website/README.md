@@ -24,7 +24,7 @@ for macOS. The Mac’s built-in microphone and keyboard are the baseline; Siri R
 future supported devices are optional enhancements. Lead with Dictation and Computer Use,
 then explain the benefits of accessories without making them a prerequisite.
 
-Follow the four priorities in [Product direction](../app/Design/ProductDirection.md):
+Follow the four priorities in [Product direction](../macos/Design/ProductDirection.md):
 general dictation, faster and easier Computer Use, more device support, and product design
 that fits that direction. The current page remains centered on Siri Remote; this document
 records the intended redesign, not a claim that the live page has already been redesigned.
@@ -42,13 +42,13 @@ Only advertise additional device integrations once they are implemented and veri
 
 ## Regenerating assets
 
-The texture and icons are downsized copies of files in `app/`:
+The texture and icons are downsized copies of files in `macos/`:
 
 ```bash
-sips -s format jpeg -s formatOptions 62 -Z 1400 app/Resources/OnboardingSky.png --out website/assets/paint-sky.jpg
-sips -Z 256 app/vvhisperAppIcon.png --out website/assets/icon-256.png
-sips -Z 180 app/vvhisperAppIcon.png --out website/assets/apple-touch-icon.png
-sips -Z 64  app/vvhisperAppIcon.png --out website/assets/favicon.png
+sips -s format jpeg -s formatOptions 62 -Z 1400 macos/Resources/OnboardingSky.png --out website/assets/paint-sky.jpg
+sips -Z 256 macos/vvhisperAppIcon.png --out website/assets/icon-256.png
+sips -Z 180 macos/vvhisperAppIcon.png --out website/assets/apple-touch-icon.png
+sips -Z 64  macos/vvhisperAppIcon.png --out website/assets/favicon.png
 ```
 
 ## Content upkeep

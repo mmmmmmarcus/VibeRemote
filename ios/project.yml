@@ -1,0 +1,99 @@
+name: vvhisperIOS
+options:
+  deploymentTarget:
+    iOS: '27.0'
+settings:
+  configs:
+    Debug:
+      GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "DEBUG=1"]
+  base:
+    SWIFT_VERSION: '5.0'
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: Q9MD524YL5
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: '1'
+    IPHONEOS_DEPLOYMENT_TARGET: '27.0'
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: '1'
+    SWIFT_INCLUDE_PATHS: '$(inherited) $(PROJECT_DIR)/Typing/RimeModule'
+targets:
+  vvhisperIOS:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - path: ../macos/vvhisper.icon
+        type: file
+        buildPhase: resources
+      - Shared
+      - ASR
+      - path: Typing
+        excludes: [Resources]
+      - path: build/resources/Rime
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vvhisper.ios
+        PRODUCT_NAME: vvhisper
+        ASSETCATALOG_COMPILER_APPICON_NAME: vvhisper
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: App/LocalKeyboardReturn.h
+    dependencies:
+      - target: vvhisperKeyboard
+      - sdk: libz.tbd
+      - sdk: libc++.tbd
+      - framework: build/dependencies/librime-static.xcframework
+        embed: false
+  vvhisperKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Keyboard
+      - Shared
+      - path: Typing
+        excludes: [Resources]
+      - path: build/resources/Rime
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vvhisper.ios.keyboard
+        PRODUCT_NAME: vvhisperKeyboard
+        INFOPLIST_FILE: Keyboard/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Keyboard/Keyboard.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - sdk: libc++.tbd
+      - framework: build/dependencies/librime-static.xcframework
+        embed: false
+  vvhisperIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+      - Keyboard/KeyboardViewController.swift
+      - Keyboard/KeyboardMetrics.swift
+      - Keyboard/CandidateButton.swift
+      - Keyboard/KeyboardTouchSurface.swift
+      - Keyboard/KeyPreviewView.swift
+      - Keyboard/SymbolAlternativesView.swift
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) KEYBOARD_TESTING"
+        PRODUCT_BUNDLE_IDENTIFIER: com.vvhisper.ios.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/vvhisper.app/vvhisper"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: vvhisperIOS
+schemes:
+  vvhisperIOS:
+    build:
+      targets:
+        vvhisperIOS: all
+    test:
+      targets: [vvhisperIOSTests]

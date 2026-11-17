@@ -15,17 +15,18 @@ The four development priorities are:
 - **Product design:** make onboarding, navigation, and communication reflect a voice-first
   product with optional device enhancements.
 
-See [Product direction](app/Design/ProductDirection.md) for the intended experience,
+See [Product direction](macos/Design/ProductDirection.md) for the intended experience,
 current foundations, and implementation boundaries. Additional device support and the
 product redesign are planned work, not claims about features already shipped.
 
 | Folder | What it holds |
 |---|---|
-| [`app/`](app/) | The macOS product — SwiftPM package, build/sign scripts, tests, release tooling. Start with [app/README.md](app/README.md). |
+| [`macos/`](macos/) | The macOS product — SwiftPM package, build/sign scripts, tests, release tooling. Start with [macos/README.md](macos/README.md). |
+| [`ios/`](ios/) | iOS companion app and custom voice keyboard. See [ios/README.md](ios/README.md). |
 | [`website/`](website/) | The official static website. See [website/README.md](website/README.md). |
 
 ```bash
-cd app
+cd macos
 ./install.sh        # Developer ID signed build into /Applications
 swift test
 ```
@@ -34,4 +35,4 @@ Download the latest build from [GitHub Releases](https://github.com/mmmmmmarcus/
 
 Agent and contributor guidance lives in [AGENTS.md](AGENTS.md). vvhisper is MIT licensed
 ([LICENSE](LICENSE)); third-party components keep their own terms
-([app/THIRD_PARTY_NOTICES.md](app/THIRD_PARTY_NOTICES.md)).
+([macos/THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md)).

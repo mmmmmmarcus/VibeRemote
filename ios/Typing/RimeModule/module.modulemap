@@ -1,0 +1,4 @@
+module CRime {
+    header "RimeBridge.h"
+    export *
+}

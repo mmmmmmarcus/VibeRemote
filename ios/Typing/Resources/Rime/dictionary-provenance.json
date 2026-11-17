@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/iDvel/rime-ice",
+  "commit": "927e1cf1d3eeb9bf4be85e3f684dba4dd485b6f6",
+  "license": "GPL-3.0",
+  "files": {
+    "cn_dicts/8105.dict.yaml": {
+      "sha256": "1f9a42b91dea6982baee2551981780271aeffd78876662b9c9f324e56b37b120",
+      "entries": 8757
+    },
+    "cn_dicts/base.dict.yaml": {
+      "sha256": "c1f07daa4680a437a04169211e4a80b19923fd61cff322753d3ee98a7e1bffc8",
+      "entries": 543423
+    },
+    "cn_dicts/ext.dict.yaml": {
+      "sha256": "f713d82f5a3c38bf955fef631353c6bd08c3e1ae6674d7db0c4f286480d760a1",
+      "entries": 339214
+    }
+  },
+  "entry_count": 891394
+}

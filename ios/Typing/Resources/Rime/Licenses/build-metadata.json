@@ -1,0 +1,57 @@
+{
+  "packaging_version": "1.17.0-pack.10.0.0",
+  "upstream_repo": "rime/librime",
+  "upstream_ref": "1.17.0",
+  "upstream_version": "1.17.0",
+  "upstream_commit": "33e78140250125871856cdc5b42ddc6a5fcd3cd4",
+  "packaging_commit": "19be74c28f92d083569a27eb7ab73ae3b54b5036",
+  "xcode_version": "Xcode 16.4 Build version 16F6",
+  "runner_macos_version": "15.7.9",
+  "opencc_data": {"opencc_version": "1.1.9", "files": 31},
+  "plugins": [
+    {
+      "name": "logsink",
+      "module": "logsink",
+      "repo": "ghostflyby/librime-xcframework",
+      "commit": "19be74c28f92d083569a27eb7ab73ae3b54b5036",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "lua",
+      "module": "lua",
+      "repo": "hchunhui/librime-lua",
+      "commit": "ad1e4a6c98abf634dd34242a747f9b1d5d069fbe",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "octagram",
+      "module": "octagram",
+      "repo": "lotem/librime-octagram",
+      "commit": "57d18b9f58e5284bd891d559f6bdd16cf60341e9",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "predict",
+      "module": "predict",
+      "repo": "rime/librime-predict",
+      "commit": "920bd41ebf6f9bf6855d14fbe80212e54e749791",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "varpage",
+      "module": "varpage",
+      "repo": "ghostflyby/librime-xcframework",
+      "commit": "19be74c28f92d083569a27eb7ab73ae3b54b5036",
+      "license": "BSD-3-Clause"
+    }
+  ],
+  "artifacts": [
+    "librime-static.xcframework.zip",
+    "librime-dynamic.xcframework.zip",
+    "librime-stub.zip",
+    "LICENSE.txt",
+    "THIRD_PARTY_NOTICES.md",
+    "third-party-notices.zip",
+    "build-metadata.json"
+  ]
+}
