@@ -6,7 +6,7 @@ struct KeyboardTextDestination: Equatable {
     let after: String?
     let selection: String?
     @MainActor init(_ proxy: UITextDocumentProxy) {
-        id = proxy.documentIdentifier
+        id = KeyboardDocumentIdentity.snapshot(proxy)
         before = proxy.documentContextBeforeInput; after = proxy.documentContextAfterInput
         selection = proxy.selectedText
     }
@@ -29,7 +29,7 @@ final class ClearTextSession {
         isUpdating = true
         defer { isUpdating = false; expected = KeyboardTextDestination(proxy) }
         for _ in 0..<batchSize {
-            guard proxy.documentIdentifier == expected.id else { return .destinationChanged }
+            guard KeyboardDocumentIdentity.snapshot(proxy) == expected.id else { return .destinationChanged }
             guard proxy.hasText else { return .finished }
             guard remaining > 0, ProcessInfo.processInfo.systemUptime < deadline else { return .unavailable }
             remaining -= 1
@@ -43,10 +43,10 @@ final class ClearTextSession {
                 // can therefore be a blank line, not the end of the document.
                 let prior = KeyboardTextDestination(proxy)
                 proxy.deleteBackward()
-                guard proxy.documentIdentifier == expected.id else { return .destinationChanged }
+                guard KeyboardDocumentIdentity.snapshot(proxy) == expected.id else { return .destinationChanged }
                 if proxy.hasText, KeyboardTextDestination(proxy) == prior {
                     proxy.adjustTextPosition(byCharacterOffset: 1)
-                    guard proxy.documentIdentifier == expected.id else { return .destinationChanged }
+                    guard KeyboardDocumentIdentity.snapshot(proxy) == expected.id else { return .destinationChanged }
                     proxy.deleteBackward()
                 }
             } else {
@@ -54,7 +54,7 @@ final class ClearTextSession {
                 // A one-character probe also crosses an empty paragraph boundary.
                 let prior = KeyboardTextDestination(proxy)
                 proxy.adjustTextPosition(byCharacterOffset: max(1, after?.utf16.count ?? 0))
-                guard proxy.documentIdentifier == expected.id else { return .destinationChanged }
+                guard KeyboardDocumentIdentity.snapshot(proxy) == expected.id else { return .destinationChanged }
                 guard KeyboardTextDestination(proxy) != prior else { return .unavailable }
                 proxy.deleteBackward()
             }

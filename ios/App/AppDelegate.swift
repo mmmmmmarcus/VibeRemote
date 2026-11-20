@@ -18,7 +18,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let navigation = UINavigationController(rootViewController: home)
         navigation.navigationBar.prefersLargeTitles = true
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--keyboard-test") {
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-test") || ProcessInfo.processInfo.arguments.contains("--verify-cursor") || ProcessInfo.processInfo.arguments.contains("--verify-haptics") || ProcessInfo.processInfo.arguments.contains("--verify-dictation") {
             navigation.setViewControllers([home, KeyboardTestViewController()], animated: false)
         }
         #endif
@@ -40,6 +40,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         keyboardReturn.activate(request, in: scene)
     }
     func sceneDidBecomeActive(_ scene: UIScene) {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--verify-cursor") || ProcessInfo.processInfo.arguments.contains("--verify-haptics") || ProcessInfo.processInfo.arguments.contains("--verify-dictation") { return }
+        #endif
         // Opening the app, including a keyboard handoff, prepares voice input.
         // enable() coalesces duplicate requests and waits for microphone permission.
         VoiceHost.shared.enable()

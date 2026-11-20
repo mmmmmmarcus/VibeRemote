@@ -1,13 +1,17 @@
 # vvhisper app icon
 
-The speech balloon and three voice bars represent the voice interface to the computer. The orange palette and balloon silhouette follow the [Figma reference](https://www.figma.com/design/OQL9debRkSqot7KZSiWwsU/?node-id=1405-765).
+The speech balloon and three voice bars represent the voice interface to the computer. The orange palette and balloon silhouette follow the [Figma reference](https://www.figma.com/design/OQL9debRkSqot7KZSiWwsU/?node-id=1408-780).
 
-`../vvhisper.icon` is the editable Icon Composer source. Its legacy filename is retained for the existing bundle pipeline. Both foreground SVGs use a 1024-point canvas. The balloon uses the exact Union path from Figma node 1405:767, placed at (42, 40) on the original 256-point canvas and scaled uniformly by 4. Its original stem continues beyond the canvas and is clipped at the bottom edge. The bars retain the original 20-point widths, 18-point gaps, 44/84/44-point heights, and center (128, 127). No inset or silhouette redesign is applied. The balloon receives native glass, lighting and shadow; the background and appearance variants are rendered by Apple. Groups are ordered front to back.
+`../vvhisper.icon` is the editable Icon Composer source. Both foreground SVGs use a 1024-point canvas. The balloon uses the exact Union path from Figma node 1408:781 (archived in `AppIconBalloon.svg`), placed at (16, 48) on the original 256-point canvas and scaled uniformly by 4. Its original stem continues beyond the canvas and is clipped at the bottom edge. The bars retain the original 20-point widths, 18-point gaps, 44/84/44-point heights, and center (128, 127). No inset or silhouette redesign is applied. The balloon receives native glass, lighting and shadow; the background and appearance variants are rendered by Apple. Groups are ordered front to back.
 
 `../vvhisperAppIcon.png` is the native 1024-pixel Default export used by the audio-driver build. Regenerate it from the repository root with:
 
 ```sh
-"/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" app/vvhisper.icon --export-image --output-file app/vvhisperAppIcon.png --platform macOS --rendition Default --width 1024 --height 1024 --scale 1
+"/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" macos/vvhisper.icon --export-image --output-file macos/vvhisperAppIcon.png --platform macOS --rendition Default --width 1024 --height 1024 --scale 1
 ```
 
 The app bundle continues to compile the layered document using `actool`; the PNG is not its replacement. Review Default, Dark and TintedDark renditions and the compiled 16/32-pixel fallback when changing geometry. Follow [Apple app icon guidance](https://developer.apple.com/design/human-interface-guidelines/app-icons).
+
+## Big cursor
+
+`Resources/CaretBubble.svg` is the original contour from [Figma 1408:822](https://www.figma.com/design/OQL9debRkSqot7KZSiWwsU/?node-id=1408-822). Its 32 × 58 pt canvas has a 32 × 24 pt head and a 2 pt stem. `Resources/CaretBubble.png` renders the SVG at 4× and crops the top 32 pt (128 × 128 pixels), keeping the head and curved neck unscaled. The existing canvas draws the remaining straight stem to the editor's line height. Both positioning and dictation use this silhouette; their tint, live symbols, and spring animation remain runtime-owned.

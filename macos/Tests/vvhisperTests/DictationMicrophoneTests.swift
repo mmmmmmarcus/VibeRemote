@@ -26,6 +26,23 @@ final class DictationMicrophoneTests: XCTestCase {
         XCTAssertEqual(DictationAudioDevice.resolve(choice: choice, available: [builtIn, headset], systemInput: 99), builtIn)
     }
 
+    func testNativeMicrophoneRatesConvertToStreaming16kHzWithoutChangingDurationOrPitch() throws {
+        for rate in [16_000.0, 44_100.0, 48_000.0] {
+            let converter = try DictationMicrophoneResampler(sampleRate: rate)
+            let input = (0..<Int(rate)).map { Float(0.2 * sin(2 * .pi * 1_000 * Double($0) / rate)) }
+            var output: [Float] = []
+            // Deliberately split across non-integral conversion boundaries.
+            for start in stride(from: 0, to: input.count, by: 1_117) {
+                output += converter.append(Array(input[start..<min(start + 1_117, input.count)]))
+            }
+            output += converter.finish()
+            XCTAssertEqual(Double(output.count), 16_000, accuracy: 64, "rate=\(rate)")
+            XCTAssertGreaterThan(DictationAudio(samples: output).rms, 0.1)
+            let crossings = zip(output, output.dropFirst()).filter { $0 < 0 && $1 >= 0 }.count
+            XCTAssertEqual(Double(crossings), 1_000, accuracy: 4, "pitch changed at rate=\(rate)")
+        }
+    }
+
     func testHotkeyMicrophoneChoiceIsSavedAndCleared() throws {
         let suite = "DictationMicrophoneTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

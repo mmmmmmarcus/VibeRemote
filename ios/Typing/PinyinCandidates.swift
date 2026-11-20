@@ -15,11 +15,15 @@ struct PinyinCandidates {
 
     func choices(for snapshot: PinyinEngine.Snapshot, letterCase: EnglishLetterCase) -> [Candidate] {
         guard !snapshot.input.isEmpty else { return [] }
+        let corrected = snapshot.corrections.enumerated().map {
+            Candidate(text: $0.element, identifier: "candidate.correction.\($0.offset)", action: .english($0.element))
+        }
         guard !snapshot.candidates.isEmpty else {
+            if !corrected.isEmpty { return corrected }
             let spelling = letterCase.apply(to: snapshot.input)
             return [Candidate(text: spelling, identifier: "candidate.spelling", action: .english(spelling))]
         }
-        return snapshot.candidates.enumerated().map {
+        return corrected + snapshot.candidates.enumerated().filter { !snapshot.corrections.contains($0.element) }.map {
             Candidate(text: $0.element, identifier: "candidate.\($0.offset)", action: .choose($0.offset))
         }
     }

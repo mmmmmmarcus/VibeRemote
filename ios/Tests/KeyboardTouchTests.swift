@@ -12,6 +12,8 @@ final class KeyboardTouchTests: XCTestCase {
     }
     private func withKeyboard(_ body: (KeyboardViewController, TextViewProxy) throws -> Void) rethrows {
         let previous = UserDefaults.standard.string(forKey: KeyboardLanguage.preferenceKey)
+        let previousMode = KeyboardLayoutMode.load()
+        KeyboardLayoutMode.full.save()
         KeyboardLanguage.english.save()
         let proxy = TextViewProxy("", selection: NSRange(location: 0, length: 0))
         let keyboard = KeyboardViewController()
@@ -19,6 +21,7 @@ final class KeyboardTouchTests: XCTestCase {
         keyboard.loadViewIfNeeded()
         defer {
             keyboard.viewWillDisappear(false)
+            previousMode.save()
             if let previous { UserDefaults.standard.set(previous, forKey: KeyboardLanguage.preferenceKey) }
             else { UserDefaults.standard.removeObject(forKey: KeyboardLanguage.preferenceKey) }
         }
@@ -31,9 +34,10 @@ final class KeyboardTouchTests: XCTestCase {
         XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: 45, y: 22), frames: frames), 1)
         XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: 49, y: 22), frames: frames), 1)
         XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: -6, y: 22), frames: frames), 0)
-        XCTAssertNil(KeyboardHitGeometry.target(at: CGPoint(x: -30, y: 22), frames: frames))
-        XCTAssertNil(KeyboardHitGeometry.target(at: CGPoint(x: 20, y: 70), frames: frames))
-        XCTAssertNil(KeyboardHitGeometry.target(at: CGPoint(x: 120, y: 22), frames: [frames[0], CGRect(x: 200, y: 0, width: 40, height: 44)]))
+        XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: -30, y: 22), frames: frames), 0)
+        XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: 20, y: 70), frames: frames), 0)
+        XCTAssertEqual(KeyboardHitGeometry.target(at: CGPoint(x: 120, y: 22), frames: [frames[0], CGRect(x: 200, y: 0, width: 40, height: 44)]), 0)
+        XCTAssertNil(KeyboardHitGeometry.target(at: CGPoint(x: CGFloat.nan, y: 22), frames: frames))
     }
 
     func testRealHitTestingFillsKeyGapsWithoutChangingKeyCentersInEveryLayout() throws {
@@ -66,9 +70,87 @@ final class KeyboardTouchTests: XCTestCase {
                 XCTAssertTrue(keyboard.view.hitTest(betweenRows, with: nil) === q)
                 XCTAssertFalse(keyboard.view.hitTest(CGPoint(x: width / 2, y: 10), with: nil) is KeyControl)
                 if width >= 800 {
-                    XCTAssertFalse(keyboard.view.hitTest(CGPoint(x: width / 2, y: qFrame.midY), with: nil) is UIControl)
+                    XCTAssertTrue(keyboard.view.hitTest(CGPoint(x: width / 2, y: qFrame.midY), with: nil) is KeyControl)
                 }
             }
+        }
+    }
+
+    func testEntireKeySurfaceHasTapCoverageAcrossFullMiniSymbolAndSplitLayouts() throws {
+        try withKeyboard { keyboard, _ in
+            for (width, landscape): (CGFloat, Bool) in [(375, false), (466, false), (655, false), (529, true), (802, true)] {
+                for mini in [false, true] {
+                    keyboard.setMiniMode(mini, animated: false)
+                    keyboard.testingLandscape = landscape
+                    keyboard.view.frame = CGRect(x: 0, y: 0, width: width, height: 340)
+                    keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
+                    for symbols in (mini ? [false] : [false, true]) {
+                        if symbols { XCTAssertTrue(try key("123", in: keyboard).accessibilityActivate()) }
+                        keyboard.view.layoutIfNeeded()
+                        let surface = try XCTUnwrap(descendants(keyboard.view).first { $0 is KeyboardTouchSurface } as? KeyboardTouchSurface)
+                        for y in stride(from: CGFloat(1), to: surface.bounds.height, by: 8) {
+                            for x in stride(from: CGFloat(1), to: surface.bounds.width, by: 8) {
+                                let point = CGPoint(x: x, y: y)
+                                XCTAssertNotNil(surface.target(at: point), "Gap at \(x),\(y), width \(width)")
+                            }
+                        }
+                        XCTAssertNil(surface.target(at: CGPoint(x: -1, y: 20)))
+                        XCTAssertNil(surface.target(at: CGPoint(x: 20, y: surface.bounds.maxY + 1)))
+                        if symbols { XCTAssertTrue(try key("ABC", in: keyboard).accessibilityActivate()) }
+                    }
+                }
+            }
+        }
+    }
+
+    func testEntireSideInsetsBelongToAAndLAtEveryHeightInTheirRow() throws {
+        try withKeyboard { keyboard, proxy in
+            for (width, landscape): (CGFloat, Bool) in [(375, false), (466, false), (655, false), (529, true), (802, true)] {
+                keyboard.testingLandscape = landscape
+                keyboard.view.frame = CGRect(x: 0, y: 0, width: width, height: 340)
+                keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
+                for value in ["a", "l"] {
+                    let control = try key(value, in: keyboard)
+                    let frame = control.convert(control.bounds, to: keyboard.view)
+                    let range = value == "a" ? CGFloat(0.5)..<frame.minX : frame.maxX..<width
+                    for y in stride(from: frame.minY + 0.5, to: frame.maxY, by: 2) {
+                        for x in stride(from: range.lowerBound, to: range.upperBound, by: 2) {
+                            let point = CGPoint(x: x, y: y)
+                            XCTAssertTrue(keyboard.view.hitTest(point, with: nil) === control,
+                                          "Expected \(value) at \(point) for width \(width)")
+                        }
+                    }
+                    let point = CGPoint(x: value == "a" ? 1 : width - 1, y: frame.minY + 1)
+                    let local = control.convert(point, from: keyboard.view)
+                    let before = proxy.editor.text ?? ""
+                    XCTAssertTrue(control.press(at: 0, point: local))
+                    XCTAssertTrue(control.movePress(to: local, at: 0.05))
+                    control.releasePress()
+                    XCTAssertEqual(proxy.editor.text, before + value)
+                }
+            }
+        }
+    }
+
+    func testWideGapTapSurvivesReleaseAndHoldStillDictatesWithoutTyping() throws {
+        try withKeyboard { keyboard, proxy in
+            keyboard.testingLandscape = true
+            keyboard.view.frame = CGRect(x: 0, y: 0, width: 802, height: 320)
+            keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
+            let q = try key("q", in: keyboard)
+            let point = CGPoint(x: 401, y: q.convert(q.bounds, to: keyboard.view).midY)
+            let target = try XCTUnwrap(keyboard.view.hitTest(point, with: nil) as? KeyControl)
+            let local = target.convert(point, from: keyboard.view)
+            XCTAssertFalse(target.bounds.insetBy(dx: -30, dy: -40).contains(local))
+            XCTAssertTrue(target.press(at: 0, point: local))
+            XCTAssertTrue(target.movePress(to: local, at: 0.1))
+            target.releasePress()
+            XCTAssertEqual(proxy.editor.text, target.value)
+            var holds = 0
+            target.onGapHold = { holds += 1 }
+            target.press(at: 1, point: local); target.advancePress(to: 1.4); target.releasePress()
+            XCTAssertEqual(holds, 1)
+            XCTAssertEqual(proxy.editor.text, target.value)
         }
     }
 
@@ -103,6 +185,37 @@ final class KeyboardTouchTests: XCTestCase {
             b.releasePress(); a.releasePress(); shift.releasePress()
             XCTAssertEqual(proxy.editor.text, "Ab")
         }
+    }
+
+    func testTapFeedbackIsImmediateAndReleaseDoesNotRepeatIt() throws {
+        try withKeyboard { keyboard, proxy in
+            let a = try key("a", in: keyboard), b = try key("b", in: keyboard)
+            let initial = keyboard.testingTapFeedbackCount
+            XCTAssertTrue(a.press(at: 0, point: .zero))
+            XCTAssertEqual(keyboard.testingTapFeedbackCount - initial, 1)
+            XCTAssertEqual(proxy.editor.text, "")
+            XCTAssertTrue(b.press(at: 0.04, point: .zero))
+            XCTAssertEqual(keyboard.testingTapFeedbackCount - initial, 2)
+            b.releasePress(); a.releasePress()
+            XCTAssertEqual(proxy.editor.text, "ab")
+            XCTAssertEqual(keyboard.testingTapFeedbackCount - initial, 2)
+            XCTAssertTrue(a.accessibilityActivate())
+            XCTAssertEqual(proxy.editor.text, "aba")
+            XCTAssertEqual(keyboard.testingTapFeedbackCount - initial, 3)
+        }
+    }
+
+    func testRejectedPressAndCancelledReleaseDoNotAddFeedback() {
+        let key = KeyControl()
+        var pulses = 0
+        key.onPressFeedback = { pulses += 1 }
+        key.onPress = { false }
+        XCTAssertFalse(key.press(at: 0, point: .zero))
+        XCTAssertEqual(pulses, 0)
+        key.onPress = { true }
+        XCTAssertTrue(key.press(at: 0, point: .zero))
+        key.cancelPress(); key.releasePress()
+        XCTAssertEqual(pulses, 1)
     }
 
     func testDeleteRolloverStopsRepeatingAndLateReleaseDoesNotAffectNewPress() throws {
@@ -141,7 +254,7 @@ final class KeyboardTouchTests: XCTestCase {
                 a.releasePress(); function.releasePress()
                 XCTAssertEqual(proxy.editor.text, "a")
                 XCTAssertNotNil(try key("a", in: keyboard))
-                XCTAssertEqual(try key("language", in: keyboard).label.text, "EN")
+                XCTAssertEqual(try key("language", in: keyboard).accessibilityLabel, "English")
             }
         }
     }

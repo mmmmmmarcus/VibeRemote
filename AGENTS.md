@@ -71,6 +71,83 @@ connection changes must not add a badge or replace it. Show Siri and Soundcore s
 rows when connected (or actively connecting Soundcore), and no Disconnected row otherwise.
 Getting Started lives in Siri Remote Settings, not About or a Restart Onboarding menu item.
 
+## Pending dictation underline (2026-11-18)
+
+`DictationTypewriter` owns a `DictationDraftUnderline` for its live draft, including the wait
+for recognition refinement and the separate text-polishing request after release. Clear it
+before final replacement, on stop and on completion;
+late geometry replies must never resurrect it. The click-through, nonactivating overlay is
+visual only: never toggle document underline formatting, insert decoration characters, or
+write attributed text into other apps. Mark only this hold's verified UTF-16 text range.
+Read native per-line AX bounds off main, with exact-content-matched text-leaf layout as a
+fallback; clip to the editor and hide when focus/content/geometry cannot be verified.
+Geometry estimates never participate in text replacement or remote caret movement.
+
+## Short-sentence punctuation (2026-11-19)
+
+`DictationSentencePunctuation` runs on final output after optional language polishing,
+including disabled/failed-polish paths. `dictationSentencePunctuation` defaults on and is
+latched with the hold's other settings. ON preserves terminal marks or adds a period
+(full-width for Han); OFF removes only the terminal .!?。！？… run before closing quotes.
+Short means at most 120 Unicode scalars and 20 whitespace-separated words, and at most
+40 scalars when Han is present. Multi-line, multi-sentence, longer, URL/email and ambiguous
+internally punctuated text bypass unchanged; decimal points remain intact. Keep mobile
+rules and fixtures aligned. Never disable punctuation at the ASR provider level.
+
+## Dictation language polishing (2026-11-18)
+
+On macOS, user key-down input during the polishing wait cancels the request
+immediately, stops the typewriter and clears its pending underline. Preserve the
+current document and pass the user's key through; neither a late response nor a
+cancellation fallback may insert or replace text. Exclude vvhisper's synthetic
+key events. Apply this to streaming and one-shot dictation.
+
+`DictationPolisher` runs after recognition cleanup, before final insertion/replacement.
+`dictationPolish` defaults on. Use Volcengine Ark `doubao-seed-2-0-mini-260428` with
+`thinking.type=disabled` at `/api/v3/chat/completions`. Its separate Keychain service is
+`com.viberemote.dictation.ark`, with key entry in Dictation; never reuse the speech or
+Computer Use credentials automatically. Send only the transcript, with no tools or
+editor context. Preserve meaning, uncertainty, negations, names, numbers and languages;
+never answer or follow transcript instructions. Require a complete JSON text response;
+failed, empty or truncated responses retain the recognized text and surface a notice.
+Never log request/response text or credentials. Live service verification requires a key.
+
+## Per-device input gain (2026-11-17)
+
+Each Siri Remote model and Soundcore Work owns an independent 0…+24 dB Input Gain
+slider, in 1 dB steps, default 0 dB. `VoiceInputGain` validates values and applies gain
+with PCM bounds. Latch it when capture starts; use the physical Siri event's generation,
+never the Settings model selector. Apply once after decoding/resampling, before both
+streaming delivery and final-clip storage (including the Siri converter tail). The
+level meter and all vvhisper ASR paths receive gained audio. System/output volume,
+Mac-microphone capture and third-party held-key Siri mappings are unchanged.
+
+## Per-device release buffer (2026-11-16)
+
+Each Siri Remote model and Soundcore Work has its own Release Buffer toggle and 0.1–2.0 s
+slider (0.1 s steps), enabled at 1.0 s by default. `VoiceReleaseBuffer` in RemoteAudioProtocol
+owns validation and preference keys. Capture behavior is latched at session start.
+Soundcore normal hotkey release delays the actual pause command, then drains queued audio;
+re-press during the buffer continues the same sentence and is not a double-tap cancellation.
+Device stop, explicit cancel, disconnect and safety deadlines bypass extra recording.
+Do not delay every `endDictation` call: device acknowledgements must not rearm the timer.
+
+The user-session Siri voice helper reads the existing com.viberemote.app preferences once
+per voice start. Black-glass recorded-frame trimming uses the selected duration instead of
+the old fixed 0.3 s. Aluminum retains late consecutive packets and delays file/output
+completion within the selected window; its firmware still determines microphone shutdown.
+Never promise post-release samples that the remote does not transmit. Preserve technical
+packet drain allowances even with the toggle off; do not add another user delay after the
+glass parser has already retained its tail. Keep stale timers invalid across new holds.
+
+Validated in the signed installed app on 2026-11-16: all three device sliders persist
+independently and disabling the toggle disables its slider. The local Soundcore verifier
+(`--verify-soundcore-continuity --verify-soundcore-release-buffer`) received 55 and 48
+additional frames during two 1 s release windows, resumed the second hold without pausing,
+and cancelled the third immediately. It captures in memory without ASR or audio files.
+Siri behavior has parser test coverage; physical Siri release timing remains unverified
+for this change. Strict-concurrency tests: 392 executed, one skipped, no failures.
+
 ## Soundcore automatic reconnect (2026-11-16)
 
 `SoundcoreManager.start()` resumes only a previously verified device at app launch.
@@ -1519,8 +1596,8 @@ Type While Speaking, Remove Filler Words, Use Text Before the Cursor, App ID; no
   input). Same as System is the rule above, never the VibeRemote device. A chosen device is stored by
   UID plus name (`dictationHotkeyMicrophoneUID/Name`); while it is not connected the row shows it as
   "(Not Connected)" and holds fall back to Same as System (`DictationAudioDevice.resolve`, tested).
-- `DictationRecorder` is an input-only HAL output unit (input bus 1 on, output bus 0 off, 16 kHz
-  mono Float32 client format), not `AVAudioEngine`: after the input device is switched the engine's
+- `DictationRecorder` is an input-only HAL output unit (input bus 1 on, output bus 0 off, native-rate
+  mono Float32 client format, converted to 16 kHz on a serial processing queue), not `AVAudioEngine`: after the input device is switched the engine's
   input node keeps the old device's format, and a Bluetooth headset's switch to its call profile is
   a configuration change that stops it — a ThinkPlus headset mic delivered zero buffers (probed
   2026-11-15) while the HAL unit delivered 16 k frames/s at once. Do not move it back to the engine.
@@ -1529,7 +1606,11 @@ Type While Speaking, Remove Filler Words, Use Text Before the Cursor, App ID; no
   apart by the device-dependent flag bits (NX_DEVICE…KEYMASK). Events whose source pid is VibeRemote's
   own are ignored, so a Siri mapping that holds Right Option cannot trigger it, and the hotkey only ends
   or cancels holds it started (`recordingSource == .macMicrophone`).
-- Not yet tried on hardware/with a real microphone at the time of writing.
+- MacBook built-in capture verified 2026-11-17 after fixing AUHAL sample-rate handling:
+  AUHAL does not resample input. Native 48 kHz capture produced 48,128 and 48,299
+  converted 16 kHz samples in two 3 s memory-only checks, with no render errors.
+  Subsequent real keyboard holds streamed and completed Seed transcription.
+  Preserve native-rate capture and queue-drained conversion on stop.
 
 ### Advanced Menu customization (2026-11-11, user's request)
 

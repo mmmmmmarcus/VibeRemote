@@ -8,6 +8,8 @@ import SwiftUI
 /// and Keychain items `DictationController` reads at the start of every hold.
 @MainActor
 final class DictationSettingsStore: ObservableObject {
+    /// Settings and the menu edit one live value, so either surface cannot save a stale input.
+    static let shared = DictationSettingsStore()
     @Published var settings = DictationSettings.load() {
         didSet { if settings != oldValue { settings.save() } }
     }
@@ -125,9 +127,11 @@ struct DictationPane: View {
     let profiles: [String]
     /// Every profile resolves Siri to Dictation, so naming them adds nothing.
     var everywhere = false
-    @StateObject private var store = DictationSettingsStore()
+    @ObservedObject private var store = DictationSettingsStore.shared
     @ObservedObject private var soundcore = SoundcoreManager.shared
     @State private var keyDraft = ""
+    @State private var polishKeyDraft = ""
+    @State private var hasPolishKey = DictationKeychain.polishKey() != nil
 
     /// The remote's voice comes straight from the voice helper; only the hotkey, which records
     /// the Mac's own microphone, needs Microphone access.
@@ -158,15 +162,51 @@ struct DictationPane: View {
                     .accessibilityIdentifier("settings.dictation.provider")
                 }
                 SettingsRow(title: "Language") {
-                    Picker("", selection: $store.settings.language) {
-                        ForEach(DictationLanguage.choices, id: \.id) { Text($0.title).tag($0.id) }
+                    if store.settings.provider == .seedASR {
+                        // Seed's current stream/refinement paths use its default bilingual
+                        // model. The shared single-language preference is for other engines.
+                        Text("Chinese + English")
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("settings.dictation.bilingualLanguage")
+                    } else {
+                        Picker("", selection: $store.settings.language) {
+                            ForEach(DictationLanguage.choices, id: \.id) { Text($0.title).tag($0.id) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier("settings.dictation.language")
                     }
-                    .labelsHidden()
-                    .fixedSize()
                 }
                 providerRows
             } header: {
                 Text("Service")
+            }
+            Section {
+                Toggle("Sentence Punctuation", isOn: $store.settings.sentencePunctuation)
+                    .accessibilityIdentifier("settings.dictation.sentencePunctuation")
+            } footer: {
+                Text("Add ending punctuation to a single short sentence. Longer or multi-sentence dictation keeps its punctuation.")
+            }
+            Section {
+                Toggle("Polish Dictation", isOn: $store.settings.polishDictation)
+                    .accessibilityIdentifier("settings.dictation.polish")
+                if store.settings.polishDictation {
+                    SettingsRow(title: "Volcengine Ark API Key") {
+                        SecureField(hasPolishKey ? "Saved — enter to replace" : "Required for polishing", text: $polishKeyDraft)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            DictationKeychain.setPolishKey(polishKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+                            hasPolishKey = DictationKeychain.polishKey() != nil
+                            polishKeyDraft = ""
+                        }.disabled(polishKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if !hasPolishKey {
+                        Text("Add an API key to enable polishing. Dictation keeps the original transcript until then.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("Correct grammar and spelling while preserving your meaning. Uses Seed 2.0 Mini with thinking disabled; requires a Volcengine Ark API key.")
             }
             Section {
                 SettingsRow(title: "Hotkey") {
@@ -334,7 +374,7 @@ private struct DictionarySection: View {
 }
 
 struct DictionaryPane: View {
-    @StateObject private var store = DictationSettingsStore()
+    @ObservedObject private var store = DictationSettingsStore.shared
     var body: some View {
         SettingsPane(title: "Dictionary") {
             DictionarySection(entries: $store.settings.dictionary, provider: store.settings.provider)

@@ -16,6 +16,13 @@ final class VoiceHost {
     private var activeID: UUID?
     private var handledID: UUID?
     private var finishing = false
+    private var polishing = false
+    private var translate = false
+    private var pendingRecognized: String?
+    private let polisher = DictationPolishSession()
+    private var polishSettings = DictationPolishSettings()
+    private var outputSettings = DictationOutputSettings()
+    private var polishKey: String?
     private var recordingStart = Date()
     private var finalDeadline = Date.distantFuture
     private var stream: SeedStreamingSession?
@@ -27,6 +34,7 @@ final class VoiceHost {
     private var relay = AudioRelay()
     private var observer: NSObjectProtocol?
     private var lastHeartbeat = Date.distantPast
+    private var lastLevelPublished = Date.distantPast
 
     init() {
         observer = NotificationCenter.default.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -53,7 +61,9 @@ final class VoiceHost {
     private func startEngine() throws {
         guard !enabled else { return }
         let audio = AVAudioSession.sharedInstance()
-        try audio.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+        // Measurement mode disables output dynamics and lowers other apps’ playback.
+        // Keep media mixing and stereo Bluetooth; never request ducking or voice processing.
+        try audio.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
         // Keep keyboard feedback available while the host microphone is armed.
         try audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try audio.setActive(true)
@@ -83,10 +93,10 @@ final class VoiceHost {
         self.engine = engine; enabled = true; enabling = false
         lifetime = VoiceSessionLifetime(startedAt: Date(), minutes: KeyboardPreferences.load().voiceSessionMinutes)
         status = "Ready — return to your app and hold a letter key."
-        VoiceIPC.remove("command.json"); VoiceIPC.remove("reply.json")
+        VoiceIPC.remove("command.json"); VoiceIPC.remove("reply.json"); VoiceIPC.remove(VoiceLevel.filename)
         lastHeartbeat = .distantPast
         tick()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
         onChange?()
@@ -94,7 +104,10 @@ final class VoiceHost {
 
     func stop(message: String = "Open vvhisper to prepare voice input.") {
         activationGeneration += 1; enabling = false
-        if let id = activeID { publish(VoiceReply(id: id, text: "", isFinal: true, error: message)) }
+        if let id = activeID {
+            if let pendingRecognized { publish(VoiceReply(id: id, text: outputSettings.finalize(pendingRecognized), isFinal: true, notice: "\(translate ? "Translation" : "Polishing") interrupted; kept the transcript.")) }
+            else { publish(VoiceReply(id: id, text: "", isFinal: true, error: message)) }
+        }
         clearHold()
         timer?.invalidate(); timer = nil
         engine?.inputNode.removeTap(onBus: 0); engine?.stop(); engine = nil
@@ -123,27 +136,39 @@ final class VoiceHost {
             do { try VoiceIPC.write(VoiceReadiness(ready: true, expiresAt: lifetime.expiresAt), to: "ready.json") }
             catch { stop(message: "Cannot share the voice session with the keyboard."); return }
         }
-        if finishing, Date() > finalDeadline { complete(text: refinedFinal ?? liveFinal ?? latest); return }
+        defer { publishLevel() }
+
         if let command = VoiceIPC.read("command.json", as: VoiceCommand.self) {
             if command.id == activeID {
                 if command.phase == .cancel { clearHold(); status = "Ready"; onChange?() }
-                else if command.phase == .finish, !finishing { finish() }
+                else if command.phase == .finish, !finishing { translate = command.translate == true; finish() }
                 else if !finishing && (Date().timeIntervalSince(command.updatedAt) > 1.5 || Date().timeIntervalSince(recordingStart) > 120) {
                     publish(VoiceReply(id: command.id, text: "", isFinal: true, error: "Recording stopped because the keyboard was closed or the hold expired.")); clearHold()
                 }
-            } else if activeID == nil, command.id != handledID, abs(Date().timeIntervalSince(command.updatedAt)) < 1 {
+            } else if command.id != handledID, command.phase != .cancel, abs(Date().timeIntervalSince(command.updatedAt)) < 1 {
+                if activeID != nil { clearHold() }
                 if command.phase == .recording { begin(id: command.id) }
                 else if command.phase == .finish {
                     handledID = command.id
-                    publish(VoiceReply(id: command.id, text: "", isFinal: true, error: "Hold a little longer to speak."))
+                    publish(VoiceReply(id: command.id, text: "", isFinal: true, error: nil))
                 }
             }
         }
+        if finishing, !polishing, Date() > finalDeadline { complete(text: refinedFinal ?? liveFinal ?? latest) }
+    }
+
+    private func publishLevel() {
+        guard let id = activeID, !finishing, let sample = relay.level,
+              sample.updatedAt > lastLevelPublished else { return }
+        lastLevelPublished = sample.updatedAt
+        try? VoiceIPC.write(VoiceLevel(id: id, value: sample.value, updatedAt: sample.updatedAt), to: VoiceLevel.filename)
     }
 
     private func begin(id: UUID) {
         guard let key = SeedKeychain.read() else { return }
         activeID = id; handledID = id; finishing = false; latest = ""; liveFinal = nil; refinedFinal = nil; latestRefined = ""
+        polishSettings = .load(); polishKey = ArkPolishKeychain.read()
+        outputSettings = .load()
         recordingStart = Date(); status = "Listening…"
         let appID = UserDefaults.standard.string(forKey: "seedAppID") ?? ""
         let live = SeedStreamingSession { [weak self] event in Task { @MainActor in self?.event(event, id: id, accurate: false) } }
@@ -151,18 +176,19 @@ final class VoiceHost {
         stream = live; refinement = accurate
         live.start(SeedStreamingSession.request(accessKey: key, appID: appID, resourceID: ""), appID: appID, removeFillers: true)
         accurate.start(SeedStreamingSession.request(accessKey: key, appID: appID, resourceID: "", endpoint: SeedStreamFrame.nostreamEndpoint), appID: appID, removeFillers: true)
+        lastLevelPublished = .distantPast
         relay.set([live, accurate]); onChange?()
     }
 
     private func finish() {
         guard !finishing else { return }
-        relay.set([]); finishing = true; finalDeadline = Date().addingTimeInterval(5)
+        relay.set([]); VoiceIPC.remove(VoiceLevel.filename); finishing = true; finalDeadline = Date().addingTimeInterval(5)
         stream?.finish(); refinement?.finish(); status = "Transcribing…"; onChange?()
         if let refinedFinal { complete(text: refinedFinal) }
     }
 
     private func event(_ event: SeedStreamingSession.Event, id: UUID, accurate: Bool) {
-        guard activeID == id else { return }
+        guard activeID == id, !polishing else { return }
         switch event {
         case .partial(let result):
             if accurate { latestRefined = result.text }
@@ -180,15 +206,31 @@ final class VoiceHost {
         }
     }
     private func complete(text: String) {
-        guard let id = activeID else { return }
+        guard let id = activeID, !polishing else { return }
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        publish(VoiceReply(id: id, text: clean, isFinal: true, error: clean.isEmpty ? "No speech recognized. Try again." : nil))
-        clearHold(); status = "Ready"; onChange?()
+        guard !clean.isEmpty else {
+            publish(VoiceReply(id: id, text: "", isFinal: true, error: nil))
+            clearHold(); status = "Ready"; onChange?(); return
+        }
+        polishing = true; pendingRecognized = clean
+        relay.set([]); stream?.cancel(); refinement?.cancel(); stream = nil; refinement = nil
+        // Publish the recognized text as pending marked text, not a final commit.
+        publish(VoiceReply(id: id, text: clean, isFinal: false, polishing: true))
+        status = translate ? "Translating…" : "Polishing…"; onChange?()
+        polisher.start(text: clean, settings: polishSettings, key: polishKey, translate: translate) { [weak self] result in
+            guard let self, self.activeID == id, self.polishing else { return }
+            // A cancellation/new hold may have reached IPC before the next timer tick.
+            guard let command = VoiceIPC.read("command.json", as: VoiceCommand.self),
+                  command.id == id, command.phase == .finish else { self.clearHold(); return }
+            self.publish(VoiceReply(id: id, text: self.outputSettings.finalize(result.text), isFinal: true, notice: result.notice))
+            self.clearHold(); self.status = result.notice ?? "Ready"; self.onChange?()
+        }
     }
     private func publish(_ reply: VoiceReply) { try? VoiceIPC.write(reply, to: "reply.json") }
     private func clearHold() {
-        relay.set([]); stream?.cancel(); refinement?.cancel(); stream = nil; refinement = nil
-        activeID = nil; finishing = false
+        relay.set([]); VoiceIPC.remove(VoiceLevel.filename); stream?.cancel(); refinement?.cancel(); stream = nil; refinement = nil
+        polisher.cancel(); pendingRecognized = nil; polishing = false; polishKey = nil
+        activeID = nil; finishing = false; translate = false
     }
 }
 
@@ -197,11 +239,14 @@ final class AudioRelay: @unchecked Sendable {
     private let lock = NSLock()
     private var sessions: [SeedStreamingSession] = []
     private var generation = UUID()
+    private var meter: (value: Double, updatedAt: Date)?
+    var level: (value: Double, updatedAt: Date)? { lock.lock(); defer { lock.unlock() }; return meter }
     var capture: UUID? { lock.lock(); defer { lock.unlock() }; return sessions.isEmpty ? nil : generation }
-    func set(_ value: [SeedStreamingSession]) { lock.lock(); sessions = value; generation = UUID(); lock.unlock() }
+    func set(_ value: [SeedStreamingSession]) { lock.lock(); sessions = value; generation = UUID(); meter = nil; lock.unlock() }
     func append(_ samples: [Float], generation: UUID) {
         lock.lock(); defer { lock.unlock() }
-        guard self.generation == generation else { return }
+        guard self.generation == generation, !sessions.isEmpty else { return }
+        meter = (VoiceLevel.measure(samples), Date())
         for session in sessions { session.append(samples) }
     }
 }

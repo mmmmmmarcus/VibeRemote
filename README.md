@@ -23,6 +23,7 @@ product redesign are planned work, not claims about features already shipped.
 |---|---|
 | [`macos/`](macos/) | The macOS product — SwiftPM package, build/sign scripts, tests, release tooling. Start with [macos/README.md](macos/README.md). |
 | [`ios/`](ios/) | iOS companion app and custom voice keyboard. See [ios/README.md](ios/README.md). |
+| [`android/`](android/) | Android system keyboard with English, offline Chinese Pinyin, and voice dictation. See [android/README.md](android/README.md). |
 | [`website/`](website/) | The official static website. See [website/README.md](website/README.md). |
 
 ```bash
@@ -36,3 +37,7 @@ Download the latest build from [GitHub Releases](https://github.com/mmmmmmarcus/
 Agent and contributor guidance lives in [AGENTS.md](AGENTS.md). vvhisper is MIT licensed
 ([LICENSE](LICENSE)); third-party components keep their own terms
 ([macos/THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md)).
+
+For shared features and device updates, use the
+[cross-platform delivery workflow](macos/Design/CrossPlatformDelivery.md), including
+the reusable iPhone Duo polishing-setup verification flow.

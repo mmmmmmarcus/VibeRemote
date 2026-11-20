@@ -9,8 +9,10 @@ final class KeyboardViewController: UIInputViewController {
     // Unit-test controllers are not attached to a system keyboard host.
     var testingDocumentProxy: UITextDocumentProxy?
     var testingLandscape: Bool?
+    var testingTablet: Bool?
     var testingVoiceAvailable = false
     private(set) var testingVoiceCommands: [VoiceCommand] = []
+    private(set) var testingTapFeedbackCount = 0
     override var textDocumentProxy: UITextDocumentProxy { testingDocumentProxy ?? super.textDocumentProxy }
 #endif
     private let rows = UIStackView()
@@ -21,23 +23,92 @@ final class KeyboardViewController: UIInputViewController {
     private weak var symbolKey: KeyControl?
     private var symbolDestination: KeyboardTextDestination?
     private let status = UILabel()
+    private(set) var quietKeys = QuietKeys()
     private var keyboardHeight: NSLayoutConstraint!
     private var layoutWidth: CGFloat = 0
     private var layoutLandscape = false
+    private var tabletLayout: Bool {
+        #if KEYBOARD_TESTING
+        if let testingTablet { return testingTablet }
+        #endif
+        return traitCollection.userInterfaceIdiom == .pad
+    }
     private var metrics = KeyboardMetrics(width: 466)
-    private let candidateScroll = UIScrollView()
-    private let candidateRow = UIStackView()
-    private let candidateProvider = PinyinCandidates()
+    private let candidatePanel = CandidatePanel()
+    private let emojiPanel = EmojiPanel()
+    private(set) var showingEmoji = false
+    private var emojiPressDestination: KeyboardTextDestination?
+    private var candidateListGeneration = 0
+    private var candidateFetchPending = false
+    private var nextCandidateOffset = 0
+    private var hasMoreCandidates = false
+    private let gesturePill = GesturePill()
+    private var shortcutsExpanded = false
+    private var shortcutToggle: UIButton?
+    private var shortcutButtons: [UIButton] = []
+    private var pillDestination: KeyboardTextDestination?
+    private let doubleSpace = DoubleSpacePeriod()
+    private var endCursor: CursorDragSession?
+    private var endCursorSteps = 0
+    private let inputHelpers = UIStackView()
+    private let helperScroll = UIScrollView()
+    private var codeButton: UIButton?
+    var copiedCodes = CopiedCodeMonitor()
+    #if KEYBOARD_TESTING
+    var clipboardHistory = ClipboardHistory(fileURL: nil)
+    #else
+    var clipboardHistory = ClipboardHistory()
+    #endif
+    private var pasteGeneration = 0
+    private(set) var isMiniMode = false
+    private var pendingMiniMode: Bool?
+    private var modeChordActive = false
+    private var modeChordTaps: [String] = []
+    private var modeChordDestination: KeyboardTextDestination?
+    private var modeAnimator: UIViewPropertyAnimator?
+    private var modeSnapshot: UIView?
+    private var modeAnimationGeneration = 0
+    var isModeAnimating: Bool { modeAnimator != nil }
+    #if KEYBOARD_TESTING
+    var testingReduceMotion: Bool?
+    #endif
+    private var reduceModeMotion: Bool {
+        #if KEYBOARD_TESTING
+        if let testingReduceMotion { return testingReduceMotion }
+        #endif
+        return UIAccessibility.isReduceMotionEnabled
+    }
+    private weak var cursorKey: KeyControl?
+    private var cursorPressDestination: KeyboardTextDestination?
+    private var cursorDrag: CursorDragSession?
+    #if DEBUG
+    private var lastCursorCheck: UUID?
+    private var lastDictationCheck: UUID?
+    private var dictationCheck: (request: DictationDeviceVerification.Request, started: Date, phase: Int)?
+    private var cursorCheckEvents: [String] = []
+    private var lastHapticCheck: UUID?
+    private let hapticCheck = HapticDeviceVerification.Burst()
+    private var cursorCheck: (request: CursorDeviceVerification.Request, key: KeyControl, point: CGPoint, started: TimeInterval, phase: Int, held: Bool)?
+    #endif
+    struct PasteRequest {
+        let generation: Int
+        let destination: KeyboardTextDestination
+        let codeOnly: Bool
+    }
     private lazy var bilingualProvider = BilingualCandidates()
     private var visibleCandidates: [PinyinCandidates.Candidate] = []
     private var language = KeyboardLanguage.load()
     private var usesPinyin: Bool { language == .chinese && pinyinAvailable }
     private var mixedTypingEnabled = false
     private var compositionUsesMixedTyping = false
-    private var languageTitle: String { language == .chinese && mixedTypingEnabled ? "中英" : language.keyTitle }
+    private var compositionAutoCorrection = true
     private var chineseModeName: String { mixedTypingEnabled ? "Mixed Chinese and English" : "Chinese" }
-    private lazy var tapFeedback = UIImpactFeedbackGenerator(style: .light, view: view)
-    private var hapticStrength = 0.45
+    private let tapFeedback = KeyboardHaptics()
+    private let wordEdits = WordEditingSession()
+    private let typingAssistance = TypingAssistance()
+    private var autoCorrectionEnabled = true
+    private var smartSpacingEnabled = true
+    private var editingSwipeDestination: KeyboardTextDestination?
     private var lastPreferenceRefresh = Date.distantPast
     private var pinyinAvailable = true
     private var compositionCase = EnglishLetterCase.lowercase
@@ -56,10 +127,12 @@ final class KeyboardViewController: UIInputViewController {
     private var activationRequest: VoiceActivationRequest?
     private var offersHostLaunch = false
     private var keyboardVisible = false
+    private var documentDetached = false
     private var shifted = true
     private var capsLock = false
     private var page = 0
     private var timer: Timer?
+    private var levelTimer: Timer?
     private var command: VoiceCommand?
     private var dictationText: DictationTextSession?
     private var releaseTime: Date?
@@ -74,7 +147,19 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        isMiniMode = KeyboardLayoutMode.load() == .mini
+        metrics = KeyboardMetrics(width: 466, mini: isMiniMode, tablet: tabletLayout)
         view.backgroundColor = .clear
+        view.isMultipleTouchEnabled = true
+        let modeGesture = KeyboardModeGesture(target: nil, action: nil)
+        modeGesture.onPair = { [weak self] points in self?.beginModeChord(at: points) }
+        modeGesture.onChange = { [weak self] separationChange in self?.updateModeChord(separationChange) }
+        modeGesture.onFinish = { [weak self] direction, taps in self?.finishModeChord(direction: direction, replayTaps: taps) }
+        view.addGestureRecognizer(modeGesture)
+        view.accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: "Mini keyboard") { [weak self] _ in self?.setMiniMode(true); return true },
+            UIAccessibilityCustomAction(name: "Full keyboard") { [weak self] _ in self?.setMiniMode(false); return true }
+        ]
         // The system owns the keyboard material and device's bottom safe area.
         // Content dimensions come from the iPhone / Duo variants in the design reference.
         keyboardHeight = view.heightAnchor.constraint(equalToConstant: metrics.contentHeight)
@@ -84,21 +169,59 @@ final class KeyboardViewController: UIInputViewController {
         status.textAlignment = .center; status.textColor = .label; status.numberOfLines = 2
         status.accessibilityIdentifier = "keyboard.voice-status"
         status.isHidden = true
-        candidateScroll.showsHorizontalScrollIndicator = false
-        // Eight-point button padding preserves the existing 22-point text spacing.
-        candidateRow.axis = .horizontal; candidateRow.spacing = 6; candidateRow.distribution = .fill
-        candidateRow.translatesAutoresizingMaskIntoConstraints = false
-        candidateScroll.addSubview(candidateRow)
-        NSLayoutConstraint.activate([
-            candidateRow.leadingAnchor.constraint(equalTo: candidateScroll.contentLayoutGuide.leadingAnchor, constant: 2),
-            candidateRow.trailingAnchor.constraint(equalTo: candidateScroll.contentLayoutGuide.trailingAnchor, constant: -12),
-            candidateRow.topAnchor.constraint(equalTo: candidateScroll.contentLayoutGuide.topAnchor),
-            candidateRow.bottomAnchor.constraint(equalTo: candidateScroll.contentLayoutGuide.bottomAnchor),
-            candidateRow.heightAnchor.constraint(equalTo: candidateScroll.frameLayoutGuide.heightAnchor)
-        ])
+        candidatePanel.onPress = { [weak self] in self?.tapFeedback.prepare() }
+        candidatePanel.onSelect = { [weak self] candidate in
+            guard let self, !self.typingPending else { return }
+            if self.language == .english {
+                self.insertingTypedText = true
+                let accepted = candidate.identifier.hasPrefix("candidate.emoji.")
+                    ? self.typingAssistance.acceptEmoji(candidate.text, in: self.textDocumentProxy)
+                    : self.typingAssistance.accept(candidate.text, in: self.textDocumentProxy, spacing: self.smartSpacingEnabled)
+                self.insertingTypedText = false
+                if accepted { self.playTapFeedback() }
+                self.renderCandidates(); return
+            }
+            guard self.sameTypingDestination else { return }
+            self.playTapFeedback()
+            self.candidatePanel.setExpanded(false)
+            self.sendTyping(self.smartSpacingEnabled ? candidate.spaceAction : candidate.action)
+        }
+        candidatePanel.onMore = { [weak self] in self?.loadMoreCandidates() }
+        candidatePanel.onExpansionChange = { [weak self] in
+            guard let self else { return }
+            self.currentKey?.cancelPress(); self.hideKeyPreview(); self.hideSymbolAlternatives()
+            self.updateHeader(); self.view.setNeedsLayout()
+        }
         rows.axis = .vertical
         touchSurface.addSubview(rows)
-        for item in [candidateScroll, touchSurface, status] { view.addSubview(item) }
+        for item in [helperScroll, touchSurface, candidatePanel, status] { view.addSubview(item) }
+        emojiPanel.isHidden = true; view.addSubview(emojiPanel)
+        emojiPanel.onClose = { [weak self] in self?.setEmojiVisible(false) }
+        emojiPanel.onPress = { [weak self] in
+            guard let self else { return }
+            self.emojiPressDestination = KeyboardTextDestination(self.textDocumentProxy)
+        }
+        emojiPanel.onSelect = { [weak self] text in
+            guard let self, self.showingEmoji,
+                  self.emojiPressDestination == KeyboardTextDestination(self.textDocumentProxy) else { return }
+            self.emojiPressDestination = nil; self.typingAssistance.clear(); self.wordEdits.clear()
+            self.insertingTypedText = true; self.textDocumentProxy.insertText(text); self.insertingTypedText = false
+            self.playTapFeedback()
+        }
+        emojiPanel.onSystemKeyboard = { [weak self] button, event in self?.handleInputModeList(from: button, with: event) }
+        configureInputHelpers()
+        view.addSubview(gesturePill)
+        gesturePill.onBegin = { [weak self] in
+            guard let self else { return }
+            self.currentKey?.cancelPress(); self.pillDestination = KeyboardTextDestination(self.textDocumentProxy)
+        }
+        gesturePill.onAction = { [weak self] action in
+            guard let self, self.pillDestination == KeyboardTextDestination(self.textDocumentProxy),
+                  self.command == nil, !self.gesturePill.isHidden else { return }
+            self.pillDestination = nil; self.tap(action.rawValue)
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.changedNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.removedNotification, object: nil)
         let link = UIHostingController(rootView: VoiceLaunchLink(
             resolve: { [weak self] in self?.hostOpenURL = $0 },
             activate: { [weak self] in self?.openHost(using: $0) }
@@ -124,7 +247,11 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        documentDetached = false
+        let savedMiniMode = KeyboardLayoutMode.load() == .mini
+        if isMiniMode != savedMiniMode { setMiniMode(savedMiniMode, animated: false) }
         keyboardVisible = true
+        refreshCopiedCodes()
         refreshKeyboardAppearance()
         refreshKeyboardPreferences()
         tapFeedback.prepare()
@@ -132,8 +259,16 @@ final class KeyboardViewController: UIInputViewController {
         poll()
     }
     override func viewWillDisappear(_ animated: Bool) {
+        // The remote document may already be gone, including its nominally nonnull UUID.
+        // Teardown must only discard local state, never message the detached proxy.
+        documentDetached = true
+        endCursor = nil; doubleSpace.reset(); shortcutsExpanded = false
+        tapFeedback.stop(); wordEdits.clear(); typingAssistance.clear(); editingSwipeDestination = nil
+        stopModeAnimation()
         hideKeyPreview()
         hideSymbolAlternatives()
+        pasteGeneration += 1; pendingMiniMode = nil
+        finishModeChord(direction: nil, replayTaps: false)
         keyboardVisible = false
         clearText = nil; deleteDestination = nil
         // A touch cannot survive an app switch. Arming never resumes an old hold.
@@ -144,9 +279,15 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
         refreshKeyboardAppearance()
+        for key in keys where key.value == "return" { updateReturnKey(key) }
+        if !insertingTypedText { pasteGeneration += 1 }
+        if !insertingTypedText { wordEdits.observe(textDocumentProxy) }
+        if !insertingTypedText { typingAssistance.observe(textDocumentProxy); if language == .english { renderCandidates() } }
         cancelSymbolsIfDestinationChanged()
         cancelDeletionIfDestinationChanged()
+        cancelCursorIfDestinationChanged()
         if command != nil, dictationText?.isUpdating != true, !sameDestination { cancelHold(); showError("Text field changed. Dictation cancelled.") }
         if !insertingTypedText, typingDocument != nil, !sameTypingDestination { resetComposition() }
         if command == nil, !usesPinyin, page == 0, !capsLock {
@@ -157,8 +298,13 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
+        guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
+        if !insertingTypedText { pasteGeneration += 1 }
+        if !insertingTypedText { wordEdits.observe(textDocumentProxy) }
+        if !insertingTypedText { typingAssistance.observe(textDocumentProxy); if language == .english { renderCandidates() } }
         cancelSymbolsIfDestinationChanged()
         cancelDeletionIfDestinationChanged()
+        cancelCursorIfDestinationChanged()
         if command != nil, dictationText?.isUpdating != true, !sameDestination { cancelHold(); showError("Cursor moved. Dictation cancelled.") }
         if !insertingTypedText, typingDocument != nil, !sameTypingDestination { resetComposition() }
     }
@@ -169,29 +315,173 @@ final class KeyboardViewController: UIInputViewController {
         super.viewDidLayoutSubviews()
         let width = view.bounds.width
         guard width > 0 else { return }
+        emojiPanel.frame = view.bounds
         var landscape = view.window?.windowScene?.effectiveGeometry.interfaceOrientation.isLandscape == true
 #if KEYBOARD_TESTING
         landscape = testingLandscape ?? landscape
 #endif
         if abs(width - layoutWidth) > 0.5 || landscape != layoutLandscape {
+            stopModeAnimation()
             layoutWidth = width; layoutLandscape = landscape
-            metrics = KeyboardMetrics(width: width, landscape: landscape)
+            metrics = KeyboardMetrics(width: width, landscape: landscape, mini: isMiniMode, tablet: tabletLayout)
             keyboardHeight.constant = metrics.contentHeight
             buildKeys()
         }
-        touchSurface.frame = CGRect(x: 0, y: metrics.candidateHeight, width: width,
-                                    height: metrics.contentHeight - metrics.candidateHeight - metrics.bottomInset)
+        let previewTransforms = modeContentViews.map(\.transform)
+        for content in modeContentViews { content.transform = .identity }
+        touchSurface.frame = CGRect(x: 0, y: metrics.candidateHeight + metrics.topInset, width: width,
+                                    height: metrics.contentHeight - metrics.candidateHeight - metrics.topInset - metrics.bottomInset)
         rows.frame = CGRect(x: metrics.inset, y: 0, width: width - 2 * metrics.inset, height: touchSurface.bounds.height)
-        candidateScroll.frame = CGRect(x: 0, y: 1, width: width, height: metrics.candidateHeight - 5)
-        status.frame = CGRect(x: 12, y: 1, width: width - 24, height: 42)
+        let headerHeight = min(44, max(0, metrics.candidateHeight - 1))
+        candidatePanel.headerHeight = headerHeight
+        let expanded = candidatePanel.isExpanded && !candidatePanel.isHidden
+        let panelHeight = expanded ? metrics.candidateHeight + 3 * (metrics.keyHeight + metrics.rowGap) - metrics.rowGap / 2 - 1 : headerHeight
+        candidatePanel.frame = CGRect(x: 0, y: 1, width: expanded ? width : max(0, width - 78), height: panelHeight)
+        helperScroll.frame = CGRect(x: 4, y: 1, width: shortcutsExpanded ? max(0, width - 82) : 48, height: max(0, headerHeight - 6))
+        gesturePill.frame = CGRect(x: width - 76, y: 1, width: 72, height: max(0, headerHeight - 6))
+        for (index, row) in rows.arrangedSubviews.enumerated() {
+            row.alpha = expanded && index < 3 ? 0 : 1
+            row.accessibilityElementsHidden = expanded && index < 3
+        }
+        let miniSide = metrics.inset + metrics.miniFunctionWidth + metrics.keyGap
+        status.frame = isMiniMode ? CGRect(x: miniSide, y: metrics.topInset, width: width - 2 * metrics.inset - 3 * metrics.miniFunctionWidth - 3 * metrics.keyGap, height: metrics.keyHeight) : CGRect(x: 12, y: 1, width: width - 24, height: 42)
         launchLink?.view.frame = status.frame
+        for (content, transform) in zip(modeContentViews, previewTransforms) { content.transform = transform }
+    }
+
+    func setMiniMode(_ enabled: Bool, animated: Bool = true) {
+        if showingEmoji { setEmojiVisible(false) }
+        if typingPending || !deferredTaps.isEmpty { pendingMiniMode = enabled; return }
+        if enabled, !pinyin.input.isEmpty {
+            pendingMiniMode = enabled
+            sendTyping(visibleCandidates.first?.action ?? .english(compositionCase.apply(to: pinyin.input)))
+            return
+        }
+        pendingMiniMode = nil
+        guard isMiniMode != enabled else { return }
+        let snapshot = animated && view.window != nil ? view.snapshotView(afterScreenUpdates: false) : nil
+        let oldHeight = view.bounds.height
+        stopModeAnimation()
+        pasteGeneration += 1
+        clearText = nil; deleteDestination = nil
+        isMiniMode = enabled; page = 0
+        (enabled ? KeyboardLayoutMode.mini : .full).save()
+        metrics = KeyboardMetrics(width: layoutWidth > 0 ? layoutWidth : 466, landscape: layoutLandscape, mini: enabled, tablet: tabletLayout)
+        keyboardHeight.constant = metrics.contentHeight
+        buildKeys(); view.setNeedsLayout()
+        if animated { playTapFeedback() }
+        animateModeChange(snapshot: snapshot, oldHeight: oldHeight, shrinking: enabled)
+    }
+
+    private var modeContentViews: [UIView] { [touchSurface, candidatePanel, helperScroll, gesturePill, status] }
+    private func stopModeAnimation() {
+        modeAnimationGeneration += 1
+        modeAnimator?.stopAnimation(true); modeAnimator = nil
+        modeSnapshot?.removeFromSuperview(); modeSnapshot = nil
+        for content in modeContentViews {
+            content.layer.removeAllAnimations(); content.transform = .identity; content.alpha = 1
+        }
+    }
+    private func animateModeChange(snapshot: UIView?, oldHeight: CGFloat, shrinking: Bool) {
+        guard let snapshot else { return }
+        let reduced = reduceModeMotion
+        snapshot.isUserInteractionEnabled = false; snapshot.accessibilityElementsHidden = true
+        snapshot.accessibilityIdentifier = "keyboard.mode-transition"
+        snapshot.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: oldHeight)
+        let overlay = UIView(frame: view.bounds)
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.clipsToBounds = true; overlay.isUserInteractionEnabled = false
+        overlay.accessibilityElementsHidden = true
+        overlay.addSubview(snapshot); view.addSubview(overlay); modeSnapshot = overlay
+        for content in modeContentViews { content.alpha = reduced ? 0 : 0.4 }
+        let targetY = metrics.contentHeight - oldHeight
+        if reduced {
+            view.superview?.layoutIfNeeded(); view.layoutIfNeeded()
+            snapshot.frame.origin.y = targetY
+        }
+        let generation = modeAnimationGeneration
+        let animator = UIViewPropertyAnimator(duration: reduced ? 0.12 : 0.24, dampingRatio: 1)
+        animator.isUserInteractionEnabled = true
+        animator.addAnimations { [weak self, weak snapshot] in
+            guard let self else { return }
+            self.view.superview?.layoutIfNeeded(); self.view.layoutIfNeeded()
+            snapshot?.frame.origin.y = targetY
+            snapshot?.alpha = 0
+            if !reduced { snapshot?.transform = CGAffineTransform(scaleX: shrinking ? 0.97 : 1.03, y: shrinking ? 0.97 : 1.03) }
+            for content in self.modeContentViews { content.alpha = 1 }
+        }
+        animator.addCompletion { [weak self] _ in
+            guard let self, self.modeAnimationGeneration == generation else { return }
+            self.modeSnapshot?.removeFromSuperview(); self.modeSnapshot = nil; self.modeAnimator = nil
+        }
+        modeAnimator = animator
+        animator.startAnimation()
+    }
+
+    func updateModeChord(_ separationChange: CGFloat) {
+        guard modeChordActive, !reduceModeMotion, separationChange.isFinite else { return }
+        let allowed = isMiniMode ? max(0, separationChange) : min(0, separationChange)
+        let scale = 1 + max(-0.04, min(0.04, allowed / 500))
+        for content in modeContentViews { content.transform = CGAffineTransform(scaleX: scale, y: scale) }
+    }
+    private func settleModePreview() {
+        UIView.animate(withDuration: reduceModeMotion ? 0 : 0.18, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
+            for content in self.modeContentViews { content.transform = .identity }
+        }
+    }
+
+    func beginModeChord(at points: [CGPoint]) {
+        guard !modeChordActive else { return }
+        wordEdits.clear(); editingSwipeDestination = nil
+        stopModeAnimation()
+        modeChordActive = true; pasteGeneration += 1
+        modeChordDestination = KeyboardTextDestination(textDocumentProxy)
+        modeChordTaps = []
+        let wasEditingSwipe = currentKey?.isEditingSwipe == true
+        if let currentKey, currentKey.isPressed {
+            if currentKey.hasPendingChordTap { modeChordTaps.append(currentKey.value) }
+        } else if let point = points.first,
+                  let first = touchSurface.target(at: view.convert(point, to: touchSurface)) as? KeyControl,
+                  first.allowsRolloverCommit {
+            // Simultaneous touches can reach the recognizer before UIControl.
+            first.onPressFeedback?()
+            modeChordTaps.append(first.value)
+        }
+        if !wasEditingSwipe, let point = points.last,
+           let next = touchSurface.target(at: view.convert(point, to: touchSurface)) as? KeyControl,
+           next.allowsRolloverCommit {
+            // The recognizer consumes this new finger before its key can track.
+            // Give feedback now; replaying text on release must stay silent.
+            next.onPressFeedback?()
+            modeChordTaps.append(next.value)
+        }
+        cancelHold() // A mode gesture preserves the visible transcript and cancels submission.
+        clearText = nil; deleteDestination = nil
+        for key in keys { key.cancelPress() }
+        currentKey = nil; hideKeyPreview(); hideSymbolAlternatives()
+    }
+    func finishModeChord(direction: KeyboardModePinch.Direction?, replayTaps: Bool) {
+        guard modeChordActive else { return }
+        let values = modeChordTaps
+        let matches = !documentDetached && modeChordDestination == KeyboardTextDestination(textDocumentProxy)
+        modeChordActive = false; modeChordTaps = []; modeChordDestination = nil
+        if let direction { setMiniMode(direction == .inward) }
+        else if replayTaps, matches { for value in values { tap(value) } }
+        if modeAnimator == nil { settleModePreview() }
     }
 
     private func buildKeys() {
+        stopQuietKeys(animated: false)
+        candidatePanel.setExpanded(false)
+        wordEdits.clear(); editingSwipeDestination = nil
+        finishModeChord(direction: nil, replayTaps: false)
         hideKeyPreview()
         hideSymbolAlternatives()
         if command != nil { cancelHold() } // Rotation also invalidates a released hold awaiting polish.
         if currentKey?.isPressed == true {
+            #if DEBUG
+            if cursorCheck != nil { cursorCheckEvents.append("layoutChanged") }
+            #endif
             cancelHold() // A layout change ends the touch, preserving visible speech.
             currentKey?.cancelPress()
         }
@@ -200,28 +490,39 @@ final class KeyboardViewController: UIInputViewController {
         touchSurface.controls.removeAll()
         for v in rows.arrangedSubviews { rows.removeArrangedSubview(v); v.removeFromSuperview() }
         rows.spacing = metrics.rowGap
+        if isMiniMode {
+            let line = UIStackView(); line.axis = .horizontal; line.spacing = metrics.keyGap
+            line.heightAnchor.constraint(equalToConstant: metrics.keyHeight).isActive = true
+            for value in ["expand", "dictate", "delete", "return"] {
+                let key = makeKey(value)
+                if value != "dictate" { key.widthAnchor.constraint(equalToConstant: metrics.miniFunctionWidth).isActive = true }
+                line.addArrangedSubview(key)
+            }
+            rows.addArrangedSubview(line)
+            updateHeader(); return
+        }
+        if metrics.tablet { buildTabletKeys(); updateHeader(); return }
         if metrics.split { buildSplitKeys(); updateHeader(); return }
         let topLetters = "qwertyuiop".map { String($0) }
         let middleLetters = "asdfghjkl".map { String($0) }
         let bottomLetters = "zxcvbnm".map { String($0) }
         let letters: [[String]] = [topLetters, middleLetters, ["shift"] + bottomLetters + ["delete"]]
-        let numbers = [Array("1234567890").map(String.init), ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""], ["#+=", ".", ",", "?", "!", "'", "delete"]]
-        let symbols = [["[", "]", "{", "}", "#", "%", "^", "*", "+", "="], ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"], ["123", ".", ",", "?", "!", "'", "delete"]]
-        let contents = page == 0 ? letters : page == 1 ? numbers : symbols
+        let paletteLanguage: KeyboardLanguage = [.emailAddress, .URL, .asciiCapable].contains(textDocumentProxy.keyboardType ?? .default) ? .english : language
+        let contents = page == 0 ? letters : KeyboardSymbols.rows(page: page, language: paletteLanguage)
         func row() -> UIStackView {
             let row = UIStackView(); row.axis = .horizontal; row.spacing = metrics.keyGap
             row.heightAnchor.constraint(equalToConstant: metrics.keyHeight).isActive = true
             rows.addArrangedSubview(row)
             return row
         }
-        for (index, values) in contents.enumerated() {
+        for (index, values) in contents.enumerated() where !isMiniMode {
             let line = row()
             if index == 2 {
                 line.spacing = metrics.sideGap
-                let first = makeKey(values.first!), last = makeKey(values.last!)
+                let first = makeKey(values.first!, literal: page > 0), last = makeKey(values.last!, literal: page > 0)
                 first.widthAnchor.constraint(equalToConstant: metrics.shiftWidth).isActive = true
                 let middle = UIStackView(); middle.axis = .horizontal; middle.spacing = metrics.keyGap; middle.distribution = .fillEqually
-                for value in values.dropFirst().dropLast() { middle.addArrangedSubview(makeKey(value)) }
+                for value in values.dropFirst().dropLast() { middle.addArrangedSubview(makeKey(value, literal: page > 0)) }
                 for item in [first, middle, last] { line.addArrangedSubview(item) }
                 last.widthAnchor.constraint(equalTo: first.widthAnchor).isActive = true
             } else {
@@ -230,7 +531,7 @@ final class KeyboardViewController: UIInputViewController {
                     line.isLayoutMarginsRelativeArrangement = true
                     line.layoutMargins = UIEdgeInsets(top: 0, left: metrics.middleInset, bottom: 0, right: metrics.middleInset)
                 }
-                for value in values { line.addArrangedSubview(makeKey(value)) }
+                for value in values { line.addArrangedSubview(makeKey(value, literal: page > 0)) }
             }
         }
         let bottom = row()
@@ -246,6 +547,10 @@ final class KeyboardViewController: UIInputViewController {
             at.widthAnchor.constraint(equalToConstant: 32).isActive = true; bottom.addArrangedSubview(at)
         }
         bottom.addArrangedSubview(makeKey("space"))
+        if language == .chinese {
+            let period = makeKey("。"); period.widthAnchor.constraint(equalToConstant: 34).isActive = true
+            bottom.addArrangedSubview(period)
+        }
         if metrics.inlineAccessories { bottom.addArrangedSubview(makeAccessoryReturn()) }
         else if metrics.belowAccessories {
             let accessories = UIStackView(); accessories.axis = .horizontal
@@ -263,6 +568,40 @@ final class KeyboardViewController: UIInputViewController {
         updateHeader()
     }
 
+    /// iPad uses a continuous, hardware-style five-row layout. Narrow floating
+    /// and multitasking windows use the phone geometry instead of squashing this.
+    private func buildTabletKeys() {
+        let punctuation: (String) -> String = { KeyboardSymbols.key($0, language: self.language) }
+        let alphabet: [[String]] = [Array("1234567890").map(String.init) + ["-", "=", "delete"],
+                        ["tab"] + Array("qwertyuiop").map(String.init) + ["[", "]", "\\"],
+                        ["shift"] + Array("asdfghjkl").map(String.init) + [";", "'", "return"],
+                        ["shift"] + Array("zxcvbnm").map(String.init) + [",", ".", "/", "shift"]]
+        let symbols: [[String]] = [Array("1234567890").map(String.init) + ["-", "=", "delete"],
+                       ["tab", "@", "#", "$", "%", "&", "*", "(", ")", "[", "]", "{", "}", "\\"],
+                       ["#+=", "_", "+", "~", "`", "|", "<", ">", "€", "£", "¥", "\"", "return"],
+                       ["ABC", ".", ",", "?", "!", ":", ";", "'", "\"", "/", "•", "ABC"]]
+        for values in page == 0 ? alphabet : symbols {
+            let line = UIStackView(); line.axis = .horizontal; line.spacing = metrics.keyGap
+            line.heightAnchor.constraint(equalToConstant: metrics.keyHeight).isActive = true
+            rows.addArrangedSubview(line)
+            var anchor: KeyControl?
+            for raw in values {
+                let value = raw.count == 1 && raw.first?.isLetter != true ? punctuation(raw) : raw
+                let key = makeKey(value); line.addArrangedSubview(key)
+                if ["shift", "tab", "delete", "return", "ABC", "#+="].contains(raw) {
+                    key.widthAnchor.constraint(equalToConstant: raw == "return" ? 100 : 64).isActive = true
+                } else if let anchor { key.widthAnchor.constraint(equalTo: anchor.widthAnchor).isActive = true }
+                else { anchor = key }
+            }
+        }
+        let bottom = UIStackView(); bottom.axis = .horizontal; bottom.spacing = metrics.keyGap
+        bottom.heightAnchor.constraint(equalToConstant: metrics.keyHeight).isActive = true; rows.addArrangedSubview(bottom)
+        for value in [page == 0 ? "123" : "ABC", "language", "emoji", "dictate", "space", "left", "right"] {
+            let key = makeKey(value); bottom.addArrangedSubview(key)
+            if value != "space" { key.widthAnchor.constraint(equalToConstant: 60).isActive = true }
+        }
+    }
+
     /// Duo's native inner-landscape layout duplicates G/V near the thumb boundary.
     private func buildSplitKeys() {
         let leftLetters = [["q", "w", "e", "r", "t"], ["a", "s", "d", "f", "g"], ["shift", "z", "x", "c", "v"]]
@@ -271,10 +610,15 @@ final class KeyboardViewController: UIInputViewController {
         let rightNumbers = [["6", "7", "8", "9", "0"], [")", "$", "&", "@", "\""], [".", ",", "?", "'", "delete"]]
         let leftSymbols = [["[", "]", "{", "}", "#"], ["_", "\\", "|", "~", "<"], ["123", ".", ",", "?", "!"]]
         let rightSymbols = [["%", "^", "*", "+", "="], [">", "€", "£", "¥", "•"], [".", ",", "?", "'", "delete"]]
-        let left = page == 0 ? leftLetters : page == 1 ? leftNumbers : leftSymbols
-        let right = page == 0 ? rightLetters : page == 1 ? rightNumbers : rightSymbols
+        var left = page == 0 ? leftLetters : page == 1 ? leftNumbers : leftSymbols
+        var right = page == 0 ? rightLetters : page == 1 ? rightNumbers : rightSymbols
+        if page > 0, language == .chinese, ![.emailAddress, .URL, .asciiCapable].contains(textDocumentProxy.keyboardType ?? .default) {
+            let palette = KeyboardSymbols.rows(page: page, language: .chinese)
+            left = palette.map { Array($0.prefix($0.count / 2)) }
+            right = palette.map { Array($0.suffix($0.count / 2)) }
+        }
         let halfWidth: CGFloat = 303.667
-        for index in 0..<4 {
+        for index in (isMiniMode ? 3 : 0)..<4 {
             let row = UIStackView(); row.axis = .horizontal
             row.heightAnchor.constraint(equalToConstant: metrics.keyHeight).isActive = true
             rows.addArrangedSubview(row)
@@ -295,14 +639,14 @@ final class KeyboardViewController: UIInputViewController {
                     half.distribution = index < 2 ? .fillEqually : .fill
                     var letter: KeyControl?
                     for (column, value) in values.enumerated() {
-                        let key = makeKey(value); half.addArrangedSubview(key)
-                        let wide = index == 2 && (isRight ? column == 4 : column == 0)
+                        let key = makeKey(value, literal: page > 0); half.addArrangedSubview(key)
+                        let wide = index == 2 && (isRight ? column == values.count - 1 : column == 0)
                         if index == 2 {
                             if wide { key.widthAnchor.constraint(equalToConstant: 64).isActive = true }
                             else if let letter { key.widthAnchor.constraint(equalTo: letter.widthAnchor).isActive = true }
                             else { letter = key }
                         }
-                        if index == 2 && (isRight ? column == 3 : column == 0) { half.setCustomSpacing(22, after: key) }
+                        if index == 2 && (isRight ? column == values.count - 2 : column == 0) { half.setCustomSpacing(22, after: key) }
                     }
                 } else if isRight {
                     half.addArrangedSubview(makeKey("space"))
@@ -321,8 +665,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func makeSwitcher() -> UIButton {
-        // Like the native smiley key, this opens the system input-mode picker.
-        // iOS owns the list, including its emoji keyboard; no private keyboard API.
+        // Emoji stays inside our extension. The panel includes a system globe.
         let button = KeyboardSwitcherButton(type: .custom)
         button.touchSurface = touchSurface
         touchSurface.controls.append(button)
@@ -345,18 +688,24 @@ final class KeyboardViewController: UIInputViewController {
             button.layer.cornerCurve = .continuous
         }
         button.accessibilityIdentifier = "keyboard.key.globe"
-        button.accessibilityLabel = "Next keyboard"
-        button.accessibilityHint = "Choose a keyboard, including Emoji."
+        button.accessibilityLabel = "Emoji"
+        button.accessibilityHint = "Open emoji. The panel also has a system keyboard switcher."
         button.widthAnchor.constraint(equalToConstant: metrics.switcherWidth).isActive = true
-        button.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
         button.addAction(UIAction { [weak self] _ in
             self?.clearText = nil
             self?.currentKey?.cancelPress()
             self?.tapFeedback.prepare()
-            self?.resetComposition()
         }, for: .touchDown)
-        button.addAction(UIAction { [weak self] _ in self?.playTapFeedback() }, for: .touchUpInside)
+        button.addAction(UIAction { [weak self] _ in self?.playTapFeedback(); self?.tap("emoji") }, for: .touchUpInside)
         return button
+    }
+
+    private func setEmojiVisible(_ visible: Bool) {
+        currentKey?.cancelPress(); cancelHold(); hideKeyPreview(); hideSymbolAlternatives()
+        showingEmoji = visible; emojiPressDestination = nil
+        emojiPanel.isHidden = !visible; touchSurface.isHidden = visible
+        if visible { view.bringSubviewToFront(emojiPanel) }
+        updateHeader(); view.setNeedsLayout()
     }
 
     private func makeAccessoryReturn() -> KeyControl {
@@ -372,20 +721,43 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateHeader() {
+        refreshCopiedCodeIndicator()
         let voiceVisible = command != nil || activationRequest != nil || Date() < errorUntil
         setRecordingAppearance(command?.phase == .recording, voiceVisible: voiceVisible)
-        candidateScroll.isHidden = voiceVisible
+        if !visibleCandidates.isEmpty { shortcutsExpanded = false }
+        candidatePanel.isHidden = showingEmoji || isMiniMode || voiceVisible || shortcutsExpanded || visibleCandidates.isEmpty
+        if candidatePanel.isHidden { candidatePanel.setExpanded(false) }
+        let hidePills = showingEmoji || isMiniMode || cursorKey != nil || voiceVisible || candidatePanel.isExpanded
+        helperScroll.isHidden = hidePills || !candidatePanel.isHidden
+        gesturePill.isHidden = hidePills
+        for button in shortcutButtons where button !== codeButton { button.isHidden = !shortcutsExpanded }
+        refreshCopiedCodeIndicator()
+        shortcutToggle?.accessibilityValue = shortcutsExpanded ? "Expanded" : "Collapsed"
+        view.setNeedsLayout()
         status.textColor = .label
         let ready = hasFullAccess && VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true
         launchLink?.view.isHidden = ready || !voiceVisible || command != nil || activationRequest != nil || !offersHostLaunch
     }
     func setRecordingAppearance(_ recording: Bool, voiceVisible: Bool) {
         if recording { hideKeyPreview() }
-        status.isHidden = recording || !voiceVisible
+        status.isHidden = showingEmoji || isMiniMode || recording || command != nil || !voiceVisible
         for key in keys {
-            key.label.isHidden = recording
+            if recording { key.alpha = 1 }
+            key.label.isHidden = cursorDrag != nil
+            key.setLegendHidden(recording)
+            key.quietFeedback.setRecording(recording, dimBase: key.value.count == 1 || ["space", "dictate"].contains(key.value), mini: key.value == "dictate")
+            if key.value == "space" {
+                key.icon.image = cursorKey === key && cursorDrag != nil ? UIImage(systemName: "arrow.left.and.right") : key.restingIcon
+            }
             if key.value == "return" {
-                key.icon.image = recording ? UIImage(systemName: "paperplane") : key.restingIcon
+                key.icon.image = recording ? UIImage(systemName: textDocumentProxy.returnKeyType == .send ? "paperplane" : "checkmark") : key.restingIcon
+            } else if key.value == "dictate" {
+                key.icon.image = key.restingIcon
+                key.icon.isHidden = recording || (voiceVisible && command == nil)
+                key.label.isHidden = false
+                key.label.text = voiceVisible && !recording && command == nil ? status.text : nil
+                key.label.font = .systemFont(ofSize: 14)
+                key.label.numberOfLines = 2
             }
         }
     }
@@ -404,14 +776,41 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateLanguageKey(_ key: KeyControl) {
-        key.label.text = languageTitle
-        key.label.font = .systemFont(ofSize: languageTitle == "中英" ? 16 : 18)
+        // Localize to the selected typing mode, not the host app or device locale.
+        let locale = Locale(identifier: language == .chinese ? "zh-Hans-CN" : "en-US")
+        let symbol = language == .chinese ? "character.book.closed.zh" : "character.book.closed"
+        key.label.text = nil
+        key.icon.image = UIImage(systemName: symbol, withConfiguration: UIImage.Configuration(locale: locale))
+        key.restingIcon = key.icon.image
         key.accessibilityLabel = language == .chinese ? chineseModeName : language.name
-        key.accessibilityHint = "Switch to \(language == .chinese ? "English" : chineseModeName)"
+        key.accessibilityHint = "Tap to switch to \(language == .chinese ? "English" : chineseModeName). Hold for other keyboards."
     }
 
-    private func makeKey(_ rawValue: String) -> KeyControl {
-        let value = page > 0 ? KeyboardSymbols.key(rawValue, language: language) : rawValue
+    private func updateReturnKey(_ key: KeyControl) {
+        let type = textDocumentProxy.returnKeyType ?? .default
+        let title: String
+        switch type {
+        case .send: title = "send"
+        case .search, .google, .yahoo: title = "search"
+        case .go: title = "go"
+        case .done: title = "done"
+        case .next: title = "next"
+        case .join: title = "join"
+        case .route: title = "route"
+        case .continue: title = "continue"
+        case .emergencyCall: title = "emergency call"
+        default: title = "return"
+        }
+        key.isPrimaryAction = title != "return"
+        key.label.text = isMiniMode || !key.isPrimaryAction ? nil : title
+        key.restingIcon = isMiniMode || !key.isPrimaryAction ? UIImage(systemName: type == .send ? "paperplane" : "return") : nil
+        key.icon.image = command?.phase == .recording ? UIImage(systemName: type == .send ? "paperplane" : "checkmark") : key.restingIcon
+        key.accessibilityLabel = title
+    }
+
+    private func makeKey(_ rawValue: String, literal: Bool = false) -> KeyControl {
+        let asciiField = textDocumentProxy.keyboardType == .emailAddress || textDocumentProxy.keyboardType == .URL || textDocumentProxy.keyboardType == .asciiCapable
+        let value = !literal && page > 0 && !asciiField ? KeyboardSymbols.key(rawValue, language: language) : rawValue
         let key = KeyControl()
         key.value = value
         key.touchSurface = touchSurface
@@ -419,35 +818,45 @@ final class KeyboardViewController: UIInputViewController {
         keys.append(key)
         key.isDeleteKey = value == "delete"
         let ordinary = value.count == 1
+        key.isEnabled = !value.isEmpty
         key.backgroundColor = KeyboardMetrics.keyFill
         key.layer.cornerRadius = metrics.cornerRadius; key.layer.cornerCurve = .continuous
         key.label.font = ordinary ? metrics.letterFont : .systemFont(ofSize: 18)
         key.label.textColor = .label
         key.labelOffset = ordinary ? -1.5 : -1
         var title = value
-        if value == "language" { title = languageTitle }
         if ordinary && page == 0 { title = shifted ? value.uppercased() : value }
         if value == "space" { title = "" }
-        if value == "shift" { key.icon.image = UIImage(systemName: capsLock ? "capslock.fill" : shifted ? "shift.fill" : "shift") }
-        else if value == "delete" { key.icon.image = UIImage(systemName: "delete.left") }
+        if value == "tab" { key.icon.image = UIImage(systemName: "arrow.right.to.line"); title = "Tab" }
+        else if value == "left" || value == "right" { key.icon.image = UIImage(systemName: "arrow.\(value)") }
+        else if value == "dictate" { key.icon.image = UIImage(systemName: "mic.fill") }
+        else if value == "kaomoji" { title = "^_^" }
+        else if value == "emoji" { key.icon.image = UIImage(systemName: "face.smiling"); title = "Emoji" }
+        else if value == "shift" { key.icon.image = UIImage(systemName: capsLock ? "capslock.fill" : shifted ? "shift.fill" : "shift") }
+        else if value == "expand" { key.icon.image = UIImage(systemName: "arrow.up.left.and.arrow.down.right"); title = "Full keyboard" }
+        else if value == "delete" { key.icon.image = UIImage(systemName: "delete.left"); if isMiniMode { title = "Delete word" } }
         else if value == "return" {
-            switch textDocumentProxy.returnKeyType {
-            case .send: title = "send"
-            case .search: title = "search"
-            case .go: title = "go"
-            case .done: title = "done"
-            case .next: title = "next"
-            default: title = "return"; key.icon.image = UIImage(systemName: "return")
-            }
-            if key.icon.image == nil { key.label.text = title }
+            updateReturnKey(key)
+            title = key.accessibilityLabel ?? "return"
         } else { key.label.text = title }
         key.accessibilityIdentifier = "keyboard.key.\(value)"
         key.accessibilityLabel = value == "space" ? "space" : title; key.accessibilityTraits = .keyboardKey
         if value == "language" { updateLanguageKey(key) }
-        key.restingIcon = key.icon.image
+        if value == "space" || value == "dictate" {
+            key.accessibilityCustomActions = [UIAccessibilityCustomAction(name: value == "dictate" ? "Full keyboard" : "Mini keyboard") { [weak self] _ in
+                self?.setMiniMode(value != "dictate"); return true
+            }]
+        }
+        if value != "return" { key.restingIcon = key.icon.image }
         key.onPress = { [weak self, weak key] in
             guard let self, let key, self.keys.contains(where: { $0 === key }) else { return false }
+            guard !self.modeChordActive else { return false }
+            if self.modeAnimator != nil { self.stopModeAnimation() }
+            self.pasteGeneration += 1
             self.clearText = nil
+            // A released hold may still be awaiting refinement/polish. Relinquish
+            // its marked range before this finger can edit, not on key release.
+            if self.command?.phase == .finish { self.cancelHold() }
             if let current = self.currentKey, current !== key {
                 self.cancelHold()
                 // A second thumb is normal typing: commit the pending tap in
@@ -459,24 +868,51 @@ final class KeyboardViewController: UIInputViewController {
             // The preceding action may have invalidated this key's layout.
             guard self.keys.contains(where: { $0 === key }) else { return false }
             self.currentKey = key
+            if self.shortcutsExpanded { self.shortcutsExpanded = false; self.updateHeader() }
+            self.endCursor = nil
+            self.editingSwipeDestination = KeyboardTextDestination(self.textDocumentProxy)
             if key.isDeleteKey {
                 self.cancelHold()
                 self.deleteDestination = KeyboardTextDestination(self.textDocumentProxy)
+            } else if key.value == "space", !key.isGapPress {
+                self.cancelHold() // A cursor touch must not race a late dictation replacement.
             }
+            self.cursorPressDestination = key.value == "space" && !key.isGapPress ? KeyboardTextDestination(self.textDocumentProxy) : nil
             self.tapFeedback.prepare()
             return true
         }
         key.onTap = { [weak self] in
-            self?.playTapFeedback()
+            if value == "dictate" {
+                if self?.command?.phase == .recording { self?.endHold() } else { self?.beginHold() }
+                return
+            }
             self?.tap(value)
         }
-        if key.isDeleteKey {
+        if value != "dictate" { key.onPressFeedback = { [weak self] in self?.playTapFeedback() } }
+        if value == "language" {
+            key.onSystemKeyboard = { [weak self] sender, event in self?.handleInputModeList(from: sender, with: event) }
+            key.onHold = { [weak key] in key?.beginSystemKeyboardSelection() }
+            key.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Next keyboard") { [weak self] _ in
+                self?.advanceToNextInputMode(); return true
+            }]
+        } else if value == "space" {
+            key.accessibilityHint = "Hold, then drag to move the cursor."
+            key.onHold = { [weak self, weak key] in
+                guard let self, let key else { return }
+                self.beginCursorDrag(from: key)
+            }
+        } else if key.isDeleteKey {
             key.accessibilityHint = "Hold to keep deleting. Hold and swipe left to clear the field."
             key.onDeleteRepeat = { [weak self] in self?.repeatDelete() }
             key.onClearAll = { [weak self] in self?.clearAllText() }
-        } else if page == 0, ordinary, value.first?.isASCII == true, value.first?.isLetter == true {
-            key.accessibilityHint = "Hold to dictate. Slide to Delete to cancel, or Return to send after polishing."
+        } else if value == "dictate" || (page == 0 && ordinary && value.first?.isASCII == true && value.first?.isLetter == true) {
+            key.accessibilityHint = "Hold to dictate. Slide to Delete to cancel, Return to send, or release over Language to translate."
             key.onHold = { [weak self] in self?.beginHold() }
+            if value == "dictate" {
+                key.label.widthAnchor.constraint(lessThanOrEqualTo: key.widthAnchor, constant: -8).isActive = true
+                key.accessibilityLabel = "Dictate"
+                key.accessibilityHint = "Hold to speak. Slide to Delete to cancel, Return to send, or release over Language to translate. Pinch out for the full keyboard. Double-tap with VoiceOver to start or finish."
+            }
         } else if page > 0, ordinary, !KeyboardSymbols.alternatives(for: value).isEmpty {
             key.accessibilityHint = "Hold and slide to choose an alternative symbol."
             key.onHold = { [weak self, weak key] in
@@ -495,6 +931,11 @@ final class KeyboardViewController: UIInputViewController {
         }
         key.onHoldMove = { [weak self, weak key] point in
             guard let self, let key else { return false }
+            if key.value == "language", !key.isGapPress { return true }
+            if key.value == "space", !key.isGapPress {
+                guard self.cursorKey === key else { return false }
+                return self.cursorDrag?.move(to: point, in: self.textDocumentProxy) ?? true
+            }
             if self.symbolKey === key {
                 self.symbolAlternatives.track(key.convert(point, to: self.view))
                 return true
@@ -502,6 +943,9 @@ final class KeyboardViewController: UIInputViewController {
             return self.moveDictationTouch(to: point, from: key)
         }
         key.onRelease = { [weak self, weak key] in
+            if let self, let key, key.value == "space", !key.isGapPress {
+                self.endCursorDrag(); return
+            }
             if let self, let key, self.symbolKey === key {
                 let choice = self.symbolDestination == KeyboardTextDestination(self.textDocumentProxy) ? self.symbolAlternatives.selectedSymbol : nil
                 self.hideSymbolAlternatives()
@@ -509,10 +953,11 @@ final class KeyboardViewController: UIInputViewController {
                 return
             }
             self?.deleteDestination = nil
-            self?.endHold()
+            self?.endHold(translate: self?.dictationTargetKey?.dictationFeedback == .translate)
             self?.clearDictationTarget()
         }
         key.onCancel = { [weak self, weak key] in
+            if let self, let key, key.value == "space", !key.isGapPress { self.endCursorDrag() }
             if let self, let key, self.symbolKey === key { self.hideSymbolAlternatives() }
             self?.deleteDestination = nil
             self?.cancelHold(discard: true)
@@ -525,6 +970,51 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
         return key
+    }
+
+    private func beginCursorDrag(from key: KeyControl) {
+        typingAssistance.clear(); renderCandidates()
+        wordEdits.clear()
+        #if DEBUG
+        if cursorCheck != nil { cursorCheckEvents.append("holdReached") }
+        #endif
+        guard CursorDragSession.matchesPress(cursorPressDestination, in: textDocumentProxy) else { key.cancelPress(); return }
+        pasteGeneration += 1; clearText = nil; deleteDestination = nil
+        cancelHold() // Preserve any visible dictated text, invalidating its pending polish/send.
+        cursorKey = key
+        cursorPressDestination = KeyboardTextDestination(textDocumentProxy)
+        prepareCursorDrag()
+    }
+    private func prepareCursorDrag() {
+        guard let key = cursorKey, key.isPressed, cursorDrag == nil else { return }
+        guard !typingPending, deferredTaps.isEmpty else { return }
+        if !pinyin.input.isEmpty {
+            sendTyping(visibleCandidates.first?.action ?? .english(compositionCase.apply(to: pinyin.input)))
+            return
+        }
+        cursorDrag = CursorDragSession(proxy: textDocumentProxy, point: key.pressPoint)
+        #if DEBUG
+        if cursorCheck != nil { cursorCheckEvents.append("cursorActivated") }
+        if cursorCheck?.request.legacyAcknowledgement == true {
+            cursorDrag?.enableLegacyVerification(in: textDocumentProxy)
+        }
+        #endif
+        hideKeyPreview(); playTapFeedback(); updateHeader()
+    }
+    private func endCursorDrag() {
+        cursorKey = nil; cursorDrag = nil; cursorPressDestination = nil
+        updateHeader()
+    }
+    private func cancelCursorIfDestinationChanged() {
+        guard !insertingTypedText, cursorDrag?.isUpdating != true,
+              let key = currentKey, key.isPressed, key.value == "space", !key.isGapPress else { return }
+        let matches = cursorDrag?.advance(in: textDocumentProxy) ?? CursorDragSession.matchesPress(cursorPressDestination, in: textDocumentProxy)
+        if !matches {
+            #if DEBUG
+            if cursorCheck != nil { cursorCheckEvents.append("destinationChanged") }
+            #endif
+            key.cancelPress()
+        }
     }
 
     private func showKeyPreview(for key: KeyControl) {
@@ -568,6 +1058,10 @@ final class KeyboardViewController: UIInputViewController {
 
     private func cancelDeletionIfDestinationChanged() {
         guard !insertingTypedText, clearText?.isUpdating != true else { return }
+        if isMiniMode, currentKey?.isDeleteKey == true {
+            _ = miniDeleteDestinationIsValid()
+            return
+        }
         if let clearText, !clearText.matches(textDocumentProxy) { self.clearText = nil }
         if let deleteDestination, deleteDestination != KeyboardTextDestination(textDocumentProxy) {
             currentKey?.cancelPress()
@@ -575,12 +1069,24 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func repeatDelete() {
+        if isMiniMode {
+            guard miniDeleteDestinationIsValid(), !typingPending else { return }
+            playTapFeedback(); tap("delete"); return
+        }
         guard deleteDestination == KeyboardTextDestination(textDocumentProxy) else {
             currentKey?.cancelPress(); return
         }
         // Never queue repeat ticks behind an asynchronous Pinyin edit.
         guard !typingPending, !usesPinyin || pinyinReady else { return }
         playTapFeedback(); tap("delete")
+    }
+
+    private func miniDeleteDestinationIsValid() -> Bool {
+        let current = KeyboardTextDestination(textDocumentProxy)
+        let valid = wordEdits.hasTrackedContext ? wordEdits.observe(textDocumentProxy) : deleteDestination == current
+        if valid { deleteDestination = current }
+        else if !wordEdits.hasPendingEdit { currentKey?.cancelPress() }
+        return valid
     }
 
     private func clearAllText() {
@@ -605,9 +1111,10 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
     private func playTapFeedback() {
-        guard hapticStrength > 0 else { return }
-        tapFeedback.impactOccurred(intensity: CGFloat(hapticStrength))
-        tapFeedback.prepare()
+        #if KEYBOARD_TESTING
+        testingTapFeedbackCount += 1
+        #endif
+        tapFeedback.tap()
     }
 
     private func refreshKeyboardPreferences() {
@@ -616,7 +1123,13 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     func applyKeyboardPreferences(_ preferences: KeyboardPreferences) {
-        hapticStrength = preferences.hapticStrength
+        tapFeedback.configure(preferences)
+        if autoCorrectionEnabled != preferences.autoCorrectionEnabled || smartSpacingEnabled != preferences.smartSpacingEnabled {
+            typingAssistance.clear()
+            autoCorrectionEnabled = preferences.autoCorrectionEnabled
+            smartSpacingEnabled = preferences.smartSpacingEnabled
+            if pinyin.input.isEmpty && !typingPending { compositionAutoCorrection = autoCorrectionEnabled; renderCandidates() }
+        }
         guard mixedTypingEnabled != preferences.mixedTypingEnabled else { return }
         mixedTypingEnabled = preferences.mixedTypingEnabled
         // A preference refresh must not change the candidate Space will accept
@@ -626,6 +1139,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func tap(_ value: String) {
+        endCursor = nil
+        if value != "space" { doubleSpace.reset() }
+        let miniDelete = isMiniMode && value == "delete"
+        let editing = miniDelete ? KeyboardEditSwipe.deleteWord : KeyboardEditSwipe(rawValue: value)
+        if editing == nil { wordEdits.clear() }
+        pasteGeneration += 1
         clearText = nil
         if command != nil { cancelHold() }
         let waitingForPinyin = usesPinyin && !pinyinReady && (value != "language" || !deferredTaps.isEmpty)
@@ -633,8 +1152,46 @@ final class KeyboardViewController: UIInputViewController {
             if deferredTaps.count < 64 { deferredTaps.append(value) }
             return
         }
+        if let editing {
+            typingAssistance.clear()
+            if !pinyin.input.isEmpty {
+                deferredTaps.insert(value, at: 0)
+                sendTyping(visibleCandidates.first?.action ?? .english(compositionCase.apply(to: pinyin.input)))
+                return
+            }
+            insertingTypedText = true
+            let changed: Bool
+            switch editing {
+            case .deleteWord:
+                if miniDelete, textDocumentProxy.selectedText?.isEmpty == false { textDocumentProxy.deleteBackward(); changed = true }
+                else { changed = wordEdits.deleteWord(in: textDocumentProxy) }
+            case .restoreWord: changed = wordEdits.restoreWord(in: textDocumentProxy)
+            case .endOfText:
+                wordEdits.clear()
+                endCursor = CursorDragSession(proxy: textDocumentProxy, point: .zero); endCursorSteps = 0
+                changed = endCursor?.advanceToEnd(in: textDocumentProxy) == true
+            case .lineBreak:
+                wordEdits.clear()
+                // Unicode LINE SEPARATOR, not the Return/Send operation ("\n").
+                textDocumentProxy.insertText("\u{2028}"); changed = true
+            }
+            insertingTypedText = false
+            if miniDelete { deleteDestination = KeyboardTextDestination(textDocumentProxy) }
+            if changed && !miniDelete { playTapFeedback() }
+            updateHeader(); return
+        }
         switch value {
+        case "kaomoji", "emoji":
+            if !pinyin.input.isEmpty {
+                deferredTaps.insert(value, at: 0)
+                sendTyping(visibleCandidates.first?.action ?? .english(compositionCase.apply(to: pinyin.input)))
+                return
+            }
+            typingAssistance.clear(); setEmojiVisible(true)
+            if value == "kaomoji" { emojiPanel.showEmoticons() }
+        case "expand": setMiniMode(false)
         case "language":
+            typingAssistance.clear()
             // Preserve visible spelling and the order of taps queued after the switch.
             let remainingTaps = deferredTaps
             resetComposition()
@@ -647,7 +1204,7 @@ final class KeyboardViewController: UIInputViewController {
             if !pinyin.input.isEmpty { commitSpelling() }
             if Date().timeIntervalSince(lastShift) < 0.35 { capsLock = true; shifted = true } else { capsLock = false; shifted.toggle() }
             lastShift = Date(); updateKeyLegends()
-        case "123": page = 1; buildKeys()
+        case "123": setMiniMode(false); page = 1; buildKeys()
         case "#+=": page = 2; buildKeys()
         case "ABC": page = 0; buildKeys()
         case "globe": resetComposition(); advanceToNextInputMode()
@@ -655,7 +1212,8 @@ final class KeyboardViewController: UIInputViewController {
             if !pinyin.input.isEmpty { sendTyping(.key(0xff08)) }
             else {
                 insertingTypedText = true
-                textDocumentProxy.deleteBackward()
+                if language == .english { typingAssistance.delete(in: textDocumentProxy, correction: autoCorrectionEnabled); renderCandidates() }
+                else { textDocumentProxy.deleteBackward() }
                 if deleteDestination != nil { deleteDestination = KeyboardTextDestination(textDocumentProxy) }
                 insertingTypedText = false
             }
@@ -664,16 +1222,27 @@ final class KeyboardViewController: UIInputViewController {
                 if let first = visibleCandidates.first { sendTyping(first.spaceAction) }
                 else { commitSpelling() }
             }
-            else { textDocumentProxy.insertText(" ") }
+            else {
+                insertingTypedText = true
+                let replaced = doubleSpace.replaceIfMatching(in: textDocumentProxy, language: language)
+                insertingTypedText = false
+                if replaced { typingAssistance.clear(); renderCandidates() }
+                else { insertAssistedText(" "); doubleSpace.remember(in: textDocumentProxy) }
+            }
+        case "tab": insertAssistedText("\t")
+        case "left", "right":
+            if !pinyin.input.isEmpty { commitSpelling() }
+            else { textDocumentProxy.adjustTextPosition(byCharacterOffset: value == "left" ? -1 : 1) }
         case "return":
             // First Return accepts the spelling only; never submits an unfinished Pinyin word.
             if !pinyin.input.isEmpty { commitSpelling() }
-            else { textDocumentProxy.insertText("\n") }
+            else { insertAssistedText("\n") }
         default:
             if usesPinyin, (value.count == 1 && value.first!.isASCII && value.first!.isLetter || value == "'" && !pinyin.input.isEmpty) {
                 if pinyin.input.isEmpty {
                     compositionCase = capsLock ? .uppercase : shifted ? .initialCapital : .lowercase
                     compositionUsesMixedTyping = mixedTypingEnabled
+                    compositionAutoCorrection = autoCorrectionEnabled
                 }
                 sendTyping(.key(Int32(value.lowercased().utf8.first!)))
                 if shifted && !capsLock { shifted = false; updateKeyLegends() }
@@ -683,7 +1252,13 @@ final class KeyboardViewController: UIInputViewController {
                 // Commit spelling before punctuation/numbers, preserving input order.
                 deferredTaps.insert(value, at: 0); commitSpelling(); return
             }
-            textDocumentProxy.insertText(page == 0 && shifted ? value.uppercased() : value)
+            insertAssistedText(page == 0 && shifted ? value.uppercased() : value)
+            // Complete a punctuation choice before returning to letters, including
+            // Chinese punctuation and alternatives selected with a symbol hold.
+            if page > 0, !value.isEmpty,
+               value.unicodeScalars.allSatisfy({ CharacterSet.punctuationCharacters.contains($0) }) {
+                page = 0; buildKeys()
+            }
             if shifted && !capsLock && page == 0 { shifted = false; updateKeyLegends() }
         }
     }
@@ -691,31 +1266,42 @@ final class KeyboardViewController: UIInputViewController {
         sendTyping(.english(compositionCase.apply(to: pinyin.input)))
     }
 
+    private func insertAssistedText(_ text: String) {
+        insertingTypedText = true
+        if language == .english {
+            typingAssistance.insert(text, into: textDocumentProxy, correction: autoCorrectionEnabled, spacing: smartSpacingEnabled)
+        } else { textDocumentProxy.insertText(text) }
+        insertingTypedText = false
+        renderCandidates()
+    }
+
     private var sameTypingDestination: Bool {
-        typingDocument == textDocumentProxy.documentIdentifier &&
+        typingDocument == KeyboardDocumentIdentity.snapshot(textDocumentProxy) &&
         typingBefore == textDocumentProxy.documentContextBeforeInput &&
         typingAfter == textDocumentProxy.documentContextAfterInput &&
         typingSelection == textDocumentProxy.selectedText
     }
 
     private func rememberTypingDestination() {
-        typingDocument = textDocumentProxy.documentIdentifier
+        typingDocument = KeyboardDocumentIdentity.snapshot(textDocumentProxy)
         typingBefore = textDocumentProxy.documentContextBeforeInput
         typingAfter = textDocumentProxy.documentContextAfterInput
         typingSelection = textDocumentProxy.selectedText
     }
 
     private func sendTyping(_ action: PinyinEngine.Action) {
+        wordEdits.clear()
         if typingDocument == nil { rememberTypingDestination() }
         let generation = typingGeneration
         typingPending = true
-        candidateRow.isUserInteractionEnabled = false
+        updateHeader()
+        candidatePanel.setPending(true)
         PinyinEngine.shared.perform(action) { [weak self] result in
             guard let self, generation == self.typingGeneration else { return }
             guard self.sameTypingDestination else { self.resetComposition(); return }
             self.typingPending = false
             self.pinyin = result
-            if let error = result.error { self.showError(error) }
+            if let error = result.error { self.pendingMiniMode = nil; self.cursorKey?.cancelPress(); self.showError(error) }
             self.insertingTypedText = true
             // Replace the marked spelling, never append a second copy of it.
             if !result.committed.isEmpty {
@@ -731,6 +1317,10 @@ final class KeyboardViewController: UIInputViewController {
             }
             self.rememberTypingDestination()
             if self.deleteDestination != nil { self.deleteDestination = KeyboardTextDestination(self.textDocumentProxy) }
+            if self.currentKey?.value == "space", self.currentKey?.isPressed == true {
+                self.cursorPressDestination = KeyboardTextDestination(self.textDocumentProxy)
+            }
+            if self.currentKey?.isPressed == true { self.editingSwipeDestination = KeyboardTextDestination(self.textDocumentProxy) }
             self.insertingTypedText = false
             if result.input.isEmpty { self.typingDocument = nil }
             self.renderCandidates()
@@ -739,15 +1329,24 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func drainTypingTaps() {
-        guard !typingPending, (!usesPinyin || pinyinReady), !deferredTaps.isEmpty else { return }
+        guard !typingPending, (!usesPinyin || pinyinReady) else { return }
+        guard !deferredTaps.isEmpty else {
+            prepareCursorDrag()
+            if let pendingMiniMode { setMiniMode(pendingMiniMode) }
+            return
+        }
         let value = deferredTaps.removeFirst()
         tap(value)
         if !typingPending { drainTypingTaps() }
     }
 
     private func resetComposition() {
+        typingAssistance.clear()
+        wordEdits.clear(); editingSwipeDestination = nil
+        if let cursorKey { cursorKey.cancelPress() }
+        pendingMiniMode = nil
         // Only touch marked text in the document that owns this composition.
-        if typingDocument == textDocumentProxy.documentIdentifier {
+        if !documentDetached, let typingDocument, typingDocument == KeyboardDocumentIdentity.snapshot(textDocumentProxy) {
             insertingTypedText = true
             textDocumentProxy.unmarkText()
             insertingTypedText = false
@@ -756,39 +1355,222 @@ final class KeyboardViewController: UIInputViewController {
         typingDocument = nil; typingPending = false
         deferredTaps.removeAll(); pinyin = PinyinEngine.Snapshot()
         compositionUsesMixedTyping = mixedTypingEnabled
+        compositionAutoCorrection = autoCorrectionEnabled
         PinyinEngine.shared.perform(.clear) { _ in }
         renderCandidates()
     }
 
     private func renderCandidates() {
-        if language != .chinese { visibleCandidates = [] }
-        else if compositionUsesMixedTyping {
-            visibleCandidates = bilingualProvider.choices(for: pinyin, letterCase: compositionCase)
-        } else {
-            visibleCandidates = candidateProvider.choices(for: pinyin, letterCase: compositionCase)
-        }
-        candidateRow.isUserInteractionEnabled = !typingPending
-        for view in candidateRow.arrangedSubviews { candidateRow.removeArrangedSubview(view); view.removeFromSuperview() }
-        updateHeader()
-        candidateScroll.setContentOffset(.zero, animated: false)
-        func button(_ title: String, id: String, isDefault: Bool = false, action: @escaping () -> Void) {
-            let button = CandidateButton(title: title, identifier: id, isDefault: isDefault)
-            button.addAction(UIAction { [weak self] _ in self?.tapFeedback.prepare() }, for: .touchDown)
-            button.addAction(UIAction { [weak self] _ in
-                self?.playTapFeedback()
-                action()
-            }, for: .touchUpInside)
-            candidateRow.addArrangedSubview(button)
-        }
-        guard language == .chinese, !pinyin.input.isEmpty else { return }
-        for (index, candidate) in visibleCandidates.enumerated() {
-            button(candidate.text, id: candidate.identifier, isDefault: index == 0) { [weak self] in
-                self?.sendTyping(candidate.action)
+        if language != .chinese {
+            let choices = typingAssistance.suggestions
+            visibleCandidates = choices.isEmpty ? [] : (choices + [typingAssistance.word]).enumerated().map {
+                PinyinCandidates.Candidate(text: $0.element, identifier: "candidate.typing.\($0.offset)", action: .english($0.element))
             }
         }
-        if pinyin.page > 0 { button("‹", id: "candidate.previous") { [weak self] in self?.sendTyping(.previousPage) } }
-        if !pinyin.isLastPage { button("›", id: "candidate.next") { [weak self] in self?.sendTyping(.nextPage) } }
-        button("×", id: "candidate.cancel") { [weak self] in self?.sendTyping(.clear) }
+        else {
+            visibleCandidates = bilingualProvider.choices(for: pinyin, letterCase: compositionCase,
+                policy: compositionUsesMixedTyping ? .experimental : .conservative, correctEnglish: compositionAutoCorrection)
+        }
+        let emojiQueries = language == .english ? [typingAssistance.word]
+            : (pinyin.input.isEmpty ? [] : [pinyin.input] + Array(visibleCandidates.prefix(5).map(\.text)))
+        let emojis = EmojiCatalog.suggestions(for: emojiQueries)
+        if !emojis.isEmpty {
+            // Emoji is an explicit choice; preserve word correction and Space's default.
+            if visibleCandidates.isEmpty, language == .english, !typingAssistance.word.isEmpty {
+                visibleCandidates = [.init(text: typingAssistance.word, identifier: "candidate.typing.original", action: .english(typingAssistance.word))]
+            }
+            let choices = emojis.enumerated().map { index, glyph in
+                PinyinCandidates.Candidate(text: glyph, identifier: "candidate.emoji.\(index)", action: .english(glyph))
+            }
+            visibleCandidates.insert(contentsOf: choices, at: min(1, visibleCandidates.count))
+        }
+        candidateListGeneration &+= 1; candidateFetchPending = false
+        nextCandidateOffset = pinyin.candidateOffset + pinyin.candidates.count
+        hasMoreCandidates = !pinyin.isLastPage && !pinyin.input.isEmpty
+        candidatePanel.setPending(typingPending)
+        updateHeader()
+        candidatePanel.show(visibleCandidates, hasMore: hasMoreCandidates)
+    }
+
+    private func loadMoreCandidates() {
+        guard !typingPending, !candidateFetchPending, hasMoreCandidates, !candidatePanel.isHidden else { return }
+        candidateFetchPending = true
+        let generation = candidateListGeneration
+        let revision = pinyin.revision
+        PinyinEngine.shared.candidates(after: nextCandidateOffset, revision: revision) { [weak self] batch in
+            guard let self, generation == self.candidateListGeneration else { return }
+            self.candidateFetchPending = false
+            guard !self.typingPending, self.sameTypingDestination, let batch else { return }
+            self.visibleCandidates += batch.texts.enumerated().map { index, text in
+                let absoluteIndex = batch.offset + index
+                return PinyinCandidates.Candidate(text: text, identifier: "candidate.absolute.\(absoluteIndex)", action: .chooseAbsolute(absoluteIndex))
+            }
+            self.nextCandidateOffset = batch.offset + batch.texts.count
+            self.hasMoreCandidates = batch.hasMore && !batch.texts.isEmpty
+            self.candidatePanel.show(self.visibleCandidates, hasMore: self.hasMoreCandidates, appending: true)
+        }
+    }
+
+    private func configureInputHelpers() {
+        pasteConfiguration = UIPasteConfiguration(forAccepting: NSString.self)
+        helperScroll.showsHorizontalScrollIndicator = false
+        helperScroll.accessibilityIdentifier = "keyboard.input-helpers"
+        inputHelpers.axis = .horizontal; inputHelpers.spacing = 4; inputHelpers.alignment = .center
+        inputHelpers.translatesAutoresizingMaskIntoConstraints = false
+        helperScroll.addSubview(inputHelpers)
+        NSLayoutConstraint.activate([
+            inputHelpers.leadingAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.leadingAnchor),
+            inputHelpers.trailingAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.trailingAnchor),
+            inputHelpers.topAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.topAnchor),
+            inputHelpers.bottomAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.bottomAnchor),
+            inputHelpers.heightAnchor.constraint(equalTo: helperScroll.frameLayoutGuide.heightAnchor)
+        ])
+        @discardableResult func button(_ title: String, image: UIImage?, identifier: String, hidden: Bool = false, action: @escaping () -> Void) -> UIButton {
+            let button = UIButton(type: .system)
+            var configuration = UIButton.Configuration.plain()
+            // SF Symbols carry different intrinsic canvases from the vector
+            // 1Password mark. Fit every helper into the same visible icon box.
+            configuration.image = image.map { source in
+                let side: CGFloat = 20
+                let scale = side / max(max(source.size.width, source.size.height), 1)
+                let size = CGSize(width: source.size.width * scale, height: source.size.height * scale)
+                return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
+                    source.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2,
+                                           width: size.width, height: size.height))
+                }.withRenderingMode(.alwaysTemplate)
+            }
+            configuration.baseForegroundColor = .label
+            configuration.background = .clear(); configuration.background.backgroundColor = .clear
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
+            button.configuration = configuration
+            button.accessibilityIdentifier = identifier
+            button.accessibilityLabel = title; button.isHidden = hidden
+            let width = button.widthAnchor.constraint(equalToConstant: 44)
+            width.isActive = true
+            button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+            inputHelpers.addArrangedSubview(button)
+            return button
+        }
+        shortcutToggle = button("Shortcuts", image: UIImage(systemName: "square.grid.2x2"), identifier: "keyboard.shortcut-pill") { [weak self] in
+            guard let self else { return }
+            self.shortcutsExpanded.toggle(); self.playTapFeedback()
+            self.updateHeader()
+            UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2) { self.view.layoutIfNeeded() }
+        }
+        shortcutToggle?.configuration?.background.backgroundColor = .tertiarySystemFill
+        shortcutToggle?.configuration?.background.cornerRadius = 18
+        button("Paste", image: UIImage(systemName: "document.on.clipboard"), identifier: "keyboard.paste") { [weak self] in
+            guard let self, let request = self.beginPaste(codeOnly: self.textDocumentProxy.textContentType == .oneTimeCode),
+                  let text = UIPasteboard.general.string else { return }
+            self.completePaste(text, request: request)
+        }
+        let history = button("Clipboard History", image: UIImage(systemName: "clock.arrow.circlepath"), identifier: "keyboard.clipboard-history") {}
+        history.showsMenuAsPrimaryAction = true
+        history.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
+            guard let self else { completion([]); return }
+            completion(self.clipboardHistoryMenu())
+        }])
+        codeButton = button("Paste Code", image: UIImage(systemName: "number.square"), identifier: "keyboard.paste-code", hidden: true) { [weak self] in
+            self?.pasteCopiedCode()
+        }
+        button("Open 1Password", image: UIImage(named: "OnePassword"), identifier: "keyboard.open-1password") { [weak self] in
+            guard let self else { return }
+            self.pasteGeneration += 1
+            guard let openURL = self.hostOpenURL else { self.showError("Open 1Password from your Home Screen."); return }
+            openURL(URL(string: "onepassword://")!) { accepted in
+                if !accepted { Task { @MainActor in self.showError("Couldn’t open 1Password. Open it from your Home Screen.") } }
+            }
+        }
+        button("Open Messages", image: UIImage(systemName: "message"), identifier: "keyboard.open-messages") { [weak self] in self?.openShortcut("sms:", name: "Messages") }
+        button("Open Phone", image: UIImage(systemName: "phone"), identifier: "keyboard.open-phone") { [weak self] in self?.openShortcut("tel:", name: "Phone") }
+        shortcutButtons = inputHelpers.arrangedSubviews.compactMap { $0 as? UIButton }.filter { $0 !== shortcutToggle }
+    }
+
+    func clipboardHistoryMenu() -> [UIMenuElement] {
+        let request = beginPaste(codeOnly: textDocumentProxy.textContentType == .oneTimeCode)
+        var actions: [UIMenuElement] = clipboardHistory.items.map { text in
+            UIAction(title: ClipboardHistory.preview(text), attributes: request == nil ? [.disabled] : []) { [weak self] _ in
+                guard let self, let request else { return }
+                self.completePaste(text, request: request, remember: false)
+            }
+        }
+        if actions.isEmpty { actions.append(UIAction(title: "No recent text clips", attributes: [.disabled]) { _ in }) }
+        else { actions.append(UIAction(title: "Clear History", image: UIImage(systemName: "trash"), attributes: [.destructive]) { [weak self] _ in
+            self?.clipboardHistory.clear()
+        }) }
+        return actions
+    }
+
+    private func openShortcut(_ scheme: String, name: String) {
+        pasteGeneration += 1
+        guard let openURL = hostOpenURL, let url = URL(string: scheme) else { showError("Open \(name) from your Home Screen."); return }
+        // No recipient or number: opening a shortcut must never send a message or dial.
+        openURL(url) { accepted in
+            if !accepted { Task { @MainActor in self.showError("Open \(name) from your Home Screen.") } }
+        }
+    }
+
+    @objc private func refreshCopiedCodes() {
+        #if KEYBOARD_TESTING
+        if testingDocumentProxy != nil { return } // Unit tests never inspect the real clipboard.
+        #endif
+        guard keyboardVisible, hasFullAccess, !helperScroll.isHidden, currentKey?.isPressed != true else { return }
+        copiedCodes.onObservedText = { [weak self] text in self?.clipboardHistory.record(text) }
+        copiedCodes.refresh()
+        refreshCopiedCodeIndicator()
+    }
+    func refreshCopiedCodeIndicator() {
+        #if KEYBOARD_TESTING
+        if testingDocumentProxy != nil { codeButton?.isHidden = !shortcutsExpanded || !copiedCodes.isAvailable; return }
+        #endif
+        codeButton?.isHidden = !shortcutsExpanded || !keyboardVisible || !hasFullAccess || !copiedCodes.isAvailable
+    }
+    func pasteCopiedCode() {
+        guard let request = beginPaste(codeOnly: true) else { return }
+        let code = copiedCodes.takeCode()
+        refreshCopiedCodeIndicator()
+        guard let code else { return }
+        completePaste(code, request: request)
+    }
+
+    func beginPaste(codeOnly: Bool) -> PasteRequest? {
+        typingAssistance.clear(); renderCandidates()
+        guard !isMiniMode, cursorKey == nil, command == nil, activationRequest == nil, !typingPending,
+              pinyin.input.isEmpty, deferredTaps.isEmpty else { return nil }
+        pasteGeneration += 1
+        return PasteRequest(generation: pasteGeneration, destination: KeyboardTextDestination(textDocumentProxy), codeOnly: codeOnly)
+    }
+    func completePaste(_ text: String, request: PasteRequest, remember: Bool = true) {
+        guard request.generation == pasteGeneration,
+              request.destination == KeyboardTextDestination(textDocumentProxy), command == nil,
+              !isMiniMode, cursorKey == nil, !typingPending, pinyin.input.isEmpty, deferredTaps.isEmpty else { return }
+        pasteGeneration += 1
+        guard text.utf16.count <= 20_000 else { showError("This clipboard text is too long to paste here."); return }
+        let insertion: String
+        if request.codeOnly {
+            guard let code = VerificationCode.extract(from: text) else { showError("Copy a single verification code, then tap Paste Code."); return }
+            insertion = code
+        } else { insertion = text }
+        guard !insertion.isEmpty else { return }
+        wordEdits.clear()
+        insertingTypedText = true
+        textDocumentProxy.insertText(insertion)
+        insertingTypedText = false
+        copiedCodes.consume()
+        if remember && !request.codeOnly { clipboardHistory.record(text) }
+        playTapFeedback(); updateHeader()
+    }
+    override func paste(itemProviders: [NSItemProvider]) {
+        guard let provider = itemProviders.first(where: { $0.canLoadObject(ofClass: NSString.self) }),
+              let request = beginPaste(codeOnly: textDocumentProxy.textContentType == .oneTimeCode) else { return }
+        provider.loadObject(ofClass: NSString.self) { [weak self] object, _ in
+            let text = object as? String
+            Task { @MainActor in
+                guard let self, let text else { return }
+                self.completePaste(text, request: request)
+            }
+        }
     }
 
     private func clearDictationTarget() {
@@ -804,17 +1586,26 @@ final class KeyboardViewController: UIInputViewController {
         guard sameDestination else {
             cancelHold(); showError("Text field changed. Dictation cancelled."); return false
         }
-        // Destructive/submit gestures use the actual keycaps, not the expanded
-        // typing targets. Crossing a row gap must not accidentally cancel or send.
+        // Gesture targets use actual keycaps, never the expanded typing targets.
+        // Translation is a hover/release action; sliding away disarms it.
         guard let target = keys.first(where: {
-            ($0.value == "delete" || $0.value == "return") && $0.convert($0.bounds, to: view).contains(location)
-        }) else { return true }
+            (["delete", "return", "language"].contains($0.value)) && $0.convert($0.bounds, to: view).contains(location)
+        }) else { clearDictationTarget(); return true }
+        if target.value == "language" {
+            if dictationTargetKey !== target {
+                clearDictationTarget()
+                dictationTargetKey = target; target.dictationFeedback = .translate
+                playTapFeedback()
+            }
+            return true
+        }
+        clearDictationTarget()
         if target.value == "delete" {
             cancelHold(discard: true)
             target.dictationFeedback = .cancel
         } else {
             endHold(submitAfterPolish: true)
-            target.dictationFeedback = .send
+            target.dictationFeedback = textDocumentProxy.returnKeyType == .send ? .send : .finish
         }
         dictationTargetKey = target
         playTapFeedback()
@@ -841,6 +1632,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func beginHold() {
+        typingAssistance.clear(); renderCandidates()
+        wordEdits.clear(); editingSwipeDestination = nil
+        pasteGeneration += 1
         guard !typingPending, pinyin.input.isEmpty, deferredTaps.isEmpty else {
             showError("Finish the current word before dictating."); return
         }
@@ -853,21 +1647,34 @@ final class KeyboardViewController: UIInputViewController {
             try writeVoiceCommand(command)
             clearDictationTarget()
             dictationText = text; self.command = command; started = true; releaseTime = nil
+            quietKeys.start(id: command.id, at: Date())
+            let meterTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.command?.id == command.id, self.command?.phase == .recording else { return }
+                    self.receiveVoiceLevel(VoiceIPC.read(VoiceLevel.filename, as: VoiceLevel.self))
+                }
+            }
+            levelTimer = meterTimer; RunLoop.main.add(meterTimer, forMode: .common)
             errorUntil = .distantPast; offersHostLaunch = false
             status.text = nil; updateHeader(); playTapFeedback()
         }
         catch { showError("Cannot reach vvhisper. Check Full Access.") }
     }
-    private func endHold(submitAfterPolish: Bool = false) {
+    private func endHold(submitAfterPolish: Bool = false, translate: Bool = false) {
         guard var command, command.phase == .recording, started else { return }
+        guard sameDestination else { cancelHold(); showError("Text field changed. Dictation cancelled."); return }
+        command.translate = translate ? true : nil
         command.phase = .finish; command.updatedAt = Date(); self.command = command; releaseTime = Date()
         dictationText?.finishRecording(submitAfterPolish: submitAfterPolish)
+        stopQuietKeys(animated: true)
         try? writeVoiceCommand(command); status.text = "Polishing…"; updateHeader()
     }
     private func cancelHold(discard: Bool = false) {
+        stopQuietKeys(animated: false)
         if var command { command.phase = .cancel; command.updatedAt = Date(); try? writeVoiceCommand(command) }
         command = nil; started = false; releaseTime = nil
-        dictationText?.cancel(in: textDocumentProxy, discard: discard); dictationText = nil
+        if !documentDetached { dictationText?.cancel(in: textDocumentProxy, discard: discard) }
+        dictationText = nil
         clearDictationTarget()
         updateHeader()
     }
@@ -876,7 +1683,17 @@ final class KeyboardViewController: UIInputViewController {
     @discardableResult func receiveVoiceReply(_ reply: VoiceReply) -> Bool {
         guard command != nil, let dictationText else { return false }
         switch dictationText.receive(reply, in: textDocumentProxy) {
-        case .finished, .failed:
+        case .finished:
+            let needsManualSend = dictationText.needsManualSend
+            stopQuietKeys(animated: true)
+            command = nil; self.dictationText = nil; started = false; releaseTime = nil
+            status.text = "Hold a letter key to speak"
+            let notices = [reply.notice, needsManualSend ? "Text ready. Tap Send in the app." : nil].compactMap { $0 }
+            if !notices.isEmpty { showError(notices.joined(separator: " ")) }
+            updateHeader()
+            return true
+        case .failed:
+            stopQuietKeys(animated: false)
             command = nil; self.dictationText = nil; started = false; releaseTime = nil
             if let error = reply.error { clearDictationTarget(); showError(error) }
             else { status.text = "Hold a letter key to speak" }
@@ -884,11 +1701,46 @@ final class KeyboardViewController: UIInputViewController {
             return true
         case .destinationChanged:
             cancelHold(); showError("Text field changed. Dictation cancelled."); return true
-        case .ignored, .partial: return false
+        case .partial:
+            return false
+        case .ignored: return false
         }
     }
+    /// The meter is independent of transcript delivery, and can only affect
+    /// the current recording in its still-verified destination.
+    func receiveVoiceLevel(_ sample: VoiceLevel?, at now: Date = Date()) {
+        guard command?.phase == .recording, sameDestination else { return }
+        quietKeys.advance(sample, at: now, reducedMotion: UIAccessibility.isReduceMotionEnabled)
+        for key in keys {
+            let x = key.convert(CGPoint(x: key.bounds.midX, y: key.bounds.midY), to: view).x
+            key.quietFeedback.setLevel(quietKeys.level, position: Double(x / max(1, view.bounds.width)))
+        }
+    }
+    private func stopQuietKeys(animated: Bool) {
+        levelTimer?.invalidate(); levelTimer = nil
+        quietKeys.reset()
+        for key in keys {
+            key.quietFeedback.reset(animated: animated)
+            key.setLegendHidden(false, animated: animated)
+        }
+    }
+
     private func poll() {
-        if Date().timeIntervalSince(lastPreferenceRefresh) >= 1 { refreshKeyboardPreferences() }
+        guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
+        if let endCursor {
+            endCursorSteps += 1
+            if endCursorSteps > 200 || !endCursor.advanceToEnd(in: textDocumentProxy) { self.endCursor = nil }
+        }
+        if !insertingTypedText { wordEdits.observe(textDocumentProxy) }
+        cancelCursorIfDestinationChanged()
+        #if DEBUG
+        if pollDictationDeviceVerification() { return }
+        pollCursorDeviceVerification()
+        #endif
+        if Date().timeIntervalSince(lastPreferenceRefresh) >= 1 {
+            refreshKeyboardPreferences()
+            refreshCopiedCodes()
+        }
         defer { updateHeader() }
         if typingDocument != nil, !sameTypingDestination { resetComposition() }
         if let request = activationRequest {
@@ -903,12 +1755,13 @@ final class KeyboardViewController: UIInputViewController {
         }
         if var command {
             guard sameDestination else { cancelHold(); showError("Text field changed. Dictation cancelled."); return }
-            if command.phase == .recording { command.updatedAt = Date(); self.command = command; try? writeVoiceCommand(command) }
+            if command.phase == .recording {
+                command.updatedAt = Date(); self.command = command; try? writeVoiceCommand(command) }
             if let reply = VoiceIPC.read("reply.json", as: VoiceReply.self), receiveVoiceReply(reply) {
                 VoiceIPC.remove("reply.json")
                 return
             }
-            if let releaseTime, Date().timeIntervalSince(releaseTime) > 9 { cancelHold(); showError("Recognition timed out. Try again.") }
+            if let releaseTime, Date().timeIntervalSince(releaseTime) > VoiceReply.finalWait { cancelHold(); showError("Recognition timed out. Try again.") }
             else if !voiceReady { cancelHold(); showError("Voice session ended. Hold a letter key to get ready again.", offerHostLaunch: true) }
         } else if Date() > errorUntil {
             status.text = hasFullAccess && VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true ? "Hold a letter key to speak" : "Open vvhisper"
@@ -918,6 +1771,102 @@ final class KeyboardViewController: UIInputViewController {
         offersHostLaunch = offerHostLaunch
         status.text = message; errorUntil = Date().addingTimeInterval(6); updateHeader()
     }
+    #if DEBUG
+    private func pollDictationDeviceVerification() -> Bool {
+        if var check = dictationCheck {
+            let elapsed = Date().timeIntervalSince(check.started)
+            var completed = false
+            if command != nil, check.request.isFresh {
+                if check.phase == 0, elapsed >= 0.1 {
+                    receiveVoiceReply(VoiceReply(id: check.request.id, text: check.request.draft, isFinal: false))
+                    check.phase = 1
+                } else if check.phase == 1, elapsed >= 0.4 {
+                    receiveVoiceReply(VoiceReply(id: check.request.id, text: check.request.draft + check.request.continuation, isFinal: false))
+                    check.phase = 2
+                } else if check.phase == 2, elapsed >= 0.8 {
+                    command?.phase = .finish; dictationText?.finishRecording()
+                    receiveVoiceReply(VoiceReply(id: check.request.id, text: check.request.draft, isFinal: false, polishing: true))
+                    check.phase = 3
+                } else if check.phase == 3, elapsed >= 1.8 {
+                    completed = receiveVoiceReply(VoiceReply(id: check.request.id, text: check.request.polished, isFinal: true,
+                        updatedAt: check.started.addingTimeInterval(1.8)))
+                }
+            }
+            if command == nil || !check.request.isFresh || elapsed >= 4 {
+                let state = dictationText?.verificationState(in: textDocumentProxy) ?? [:]
+                try? VoiceIPC.write(DictationDeviceVerification.Result(id: check.request.id, completed: completed, elapsed: elapsed, state: state), to: "dictation-check-result.json")
+                if command != nil { cancelHold() }
+                dictationCheck = nil
+            } else { dictationCheck = check }
+            return true
+        }
+        guard keyboardVisible, command == nil, currentKey?.isPressed != true,
+              let request = VoiceIPC.read("dictation-check-request.json", as: DictationDeviceVerification.Request.self),
+              request.isFresh, Date().timeIntervalSince(request.createdAt) >= 1, request.id != lastDictationCheck,
+              (textDocumentProxy.documentContextBeforeInput ?? "") == request.prefix,
+              (textDocumentProxy.documentContextAfterInput ?? "").isEmpty else { return false }
+        lastDictationCheck = request.id
+        dictationText = DictationTextSession(id: request.id, proxy: textDocumentProxy)
+        command = VoiceCommand(id: request.id, phase: .recording, updatedAt: Date())
+        started = true
+        dictationCheck = (request, Date(), 0)
+        return true
+    }
+    private func pollCursorDeviceVerification() {
+        if keyboardVisible, currentKey?.isPressed != true,
+           let request = VoiceIPC.read("haptic-check-request.json", as: HapticDeviceVerification.Request.self),
+           request.isFresh, Date().timeIntervalSince(request.createdAt) >= 2, request.id != lastHapticCheck,
+           textDocumentProxy.documentContextBeforeInput == request.fixture,
+           (textDocumentProxy.documentContextAfterInput ?? "").isEmpty {
+            lastHapticCheck = request.id
+            let documentID = KeyboardDocumentIdentity.snapshot(textDocumentProxy)
+            hapticCheck.start(request: request, feedback: tapFeedback, stillValid: { [weak self] in
+                guard let self else { return false }
+                if request.observeTouches {
+                    return self.keyboardVisible && KeyboardDocumentIdentity.snapshot(self.textDocumentProxy) == documentID
+                }
+                return self.keyboardVisible && self.currentKey?.isPressed != true &&
+                    self.textDocumentProxy.documentContextBeforeInput == request.fixture &&
+                    (self.textDocumentProxy.documentContextAfterInput ?? "").isEmpty
+            })
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if var check = cursorCheck {
+            guard check.request.isFresh, keyboardVisible else { check.key.cancelPress(); cursorCheck = nil; return }
+            let elapsed = now - check.started
+            if check.phase == 0, elapsed >= 0.5 {
+                check.key.advancePress(to: now)
+                let accepted = check.key.movePress(to: CGPoint(x: check.point.x - 16, y: check.point.y), at: now)
+                cursorCheckEvents.append(accepted ? "firstMoveAccepted" : "firstMoveRejected")
+                check.phase = 1
+            } else if check.phase == 1, elapsed >= 4.5 {
+                check.held = check.key.isPressed && cursorKey === check.key && cursorDrag != nil
+                _ = check.key.movePress(to: CGPoint(x: check.point.x - 24, y: check.point.y), at: now)
+                check.phase = 2
+            } else if check.phase == 2, elapsed >= 5.5 {
+                check.key.releasePress()
+                let result = CursorDeviceVerification.Result(id: check.request.id, heldAfterPause: check.held,
+                    released: !check.key.isPressed && cursorDrag == nil, events: cursorCheckEvents,
+                    customHapticPlayed: tapFeedback.verificationPlayedCustomFeedback,
+                    hapticErrorCode: tapFeedback.verificationErrorCode)
+                try? VoiceIPC.write(result, to: "cursor-check-result.json")
+                cursorCheck = nil; return
+            }
+            cursorCheck = check
+        } else if keyboardVisible, currentKey?.isPressed != true,
+                  let request = VoiceIPC.read("cursor-check-request.json", as: CursorDeviceVerification.Request.self),
+                  request.isFresh, Date().timeIntervalSince(request.createdAt) >= 2, request.id != lastCursorCheck,
+                  textDocumentProxy.documentContextBeforeInput == request.fixture,
+                  (textDocumentProxy.documentContextAfterInput ?? "").isEmpty,
+                  let key = keys.first(where: { $0.value == "space" }), key.bounds.width > 0, key.bounds.height > 0 {
+            lastCursorCheck = request.id
+            cursorCheckEvents = []
+            let point = CGPoint(x: key.bounds.midX, y: key.bounds.midY)
+            guard key.press(at: now, point: point) else { return }
+            cursorCheck = (request, key, point, now, 0, false)
+        }
+    }
+    #endif
     private func openHost(using opener: OpenURLAction? = nil) {
         guard activationRequest == nil else { return }
         guard hasFullAccess else { showError("Enable Allow Full Access for vvhisper in Settings."); return }
@@ -947,59 +1896,101 @@ final class KeyboardViewController: UIInputViewController {
 final class KeyControl: UIControl {
     let label = UILabel()
     let icon = UIImageView()
+    let quietFeedback = QuietKeyFeedback()
+    private var legendHidden = false
     var restingIcon: UIImage?
-    enum DictationFeedback { case cancel, send }
+    var isPrimaryAction = false { didSet { if isPrimaryAction != oldValue { updateColors() } } }
+    enum DictationFeedback { case cancel, send, translate, finish }
     var dictationFeedback: DictationFeedback? {
         didSet {
-            backgroundColor = dictationFeedback == .cancel ? .systemRed : dictationFeedback == .send ? .systemBlue : KeyboardMetrics.keyFill
-            icon.tintColor = dictationFeedback == nil ? .label : .white
-            label.textColor = dictationFeedback == nil ? .label : .white
-            accessibilityValue = dictationFeedback == .cancel ? "Dictation cancelled" : dictationFeedback == .send ? "Send after polishing" : nil
+            updateColors()
+            accessibilityValue = dictationFeedback == .cancel ? "Dictation cancelled" : dictationFeedback == .send ? "Send after polishing" : dictationFeedback == .translate ? "Release to translate" : dictationFeedback == .finish ? "Finish dictation; send from the app" : nil
         }
     }
+    private func updateColors() {
+        let restingFill = isPrimaryAction ? KeyboardMetrics.actionKeyFill : KeyboardMetrics.keyFill
+        let restingInk = isPrimaryAction ? KeyboardMetrics.actionKeyInk : .label
+        backgroundColor = dictationFeedback == .cancel ? .systemRed : dictationFeedback == .send || dictationFeedback == .finish ? .systemBlue : dictationFeedback == .translate ? .systemIndigo : restingFill
+        // Preserve the action key's contrast while the surrounding keys meter voice.
+        quietFeedback.setSuppressed(dictationFeedback != nil || isPrimaryAction)
+        icon.tintColor = dictationFeedback == nil ? restingInk : .white
+        label.textColor = dictationFeedback == nil ? restingInk : .white
+    }
     var value = ""
-    var allowsRolloverCommit: Bool { value.count == 1 || value == "space" || value == "shift" || isDeleteKey }
+    var allowsRolloverCommit: Bool { !isEditingSwipe && (value.count == 1 || value == "space" || value == "shift" || isDeleteKey) }
+    var hasPendingChordTap: Bool { isPressed && allowsRolloverCommit && !gate.isHolding && !deleteGesture.isHolding }
     weak var touchSurface: KeyboardTouchSurface?
     var onPress: (() -> Bool)?
+    var onPressFeedback: (() -> Void)?
     var onTap: (() -> Void)?
     var onHold: (() -> Void)?
     var onGapHold: (() -> Void)?
     var onPreviewChange: ((Bool) -> Void)?
     var onHoldMove: ((CGPoint) -> Bool)?
+    var onEditSwipe: ((KeyboardEditSwipe) -> Void)?
     var onRelease: (() -> Void)?
     var onCancel: (() -> Void)?
     var onDeleteRepeat: (() -> Void)?
     var onClearAll: (() -> Void)?
+    var onSystemKeyboard: ((KeyControl, UIEvent) -> Void)?
+    private var trackingEvent: UIEvent?
+    private var systemKeyboardActive = false
+    func beginSystemKeyboardSelection() {
+        guard !isGapPress, let trackingEvent, onSystemKeyboard != nil else { return }
+        systemKeyboardActive = true
+        onSystemKeyboard?(self, trackingEvent)
+    }
     var isDeleteKey = false
     private(set) var isPressed = false
     private(set) var isGapPress = false
+    private(set) var isEditingSwipe = false
+    private var pressedAt: TimeInterval = 0
     private var usesDeleteGesture: Bool { isDeleteKey && !(isGapPress && onGapHold != nil) }
     private var holdAction: (() -> Void)? { isGapPress ? onGapHold ?? onHold : onHold }
+    private var holdDelay: TimeInterval { value == "dictate" && !isGapPress ? KeyboardModePinch.pairingGrace : HoldGate.threshold }
     var labelOffset: CGFloat = 0 { didSet { labelCenterY?.constant = labelOffset } }
     private var labelCenterY: NSLayoutConstraint?
     private var gate = HoldGate()
     private var deleteGesture = DeleteGesture()
     private var pressOrigin = CGPoint.zero
+    private(set) var pressPoint = CGPoint.zero
     private var pressGeneration = 0
+    private var holdSuppressedByMovement = false
     private var timer: Timer?
     override init(frame: CGRect) {
         super.init(frame: frame)
-        isMultipleTouchEnabled = false
+        // Mini's wide Dictate key can receive both fingers of a pinch. The
+        // parent mode recognizer consumes the pair before key tracking types.
+        isMultipleTouchEnabled = true
+        quietFeedback.frame = bounds; quietFeedback.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(quietFeedback)
         label.textAlignment = .center; label.isUserInteractionEnabled = false; icon.contentMode = .scaleAspectFit; icon.tintColor = .label
         for item in [label, icon] { item.translatesAutoresizingMaskIntoConstraints = false; addSubview(item) }
         labelCenterY = label.centerYAnchor.constraint(equalTo: centerYAnchor)
         NSLayoutConstraint.activate([label.centerXAnchor.constraint(equalTo: centerXAnchor), labelCenterY!, icon.centerXAnchor.constraint(equalTo: centerXAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 25), icon.heightAnchor.constraint(equalToConstant: 24)])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func setLegendHidden(_ hidden: Bool, animated: Bool = true) {
+        guard legendHidden != hidden || !animated else { return }
+        legendHidden = hidden
+        if animated && window != nil && !UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
+                self.label.alpha = hidden ? 0 : 1
+            }
+        } else {
+            label.layer.removeAllAnimations(); label.alpha = hidden ? 0 : 1
+        }
+    }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard let touchSurface else { return super.point(inside: point, with: event) }
         return touchSurface.target(at: convert(point, to: touchSurface)) === self
     }
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        trackingEvent = event; systemKeyboardActive = false
         guard press(at: ProcessInfo.processInfo.systemUptime, point: touch.location(in: self)) else { return false }
         guard usesDeleteGesture || holdAction != nil else { return true }
         let generation = pressGeneration
-        timer = Timer.scheduledTimer(withTimeInterval: usesDeleteGesture ? 0.02 : HoldGate.threshold, repeats: usesDeleteGesture) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: usesDeleteGesture ? 0.02 : holdDelay, repeats: usesDeleteGesture) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.pressGeneration == generation else { return }
                 self.advancePress(to: ProcessInfo.processInfo.systemUptime)
@@ -1008,25 +1999,33 @@ final class KeyControl: UIControl {
         return true
     }
     override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-        movePress(to: touch.location(in: self), at: ProcessInfo.processInfo.systemUptime)
+        if systemKeyboardActive, let event { onSystemKeyboard?(self, event); return true }
+        return movePress(to: touch.location(in: self), at: ProcessInfo.processInfo.systemUptime)
     }
     override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
+        defer { trackingEvent = nil; systemKeyboardActive = false }
+        if systemKeyboardActive, let event { onSystemKeyboard?(self, event); releasePress(); return }
         if let touch { _ = movePress(to: touch.location(in: self), at: ProcessInfo.processInfo.systemUptime) }
         releasePress()
     }
-    override func cancelTracking(with event: UIEvent?) { cancelPress() }
+    override func cancelTracking(with event: UIEvent?) {
+        if systemKeyboardActive, let event { onSystemKeyboard?(self, event) }
+        trackingEvent = nil; systemKeyboardActive = false; cancelPress()
+    }
     @discardableResult func press(at time: TimeInterval, point: CGPoint) -> Bool {
         stopTimer()
+        isEditingSwipe = false; holdSuppressedByMovement = false; pressedAt = time
         isGapPress = bounds.width > 0 && bounds.height > 0 && !bounds.contains(point)
         guard onPress?() != false else { return false }
-        pressOrigin = point; alpha = 0.55; isPressed = true
+        pressOrigin = point; pressPoint = point; alpha = 0.55; isPressed = true
+        onPressFeedback?()
         if usesDeleteGesture { deleteGesture.press(at: time, point: point) }
-        else { gate.press(at: time) }
+        else { gate.press(at: time - (HoldGate.threshold - holdDelay)) }
         onPreviewChange?(true)
         return true
     }
     func advancePress(to time: TimeInterval) {
-        guard isPressed else { return }
+        guard isPressed, !isEditingSwipe, !holdSuppressedByMovement else { return }
         if usesDeleteGesture {
             if deleteGesture.advance(to: time) == .delete { onDeleteRepeat?() }
         } else if let holdAction, gate.advance(to: time) {
@@ -1036,6 +2035,22 @@ final class KeyControl: UIControl {
     }
     @discardableResult func movePress(to point: CGPoint, at time: TimeInterval) -> Bool {
         guard isPressed else { return false }
+        pressPoint = point
+        if isEditingSwipe { return true }
+        let delta = CGPoint(x: point.x - pressOrigin.x, y: point.y - pressOrigin.y)
+        // A thumb may settle sideways while tapping an edge key. Movement can
+        // disarm a pending hold without swallowing the eventual tap. Only a
+        // deliberate swipe (or a large unsupported movement) consumes the tap.
+        if !gate.isHolding, !deleteGesture.isHolding, !holdSuppressedByMovement,
+           hypot(delta.x, delta.y) >= 14 {
+            holdSuppressedByMovement = true; stopTimer()
+        }
+        if onEditSwipe != nil, !gate.isHolding, !deleteGesture.isHolding,
+           time - pressedAt < HoldGate.threshold, KeyboardEditSwipe.begins(at: delta) {
+            isEditingSwipe = true; stopTimer(); gate.cancel(); deleteGesture.cancel()
+            alpha = 1; onPreviewChange?(false)
+            return true
+        }
         if usesDeleteGesture {
             if abs(point.y - pressOrigin.y) > 40 || point.x > bounds.maxX + 30 {
                 cancelPress(); return false
@@ -1045,7 +2060,7 @@ final class KeyControl: UIControl {
             }
         } else if gate.isHolding, let onHoldMove {
             if !onHoldMove(point) { cancelPress(); return false }
-        } else if !bounds.insetBy(dx: -30, dy: -40).contains(point) {
+        } else if !self.point(inside: point, with: nil), !bounds.insetBy(dx: -30, dy: -40).contains(point) {
             cancelPress(); return false
         }
         return true
@@ -1054,21 +2069,33 @@ final class KeyControl: UIControl {
         guard isPressed else { return }
         stopTimer(); alpha = 1; isPressed = false
         onPreviewChange?(false)
+        if isEditingSwipe {
+            isEditingSwipe = false
+            let delta = CGPoint(x: pressPoint.x - pressOrigin.x, y: pressPoint.y - pressOrigin.y)
+            if let action = KeyboardEditSwipe.action(for: delta) { onEditSwipe?(action) }
+            else { onCancel?() }
+            return
+        }
         if usesDeleteGesture {
             if deleteGesture.release() == .delete { onTap?() }
             onRelease?()
         } else {
             let wasHolding = gate.isHolding
-            if gate.release() { onTap?() } else if wasHolding { onRelease?() }
+            if gate.release() {
+                // A brief physical touch on Dictate may be the start of a mode pinch.
+                // VoiceOver's explicit activation still uses onTap to start/finish.
+                if value != "dictate" { onTap?() }
+            } else if wasHolding { onRelease?() }
         }
     }
     private func stopTimer() { timer?.invalidate(); timer = nil; pressGeneration += 1 }
     func cancelPress() {
+        trackingEvent = nil; systemKeyboardActive = false
         guard isPressed else { return }
         onPreviewChange?(false)
-        stopTimer(); alpha = 1; isPressed = false; gate.cancel(); deleteGesture.cancel(); onCancel?()
+        stopTimer(); alpha = 1; isPressed = false; isEditingSwipe = false; gate.cancel(); deleteGesture.cancel(); onCancel?()
     }
-    override func accessibilityActivate() -> Bool { onTap?(); return true }
+    override func accessibilityActivate() -> Bool { onPressFeedback?(); onTap?(); return true }
 }
 
 /// Provides the public URL-opening environment for a hold and a retry button.

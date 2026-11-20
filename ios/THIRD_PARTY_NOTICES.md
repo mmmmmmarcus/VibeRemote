@@ -16,7 +16,7 @@ Full engine/dependency notices and build metadata are retained and bundled in
 
 ## Dictionary
 
-Chinese conversion uses the unchanged `8105`, `base`, and `ext` dictionaries from
+Chinese conversion uses the unchanged `8105`, `base`, `ext`, and `tencent` dictionaries from
 [Rime Ice](https://github.com/iDvel/rime-ice/tree/927e1cf1d3eeb9bf4be85e3f684dba4dd485b6f6),
 commit `927e1cf1d3eeb9bf4be85e3f684dba4dd485b6f6` (GPL-3.0).
 Their complete sources and upstream attribution comments are retained under
@@ -25,9 +25,15 @@ Their complete sources and upstream attribution comments are retained under
 `scripts/compile-rime.py` verifies those sources and compiles the tables locally.
 Both app bundles include the compiled tables, provenance and license; they omit
 the build-time source YAML. Rebuild or modify the data from these retained sources
-using the same script. The upstream weights are preserved; there is no hand-coded
-replacement for an individual reported phrase. This data is separately licensed
+using the same script. The upstream weights are preserved. This data is separately licensed
 from vvhisper's application code.
+
+The supplemental `cn_dicts/vvhisper_design.dict.yaml` design glossary and
+`EnglishWords.txt` English hints are authored for vvhisper under MIT, with the
+full license in `VvhisperLexicon-LICENSE.txt`. The glossary is imported last so
+duplicate words retain upstream weights. Their checksums and entry counts live
+in `local_tables` and `local_resources` in the same provenance file and are
+verified by the compiler script. No per-phrase runtime replacement is used.
 
 The former minimal `Typing/Resources/Rime/pinyin_simp.dict.yaml` is retained as
 the source of the syllable list only, unchanged from
@@ -59,3 +65,27 @@ and `12740:24279` (standard iPhone). The five keyboard-switcher SVG assets in
 `Keyboard/Assets.xcassets` are exports from those reference components, retained
 without path edits and rendered as template images. System symbols and system
 fonts are resolved on iOS; no Apple font binaries are bundled.
+
+## 1Password shortcut mark
+
+`Shared/Assets.xcassets/OnePassword.imageset/OnePassword.svg` is the unmodified
+monochrome 1Password SVG from [Simple Icons](https://github.com/simple-icons/simple-icons/blob/develop/icons/1password.svg),
+whose icons are distributed under [CC0-1.0](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md).
+The 1Password name and mark belong to 1Password. It identifies an app-opening
+shortcut, not an endorsement or embedded credential-provider integration.
+
+## Unicode emoji data
+
+`Shared/EmojiCatalog.json` is derived from the fully-qualified sequences in
+[Unicode Emoji 16.0 emoji-test.txt](https://unicode.org/Public/emoji/16.0/emoji-test.txt).
+Source SHA-256: `24f0c534e86cf142e2496953e8f0e46a3e702392911eddcd29c6cced85139697`.
+Copyright Unicode, Inc. Distributed under the Unicode License V3, bundled at
+`Shared/Unicode-Emoji-LICENSE.txt`. The panel renders Apple's system emoji font;
+no Apple glyph images or fonts are bundled.
+
+`Shared/EmojiKeywords.json` contains English and Simplified Chinese emoji names
+and keywords from [Unicode CLDR 47.0.0](https://github.com/unicode-org/cldr-json/tree/47.0.0),
+restricted to the bundled emoji catalog. The Unicode License V3 above applies.
+`Shared/EmojiKeywords-Provenance.json` records source URLs and SHA-256 hashes;
+`scripts/prepare-emoji-keywords.py` regenerates the index and its small preferred
+everyday-symbol ordering. The keyboard performs matching locally.

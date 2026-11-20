@@ -670,6 +670,62 @@ private final class CaretAXQuery {
               position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite else { return blocked("selection or editor bounds unavailable") }
         return Editor(element: element, pid: pid, text: text, selection: selection, bounds: CGRect(origin: position, size: size))
     }
+    /// Read-only fallback data stays inside the focused editor and does not use stale markers.
+    func draftRectangles(_ range: NSRange, in editor: Editor) -> [CGRect]? {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.08
+        var offset = range.location
+        var rectangles: [CGRect] = []
+        while offset < NSMaxRange(range), rectangles.count < 64,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            guard let line = attribute(editor.element, kAXLineForIndexParameterizedAttribute, NSNumber(value: offset)) as? NSNumber else { return nil }
+            var lineRange = CFRange()
+            guard unpack(attribute(editor.element, kAXRangeForLineParameterizedAttribute, line), .cfRange, &lineRange),
+                  lineRange.location >= 0, lineRange.length > 0,
+                  lineRange.location <= offset, lineRange.location + lineRange.length > offset,
+                  lineRange.location + lineRange.length <= editor.text.utf16.count else { return nil }
+            let part = NSIntersectionRange(range, NSRange(location: lineRange.location, length: lineRange.length))
+            var requested = CFRange(location: part.location, length: part.length), rect = CGRect.zero
+            guard let argument = AXValueCreate(.cfRange, &requested),
+                  unpack(attribute(editor.element, kAXBoundsForRangeParameterizedAttribute, argument), .cgRect, &rect),
+                  rect.width > 0, rect.height > 0, rect.height <= 60 else { return nil }
+            rectangles.append(rect)
+            offset = NSMaxRange(part)
+        }
+        return offset == NSMaxRange(range) ? rectangles : nil
+    }
+
+    func textLeaves(in editor: Editor) -> [CaretInsertionPoint.TextLeaf] {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.06
+        var pending: [(AXUIElement, Int)] = [(editor.element, 0)]
+        var leaves: [CaretInsertionPoint.TextLeaf] = []
+        var visited = 0
+        while let (node, depth) = pending.popLast(), visited < 96,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            visited += 1
+            AXUIElementSetMessagingTimeout(node, 0.015)
+            let role = attribute(node, kAXRoleAttribute) as? String
+            if role == kAXStaticTextRole {
+                var frame = CGRect.zero, position = CGPoint.zero, size = CGSize.zero
+                if let text = attribute(node, kAXValueAttribute) as? String,
+                   unpack(attribute(node, "AXFrame"), .cgRect, &frame) ||
+                    (unpack(attribute(node, kAXPositionAttribute), .cgPoint, &position) &&
+                     unpack(attribute(node, kAXSizeAttribute), .cgSize, &size)) {
+                    if frame == .zero { frame = CGRect(origin: position, size: size) }
+                    if frame.width > 0, frame.height > 0 {
+                        leaves.append(CaretInsertionPoint.TextLeaf(text: text, frame: frame))
+                    }
+                }
+                continue
+            }
+            guard depth < 10, depth == 0 || ![kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole].contains(role ?? ""),
+                  let children = attribute(node, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+            for child in children.prefix(max(0, 96 - visited - pending.count)).reversed() {
+                pending.append((child, depth + 1))
+            }
+        }
+        return leaves
+    }
+
     /// The frame of the editor's last nonempty AXStaticText descendant, bounded like leaf
     /// seeding (96 nodes, depth 10, 60 ms) and never leaving this editor.
     func lastTextLeafFrame(in editor: Editor) -> CGRect? {
@@ -805,10 +861,13 @@ private final class CaretAXQuery {
     /// Indicator only: caret positioning never estimates an insertion X from a glyph (wrong
     /// for right-to-left text), because it moves text; the indicator only points.
     func caretAfterGlyph(_ offset: Int, in editor: Editor) -> CGRect? {
-        // Calibrated for this editor (in `caret`, which runs first), so its markers are current.
+        // `caret` runs first, but can retain older markers while the editor is updating.
         let failedStep = lastStep ?? "?"
         guard let correction = geometryCorrection, CFEqual(correction.element, editor.element) else {
             entryDiagnostic("\(failedStep); not calibrated"); return nil
+        }
+        if let context = markerGeometry, context.navigator.text != editor.text {
+            entryDiagnostic("\(failedStep); stale glyph markers"); return nil
         }
         let stops = CaretNavigation.boundaries(editor.text)
         let utf16 = Array(editor.text.utf16)
@@ -1042,6 +1101,8 @@ final class CaretInsertionPoint: @unchecked Sendable {
         /// The same, once that element wraps: its last line's end, laid out by vvhisper (see
         /// `wrappedEnd`). The line is exact; the position along it is an estimate.
         case wrappedEnd
+        /// Read-only estimate within verified text-leaf content, including empty lines.
+        case estimatedCaret
     }
 
     struct Reading: Sendable {
@@ -1149,9 +1210,24 @@ final class CaretInsertionPoint: @unchecked Sendable {
         if let caret = query.caretAfterGlyph(Int(editor.selection.location), in: editor) {
             return Reading(caret: caret, editor: editor.bounds, accuracy: .afterGlyph, offset: Int(editor.selection.location))
         }
+        if Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) {
+            return Self.emptyReading(editor, insertion: query.uncalibratedInsertion(0, in: editor))
+        }
+        let leaves = query.textLeaves(in: editor)
+        if let caret = Self.estimatedCaret(text: editor.text, offset: Int(editor.selection.location),
+            leaves: leaves, editor: editor.bounds, fontSize: fontSizes[editor.pid] ?? Self.defaultFontSize,
+            lineHeight: lineHeights[editor.pid]) {
+            // Learn only after the leaf text has matched this editor's current value.
+            if let leaf = leaves.last(where: { (8...30).contains($0.frame.height) && !$0.text.contains(where: \.isNewline) }) {
+                if let size = Self.fontSize(paragraph: leaf.text, renderedWidth: leaf.frame.width) { fontSizes[editor.pid] = size }
+                lineHeights[editor.pid] = leaf.frame.height
+            }
+            return Reading(caret: caret, editor: editor.bounds, accuracy: .estimatedCaret, offset: Int(editor.selection.location))
+        }
         guard Self.isEmptyEditor(text: editor.text, caret: Int(editor.selection.location)) else {
             // Dictation types at the caret, so the caret is usually at the end of the text.
             guard Self.isAtTextEnd(text: editor.text, caret: Int(editor.selection.location)),
+                  Self.trailingBreaksBeforeCaret(editor.text, offset: Int(editor.selection.location)) == 0,
                   let leaf = query.lastTextLeafFrame(in: editor) else {
                 query.lastStep = (query.lastStep ?? "?") + "; no text end"
                 return nil
@@ -1199,6 +1275,108 @@ final class CaretInsertionPoint: @unchecked Sendable {
         let shown = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shown.isEmpty else { return false }
         return candidates.contains { $0?.trimmingCharacters(in: .whitespacesAndNewlines) == shown }
+    }
+
+    struct TextLeaf {
+        let text: String
+        let frame: CGRect
+    }
+
+    static func trailingBreaksBeforeCaret(_ text: String, offset: Int) -> Int {
+        guard CaretNavigation.boundaries(text).contains(offset) else { return 0 }
+        return (text as NSString).substring(to: offset).reversed().prefix(while: \.isNewline).count
+    }
+
+    /// Indicator-only geometry. Exact content matching anchors AX offsets without requiring
+    /// Chromium's text markers. Never use these estimates to move or select the user's text.
+    static func estimatedCaret(text: String, offset: Int, leaves: [TextLeaf], editor: CGRect,
+                               fontSize: CGFloat, lineHeight: CGFloat? = nil) -> CGRect? {
+        guard CaretNavigation.boundaries(text).contains(offset), fontSize.isFinite, fontSize > 0,
+              lineHeight.map({ $0.isFinite && $0 > 0 }) ?? true else { return nil }
+        let value = text as NSString
+        var matched: [(range: NSRange, text: String, frame: CGRect)] = []
+        var end = 0
+        for leaf in leaves {
+            guard leaf.frame.minX.isFinite, leaf.frame.minY.isFinite,
+                  leaf.frame.width.isFinite, leaf.frame.height.isFinite else { return nil }
+            var content = leaf.text
+            while content.last?.isNewline == true { content.removeLast() }
+            guard !content.isEmpty else { continue }
+            let range = value.range(of: content, options: [], range: NSRange(location: end, length: value.length - end))
+            guard range.location != NSNotFound,
+                  value.substring(with: NSRange(location: end, length: range.location - end)).allSatisfy(\.isNewline) else { return nil }
+            matched.append((range, content, leaf.frame))
+            end = NSMaxRange(range)
+        }
+        // A stale or partial subtree must not position the cursor against different text.
+        guard value.substring(from: end).allSatisfy(\.isNewline) else { return nil }
+        func visible(_ rect: CGRect) -> CGRect? {
+            guard rect.minX.isFinite, rect.minY.isFinite, rect.height.isFinite, rect.height > 0,
+                  editor.insetBy(dx: -1, dy: -1).contains(CGPoint(x: rect.minX, y: rect.midY)) else { return nil }
+            return rect
+        }
+        func inside(_ leaf: (range: NSRange, text: String, frame: CGRect), at local: Int) -> CGRect? {
+            let frame = leaf.frame
+            guard frame.width > 0, frame.height >= 8 else { return nil }
+            if frame.height <= 30, !leaf.text.contains(where: \.isNewline) {
+                let font = NSFont.systemFont(ofSize: fontSize)
+                let full = (leaf.text as NSString).size(withAttributes: [.font: font]).width
+                let prefix = (leaf.text as NSString).substring(to: local)
+                let width = (prefix as NSString).size(withAttributes: [.font: font]).width
+                guard full > 0 else { return nil }
+                return CGRect(x: frame.minX + min(frame.width, width / full * frame.width),
+                              y: frame.minY, width: 2, height: frame.height)
+            }
+            let storage = NSTextStorage(string: leaf.text, attributes: [.font: NSFont.systemFont(ofSize: fontSize)])
+            let layout = NSLayoutManager()
+            let container = NSTextContainer(size: CGSize(width: frame.width + 1, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            layout.addTextContainer(container); storage.addLayoutManager(layout)
+            layout.ensureLayout(for: container)
+            var rows: [(rect: CGRect, glyphs: NSRange)] = []
+            layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) { _, used, _, range, _ in
+                rows.append((used, range))
+            }
+            guard !rows.isEmpty else { return nil }
+            let nativeRows = lineHeight.map { max(1, Int((frame.height / $0).rounded())) } ?? rows.count
+            let height = frame.height / CGFloat(nativeRows)
+            let row: Int, x: CGFloat
+            if local == (leaf.text as NSString).length {
+                row = nativeRows - 1; x = rows.last!.rect.maxX
+            } else {
+                let glyph = layout.glyphIndexForCharacter(at: local)
+                guard let index = rows.firstIndex(where: { NSLocationInRange(glyph, $0.glyphs) }) else { return nil }
+                row = min(index, nativeRows - 1)
+                x = layout.location(forGlyphAt: glyph).x
+            }
+            return CGRect(x: frame.minX + min(frame.width, x), y: frame.minY + CGFloat(row) * height,
+                          width: 2, height: height)
+        }
+        // Prefer a following leaf at a shared boundary, especially at the start of a paragraph.
+        if let leaf = matched.first(where: { offset >= $0.range.location && offset < NSMaxRange($0.range) }) {
+            return inside(leaf, at: offset - leaf.range.location).flatMap(visible)
+        }
+        if let leaf = matched.last(where: { NSMaxRange($0.range) <= offset }),
+           var caret = inside(leaf, at: leaf.range.length) {
+            let gap = value.substring(with: NSRange(location: NSMaxRange(leaf.range), length: offset - NSMaxRange(leaf.range)))
+            guard gap.allSatisfy(\.isNewline) else { return nil }
+            if !gap.isEmpty {
+                caret.origin.x = matched.first?.frame.minX ?? editor.minX + 3
+                caret.origin.y += CGFloat(gap.count) * (lineHeight ?? caret.height)
+            }
+            return visible(caret)
+        }
+        if value.substring(to: offset).allSatisfy(\.isNewline) {
+            var caret = Self.editorStart(editor)
+            if let first = matched.first {
+                let breaks = value.substring(to: first.range.location).count
+                caret = CGRect(x: first.frame.minX, y: first.frame.minY - CGFloat(breaks) * (lineHeight ?? min(first.frame.height, 24)),
+                               width: 2, height: lineHeight ?? min(first.frame.height, 24))
+            }
+            caret.origin.y += CGFloat(value.substring(to: offset).count) * (lineHeight ?? caret.height)
+            return visible(caret)
+        }
+        return nil
     }
 
     /// The text after the last line break, without the trailing breaks a composer reports.
@@ -1305,6 +1483,28 @@ final class CaretInsertionPoint: @unchecked Sendable {
         let height = min(18, max(10, bounds.height - 8))
         let top = bounds.height <= 36 ? bounds.midY - height / 2 : bounds.minY + 6
         return CGRect(x: bounds.minX + 3, y: top, width: 2, height: height)
+    }
+}
+
+/// Uses the same focused-editor validation as the cursor, off the typing thread. No AX writes.
+final class DictationDraftGeometryReader: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "com.vvhisper.draft-underline", qos: .userInitiated)
+    private let query = CaretAXQuery()
+
+    func read(_ draft: DictationDraftSnapshot, completion: @escaping @MainActor @Sendable ([CGRect]?) -> Void) {
+        queue.async { [self] in
+            let result: [CGRect]?
+            if let editor = query.observe(), editor.pid == draft.pid, CFEqual(editor.element, draft.element),
+               let range = DictationDraftGeometry.range(value: editor.text, selection: editor.selection,
+                                                        anchor: draft.anchor, draft: draft.text) {
+                let rectangles = query.draftRectangles(range, in: editor)
+                    ?? DictationDraftGeometry.estimatedRects(value: editor.text, range: range, leaves: query.textLeaves(in: editor))
+                result = rectangles.map { DictationDraftGeometry.strokes($0, editor: editor.bounds) }
+            } else {
+                result = nil
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 }
 
@@ -1736,7 +1936,8 @@ final class RemoteCaretController {
 
 import QuartzCore
 
-/// Figma 1345:6560, exported at 4x; the source SVG is bundled alongside it.
+/// Figma 1408:822, exported at 4x; the source SVG is bundled alongside it.
+/// Keep the 32 × 24 pt head and curved neck; the artwork ends at y=32.
 /// Only the straight 2 pt stem adapts to the editor's line height.
 /// The two things the same cursor can mean. One silhouette, two readings: the ordinary
 /// dark one positions the caret, and the orange one says vvhisper is listening and shows
@@ -1786,7 +1987,7 @@ enum CaretBubbleArtwork {
                       style: CaretBubbleStyle = .positioning) -> CGImage? {
         guard let url = bundle.url(forResource: "CaretBubble", withExtension: "png"),
               let silhouette = NSImage(contentsOf: url),
-              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 96, pixelsHigh: 128,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 128, pixelsHigh: 128,
                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
@@ -1794,16 +1995,16 @@ enum CaretBubbleArtwork {
         NSGraphicsContext.current = context
         context.cgContext.scaleBy(x: 4, y: 4)
         appearance.performAsCurrentDrawingAppearance {
-            silhouette.draw(in: CGRect(x: 0, y: 0, width: 24, height: 32))
+            silhouette.draw(in: CGRect(x: 0, y: 0, width: 32, height: 32))
             style.tint.withAlphaComponent(1).setFill()
-            CGRect(x: 0, y: 0, width: 24, height: 32).fill(using: .sourceAtop)
+            CGRect(x: 0, y: 0, width: 32, height: 32).fill(using: .sourceAtop)
             let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.textBackgroundColor]))
             if includeSymbol, let symbol = NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(configuration) {
                 let size = symbol.size
                 // Unflipped drawing: the bubble center is 12 pt below the top.
-                symbol.draw(in: CGRect(x: 12 - size.width / 2, y: 20 - size.height / 2,
+                symbol.draw(in: CGRect(x: 16 - size.width / 2, y: 20 - size.height / 2,
                                        width: size.width, height: size.height))
             }
         }
@@ -1853,7 +2054,7 @@ final class CaretOverlay {
             // stay in calibrated editor coordinates throughout the interaction.
             context.translateBy(x: stemRect.midX, y: stemRect.maxY)
             context.rotate(by: lean)
-            let size = CGSize(width: 24 * expansion, height: 32 * expansion)
+            let size = CGSize(width: 32 * expansion, height: 32 * expansion)
             // Bury the neck in the stem, including at preview scale and maximum
             // sway. Edge antialiasing must never be the only thing joining them.
             let bubbleRect = CGRect(x: -size.width / 2, y: -1.5,
@@ -2036,8 +2237,8 @@ final class CaretOverlay {
             || canvas.artwork == nil || canvas.previewArtwork == nil {
             if let image = CaretBubbleArtwork.image(appearance: appearance, style: style),
                let plain = CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false, style: style) {
-                canvas.artwork = NSImage(cgImage: image, size: CGSize(width: 24, height: 32))
-                canvas.previewArtwork = NSImage(cgImage: plain, size: CGSize(width: 24, height: 32))
+                canvas.artwork = NSImage(cgImage: image, size: CGSize(width: 32, height: 32))
+                canvas.previewArtwork = NSImage(cgImage: plain, size: CGSize(width: 32, height: 32))
                 artworkAppearance = appearance.name
                 artworkStyle = style
                 rmDebug("Caret bubble artwork ready: \(image.width)x\(image.height)")

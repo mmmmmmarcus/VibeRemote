@@ -1,9 +1,11 @@
 import AVFoundation
 import Foundation
+import RemoteAudioProtocol
 
 /// Memory-only audio for one dictation hold. All mutable state and the native decoder
 /// are serialized; stop detaches delivery before returning the final clip.
 final class SoundcoreAudioSource: DictationAudioSource, @unchecked Sendable {
+    private let gain: VoiceInputGain
     private let lock = NSLock()
     private var samples: [Float] = []
     private var callback: (@Sendable ([Float]) -> Void)?
@@ -13,7 +15,7 @@ final class SoundcoreAudioSource: DictationAudioSource, @unchecked Sendable {
     private let pcmFormat: AVAudioFormat
     private(set) var frames = 0
 
-    init(onSamples: @escaping @Sendable ([Float]) -> Void) throws {
+    init(gain: VoiceInputGain = VoiceInputGain(), onSamples: @escaping @Sendable ([Float]) -> Void) throws {
         var description = AudioStreamBasicDescription(mSampleRate: 16_000, mFormatID: kAudioFormatOpus,
             mFormatFlags: 0, mBytesPerPacket: 0, mFramesPerPacket: 320, mBytesPerFrame: 0,
             mChannelsPerFrame: 1, mBitsPerChannel: 0, mReserved: 0)
@@ -23,6 +25,7 @@ final class SoundcoreAudioSource: DictationAudioSource, @unchecked Sendable {
               let converter = AVAudioConverter(from: compressed, to: pcm) else {
             throw SoundcoreProtocol.Failure.decode
         }
+        self.gain = gain
         self.compressedFormat = compressed
         self.pcmFormat = pcm
         converter.primeMethod = .none
@@ -63,7 +66,7 @@ final class SoundcoreAudioSource: DictationAudioSource, @unchecked Sendable {
         guard result != .error, let channel = output.floatChannelData?[0] else {
             throw SoundcoreProtocol.Failure.decode
         }
-        let decoded = Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
+        let decoded = gain.apply(Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength))))
         guard samples.count + decoded.count <= 16_000 * 120 else { throw SoundcoreProtocol.Failure.invalidSlices }
         samples.append(contentsOf: decoded)
         frames += 1

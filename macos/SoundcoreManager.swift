@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import CoreBluetooth
 import SwiftUI
+import RemoteAudioProtocol
 
 /// One connection owner for Soundcore Work. CoreBluetooth and all transport state live
 /// on the main actor; view construction never requests Bluetooth or starts a microphone.
@@ -22,11 +23,16 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
     @Published private(set) var ready = false
     @Published private(set) var info: SoundcoreProtocol.DeviceInfo?
     @Published private(set) var microphoneActive = false
+    @Published private(set) var handsFree = false
+    @Published private(set) var dictationListening = false
     @Published private(set) var level: Float = 0
     @Published private(set) var frameCount = 0
     @Published private(set) var error: String?
     @Published var useForHotkey = UserDefaults.standard.bool(forKey: "soundcoreDictationInput") {
-        didSet { UserDefaults.standard.set(useForHotkey, forKey: "soundcoreDictationInput") }
+        didSet {
+            UserDefaults.standard.set(useForHotkey, forKey: "soundcoreDictationInput")
+            if !useForHotkey, dictationListening { endDictation(cancel: true) }
+        }
     }
 
     private static let rememberedDeviceKey = "soundcoreVerifiedDevice"
@@ -51,6 +57,9 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
     private var writing = false
     private var pendingScan = false
     private var connectionGeneration = UUID()
+    private var releaseTask: Task<Void, Never>?
+    private var releaseCountdown = VoiceReleaseCountdown()
+    private var releaseBuffer = VoiceReleaseBuffer()
     private var capture: SoundcoreAudioSource?
     private var audioID: UInt32?
     private var headReady = false
@@ -61,7 +70,6 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
     private var stopping = false
     private var lastAudio = Date.distantPast
     private var captureStarted = Date.distantPast
-    private var continuityHold = 0
     private var recoveringAudio = false
     private var audioRecoveryTask: Task<Void, Never>?
     private var session = UUID()
@@ -87,14 +95,15 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
             try? await Task.sleep(for: .milliseconds(100))
         }
         guard ready, !shuttingDown else { rmDebug("🎤 Soundcore CONTINUITY failed: not connected"); return }
-        let durations: [Double] = CommandLine.arguments.contains("--verify-soundcore-buffer")
-            ? [6, 6, 6] : [18, 3, 3, 18, 3, 3, 18, 3, 3, 3, 3, 3]
+        let verifyRelease = CommandLine.arguments.contains("--verify-soundcore-release-buffer")
+        let durations: [Double] = verifyRelease ? [2, 2, 2] :
+            (CommandLine.arguments.contains("--verify-soundcore-buffer")
+                ? [6, 6, 6] : [18, 3, 3, 18, 3, 3, 18, 3, 3, 3, 3, 3])
         for (index, duration) in durations.enumerated() {
             guard ready, !shuttingDown, capture == nil, DictationController.shared.recordingSource == nil else {
                 rmDebug("🎤 Soundcore CONTINUITY failed: unavailable hold=\(index + 1)")
                 return
             }
-            continuityHold = index + 1
             do { _ = try makeCapture(onSamples: { _ in }) }
             catch { rmDebug("🎤 Soundcore CONTINUITY failed: \(error.localizedDescription)"); return }
             let token = session
@@ -104,12 +113,27 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
                 rmDebug("🎤 Soundcore CONTINUITY failed: interrupted hold=\(index + 1)")
                 return
             }
-            endDictation(cancel: false)
-            let finishDeadline = Date().addingTimeInterval(4)
+            if verifyRelease {
+                releaseDictationKey()
+                if index == 1, releaseBuffer.effectiveDuration > 0 {
+                    try? await Task.sleep(for: .seconds(releaseBuffer.effectiveDuration / 2))
+                    guard resumeDictationKey() else {
+                        rmDebug("🎤 Soundcore CONTINUITY failed: release buffer could not resume")
+                        return
+                    }
+                    try? await Task.sleep(for: .seconds(0.5))
+                    releaseDictationKey()
+                }
+                if index == 2 {
+                    try? await Task.sleep(for: .milliseconds(50))
+                    endDictation(cancel: true)
+                }
+            } else { endDictation(cancel: false) }
+            let finishDeadline = Date().addingTimeInterval(6)
             while capture != nil, Date() < finishDeadline, !shuttingDown {
                 try? await Task.sleep(for: .milliseconds(50))
             }
-            guard frameCount > 0, ready else {
+            guard frameCount > 0, ready, capture == nil else {
                 rmDebug("🎤 Soundcore CONTINUITY failed: no audio hold=\(index + 1)")
                 return
             }
@@ -273,6 +297,8 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
         connectionTimeout?.cancel()
         connectionGeneration = UUID()
         if DictationController.shared.recordingSource == .soundcore { DictationController.shared.cancel() }
+        cancelReleaseBuffer()
+        resetDictationListening()
         stopTask?.cancel()
         audioTimeout?.cancel()
         capture = nil
@@ -543,7 +569,7 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
                 lastAudio = Date()
                 level = try capture.append(crypto.decrypt(slice))
                 frameCount += 1
-                if !stopping { status = "Microphone on" }
+                if !stopping { status = releaseCountdown.token == nil ? (handsFree ? "Listening · hands-free" : "Listening") : "Recording release buffer…" }
             }
         case (0x1A, 0x0A), (0x1B, 0x0A):
             transport.finish()
@@ -574,8 +600,9 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
             throw NSError(domain: "Soundcore", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 "Connect Soundcore Work in Settings before using it as your microphone."])
         }
-        let source = try SoundcoreAudioSource(onSamples: onSamples)
+        let source = try SoundcoreAudioSource(gain: VoiceInputGain.load(.soundcore), onSamples: onSamples)
         capture = source
+        releaseBuffer = VoiceReleaseBuffer.load(.soundcore)
         error = nil
         session = UUID()
         audioID = nil
@@ -637,7 +664,58 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
         }
     }
 
+    // Recording feedback belongs to DictationIndicator’s caret, shared by every input.
+    func updateDictationListening(handsFree: Bool) {
+        guard capture != nil, !stopping else { return }
+        self.handsFree = handsFree
+        dictationListening = true
+        if frameCount > 0 { status = handsFree ? "Listening · hands-free" : "Listening" }
+        rmDebug("🎤 Soundcore listening gesture=\(handsFree ? "tap" : "hold")")
+    }
+
+    private func resetDictationListening() {
+        dictationListening = false
+        handsFree = false
+        DictationHotkeyMonitor.shared.resetSoundcoreGesture()
+    }
+
+    /// Only a normal hotkey release gets extra recording time. Device stop, cancel,
+    /// disconnect and safety timeouts still stop immediately.
+    func releaseDictationKey() {
+        guard capture != nil, !stopping else { return }
+        handsFree = false
+        DictationHotkeyMonitor.shared.resetSoundcoreGesture()
+        let delay = releaseBuffer.effectiveDuration
+        guard delay > 0 else { endDictation(cancel: false); return }
+        guard let timer = releaseCountdown.begin(now: ProcessInfo.processInfo.systemUptime, duration: delay) else { return }
+        let session = session
+        let startFrames = frameCount
+        status = "Recording release buffer…"
+        rmDebug("🎤 Soundcore release buffer started seconds=\(delay)")
+        releaseTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, self.session == session, self.capture != nil,
+                  self.releaseCountdown.consume(timer, now: ProcessInfo.processInfo.systemUptime) else { return }
+            rmDebug("🎤 Soundcore release buffer finished extraFrames=\(self.frameCount - startFrames)")
+            self.endDictation(cancel: false)
+        }
+    }
+
+    /// A re-press continues the same sentence and preserves all already-captured audio.
+    func resumeDictationKey() -> Bool {
+        guard capture != nil, !stopping, releaseCountdown.token != nil else { return false }
+        cancelReleaseBuffer()
+        status = "Microphone on"
+        rmDebug("🎤 Soundcore release buffer resumed")
+        return true
+    }
+    private func cancelReleaseBuffer() {
+        releaseTask?.cancel(); releaseTask = nil
+        releaseCountdown.cancel()
+    }
+
     func endDictation(cancel: Bool) {
+        cancelReleaseBuffer()
         guard capture != nil else { return }
         if !stopping && !preparingAudio { send(0x18, 0x82, [2]) }
         stopping = true
@@ -679,6 +757,8 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
         clearAudio()
     }
     private func clearAudio() {
+        cancelReleaseBuffer()
+        resetDictationListening()
         preparingAudio = false
         stopTask?.cancel()
         stopTask = nil
@@ -759,6 +839,11 @@ struct SoundcorePane: View {
             } footer: {
                 Text("After connecting once, vvhisper reconnects when Soundcore Work is nearby and available. Disconnect pauses automatic reconnect until you choose Reconnect or reopen vvhisper. Keep the phone Bluetooth connection off; its app pairing can stay intact.")
             }
+            Section {
+                Text("Hold the dictation key and release to finish, or tap once to listen hands-free and tap again to stop.")
+            } header: { Text("Hold or Tap to Talk") }
+            VoiceInputGainSection(device: .soundcore)
+            VoiceReleaseBufferSection(device: .soundcore)
             if let error = microphone.error {
                 Section { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             }

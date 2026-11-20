@@ -5,13 +5,20 @@ struct VoiceCommand: Codable, Equatable {
     var id: UUID
     var phase: Phase
     var updatedAt: Date
+    // Only a release over the language key opts this hold into translation.
+    // Optional for compatibility with commands from an older installed extension.
+    var translate: Bool? = nil
 }
 struct VoiceReply: Codable {
+    // Five seconds of final ASR, fifteen of text polishing, plus IPC margin.
+    static let finalWait: TimeInterval = 25
     var id: UUID
     var text: String
     var isFinal: Bool
     var error: String?
     var updatedAt = Date()
+    var polishing: Bool?
+    var notice: String?
 }
 struct VoiceReadiness: Codable {
     var ready: Bool

@@ -87,7 +87,7 @@ let package = Package(
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
                 "SystemVolume.swift", "AgentLocalActions.swift", "AgentDecision.swift", "AgentConversationModel.swift", "AgentConversationAliases.swift", "AgentConversationSections.swift", "AgentConversationTraversal.swift", "AgentConversationAttributes.swift", "AgentConversationActions.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
-                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
+                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDraftUnderline.swift", "DictationPolisher.swift", "DictationSentencePunctuation.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],

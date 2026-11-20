@@ -1086,7 +1086,8 @@ final class RemoteInputHandler {
                 button: button,
                 generation: generation
             ) {
-                scheduleVoiceTailRelease(for: button, timeout: timeout)
+                let device: VoiceInputDevice = generation == .glassTouchSurface ? .siriGlass : .siriAluminum
+                scheduleVoiceTailRelease(for: button, timeout: timeout + VoiceReleaseBuffer.load(device).effectiveDuration)
             } else {
                 releaseHeldKey(for: button)
             }

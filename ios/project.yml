@@ -11,7 +11,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     DEVELOPMENT_TEAM: Q9MD524YL5
     CODE_SIGN_STYLE: Automatic
-    TARGETED_DEVICE_FAMILY: '1'
+    TARGETED_DEVICE_FAMILY: '1,2'
     IPHONEOS_DEPLOYMENT_TARGET: '27.0'
     ARCHS: arm64
     ONLY_ACTIVE_ARCH: YES
@@ -78,9 +78,14 @@ targets:
       - Keyboard/KeyboardViewController.swift
       - Keyboard/KeyboardMetrics.swift
       - Keyboard/CandidateButton.swift
+      - Keyboard/CandidatePanel.swift
       - Keyboard/KeyboardTouchSurface.swift
       - Keyboard/KeyPreviewView.swift
       - Keyboard/SymbolAlternativesView.swift
+      - Keyboard/KeyboardModeGesture.swift
+      - Keyboard/QuietKeyFeedback.swift
+      - Keyboard/EmojiPanel.swift
+      - Keyboard/GesturePill.swift
     settings:
       base:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) KEYBOARD_TESTING"
@@ -90,7 +95,24 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: vvhisperIOS
+  vvhisperKeyboardUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vvhisper.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: vvhisperIOS
+    dependencies:
+      - target: vvhisperIOS
 schemes:
+  vvhisperKeyboardTouches:
+    build:
+      targets:
+        vvhisperIOS: all
+    test:
+      targets: [vvhisperKeyboardUITests]
   vvhisperIOS:
     build:
       targets:

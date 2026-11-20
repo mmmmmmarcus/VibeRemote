@@ -7,6 +7,28 @@ import XCTest
 @testable import vvhisper
 
 final class ModelTests: XCTestCase {
+    func testVoiceInputGainDefaultsValidationAndIndependentDevices() throws {
+        let suite = "VoiceInputGainTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for device in VoiceInputDevice.allCases { XCTAssertEqual(VoiceInputGain.load(device, defaults: defaults).decibels, 0) }
+        defaults.set(6, forKey: VoiceInputGain.key(.siriGlass))
+        defaults.set(12, forKey: VoiceInputGain.key(.soundcore))
+        XCTAssertEqual(VoiceInputGain.load(.siriGlass, defaults: defaults).decibels, 6)
+        XCTAssertEqual(VoiceInputGain.load(.siriAluminum, defaults: defaults).decibels, 0)
+        XCTAssertEqual(VoiceInputGain.load(.soundcore, defaults: defaults).decibels, 12)
+        for bad in [-1, 25, Double.nan, Double.infinity] { XCTAssertEqual(VoiceInputGain(decibels: bad).decibels, 0) }
+    }
+
+    func testVoiceInputGainAmplifiesQuietSamplesAndBoundsClipping() {
+        let samples: [Float] = [-0.1, 0, 0.1]
+        XCTAssertEqual(VoiceInputGain().apply(samples), samples)
+        let gain = VoiceInputGain(decibels: 6)
+        XCTAssertEqual(gain.apply(samples)[2], 0.199526, accuracy: 0.000001)
+        XCTAssertEqual(gain.apply([-1, 1, 0]), [-1, 1, 0])
+        XCTAssertEqual(gain.apply([Float.nan, .infinity]), [0, 0])
+    }
+
     @MainActor
     func testRenamedProductKeepsSavedDictationAndLegacyAudioCompatibility() {
         XCTAssertEqual(ButtonAction(rawValue: "VibeRemote Dictation"), .vvhisperDictation)
@@ -957,6 +979,30 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: false, bridgeRunning: true), .disconnected)
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: false), .starting)
         XCTAssertEqual(RemoteStatusBadge(remoteConnected: true, bridgeRunning: true), .none)
+    }
+
+    func testMicrophoneMenuOnlyOffersAvailableInputsAndReadySoundcore() {
+        let microphone = DictationAudioDevice.Microphone(id: 10, uid: "usb", name: "USB Mic", builtIn: false)
+        let device = MicrophoneMenuChoice.device(DictationMicrophoneChoice(uid: "usb", name: "USB Mic"))
+        XCTAssertEqual(MicrophoneMenuChoice.available([], soundcoreReady: false), [.system])
+        XCTAssertEqual(MicrophoneMenuChoice.available([microphone], soundcoreReady: false), [.system, device])
+        XCTAssertEqual(MicrophoneMenuChoice.available([microphone], soundcoreReady: true), [.system, device, .soundcore])
+    }
+
+    func testMicrophoneMenuSelectionUsesUIDAndReflectsActualFallback() {
+        let saved = DictationMicrophoneChoice(uid: "usb", name: "Old Name")
+        let connected = MicrophoneMenuChoice.device(DictationMicrophoneChoice(uid: "usb", name: "New Name"))
+        XCTAssertEqual(MicrophoneMenuChoice.selected(saved: saved, soundcoreSelected: false,
+            available: [.system, connected]), connected)
+        XCTAssertEqual(MicrophoneMenuChoice.selected(saved: saved, soundcoreSelected: false,
+            available: [.system]), .system)
+        XCTAssertEqual(MicrophoneMenuChoice.selected(saved: nil, soundcoreSelected: false,
+            available: [.system, connected]), .system)
+        XCTAssertEqual(MicrophoneMenuChoice.selected(saved: saved, soundcoreSelected: true,
+            available: [.system, connected, .soundcore]), .soundcore)
+        // Soundcore does not silently fall back to a Mac mic when disconnected.
+        XCTAssertNil(MicrophoneMenuChoice.selected(saved: saved, soundcoreSelected: true,
+            available: [.system, connected]))
     }
 
     @MainActor

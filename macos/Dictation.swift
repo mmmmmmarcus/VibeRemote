@@ -3,6 +3,7 @@ import AudioToolbox
 import AVFoundation
 import CoreAudio
 import Speech
+import RemoteAudioProtocol
 
 // vvhisper Dictation: Siri held = record, Siri released (after the bridge drains) = turn the
 // clip into text and type it into the focused app. The mechanism mirrors mapping Siri to a
@@ -13,6 +14,8 @@ import Speech
 /// The user's dictation choices. Keys live in the Keychain, everything else in defaults.
 struct DictationSettings: Equatable, Sendable {
     var provider: DictationProvider = .apple
+    var polishDictation = true
+    var sentencePunctuation = true
     /// A BCP-47 identifier, or empty for automatic.
     var language = ""
     var whisperModel = WhisperModelCatalog.defaultModel
@@ -55,6 +58,8 @@ struct DictationSettings: Equatable, Sendable {
 
     static func load(from defaults: UserDefaults = .standard) -> DictationSettings {
         var settings = DictationSettings()
+        settings.sentencePunctuation = defaults.object(forKey: DictationSentencePunctuation.preferenceKey) as? Bool ?? true
+        settings.polishDictation = defaults.object(forKey: "dictationPolish") as? Bool ?? true
         if let raw = defaults.string(forKey: Key.provider), let provider = DictationProvider(rawValue: raw) {
             settings.provider = provider
         }
@@ -77,6 +82,8 @@ struct DictationSettings: Equatable, Sendable {
     }
 
     func save(to defaults: UserDefaults = .standard) {
+        defaults.set(sentencePunctuation, forKey: DictationSentencePunctuation.preferenceKey)
+        defaults.set(polishDictation, forKey: "dictationPolish")
         defaults.set(provider.rawValue, forKey: Key.provider)
         defaults.set(language, forKey: Key.language)
         defaults.set(whisperModel, forKey: Key.whisperModel)
@@ -120,6 +127,12 @@ enum DictationKeychain {
 
     static func key(for provider: DictationProvider) -> String? {
         guard let service = service(for: provider) else { return nil }
+        return key(service: service)
+    }
+
+    static func polishKey() -> String? { key(service: "com.viberemote.dictation.ark") }
+
+    private static func key(service: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -136,6 +149,15 @@ enum DictationKeychain {
     @discardableResult
     static func setKey(_ key: String?, for provider: DictationProvider) -> Bool {
         guard let service = service(for: provider) else { return false }
+        return setKey(key, service: service)
+    }
+
+    @discardableResult
+    static func setPolishKey(_ key: String?) -> Bool {
+        setKey(key, service: "com.viberemote.dictation.ark")
+    }
+
+    private static func setKey(_ key: String?, service: String) -> Bool {
         let match: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -260,6 +282,56 @@ enum DictationAudioDevice {
     }
 }
 
+/// Stateful conversion after HAL capture; called only on the recorder's processing queue.
+final class DictationMicrophoneResampler {
+    private let source: AVAudioFormat
+    private let target: AVAudioFormat
+    private let converter: AVAudioConverter
+
+    init(sampleRate: Double) throws {
+        guard sampleRate.isFinite, sampleRate > 0,
+              let source = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let target = AVAudioFormat(standardFormatWithSampleRate: DictationAudio.sampleRate, channels: 1),
+              let converter = AVAudioConverter(from: source, to: target) else {
+            throw DictationError("Could not convert the microphone's audio format.")
+        }
+        self.source = source; self.target = target; self.converter = converter
+    }
+
+    func append(_ samples: [Float]) -> [Float] {
+        guard !samples.isEmpty,
+              let buffer = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: AVAudioFrameCount(samples.count)),
+              let channel = buffer.floatChannelData?[0] else { return [] }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: samples.count) }
+        var supplied = false
+        return drain(capacity: AVAudioFrameCount(ceil(Double(samples.count) * target.sampleRate / source.sampleRate)) + 64) { status in
+            if supplied { status.pointee = .noDataNow; return nil }
+            supplied = true; status.pointee = .haveData
+            return buffer
+        }
+    }
+
+    func finish() -> [Float] {
+        drain(capacity: 1_024) { status in status.pointee = .endOfStream; return nil }
+    }
+
+    private func drain(capacity: AVAudioFrameCount,
+                       input: @escaping (UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer?) -> [Float] {
+        var samples: [Float] = []
+        for _ in 0..<8 {
+            guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { break }
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, status in input(status) }
+            if error == nil, let channel = output.floatChannelData?[0], output.frameLength > 0 {
+                samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
+            }
+            guard error == nil, status == .haveData, output.frameLength == capacity else { break }
+        }
+        return samples
+    }
+}
+
 /// Records one hold from a Mac microphone (the keyboard hotkey), as 16 kHz mono.
 ///
 /// An input-only HAL output unit, not `AVAudioEngine` (2026-11-15). After its input device is
@@ -267,18 +339,49 @@ enum DictationAudioDevice {
 /// Bluetooth headset's 1 ch 16 kHz), and opening a headset's microphone moves it from its music
 /// to its call profile, a configuration change that stops the engine: a ThinkPlus headset mic
 /// delivered no buffer at all. The HAL unit has no output side for that change to stop, and its
-/// own converter delivers the client format below whatever rate the device runs at. It runs only
+/// PCM conversion preserves the hardware sample rate; a separate converter produces 16 kHz. It runs only
 /// for the hold, so the microphone indicator is on only while the user is actually dictating.
 final class DictationRecorder: @unchecked Sendable {
+    /// Explicit installed-app diagnostic: memory-only audio, no ASR, typing or files.
+    @MainActor
+    static func verifySelectedMicrophone() async {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+              let microphone = DictationAudioDevice.macMicrophone(choice: DictationSettings.load().hotkeyMicrophone) else {
+            rmDebug("🗣 MICROPHONE VERIFY unavailable or permission missing")
+            return
+        }
+        for hold in 1...2 {
+            guard DictationController.shared.recordingSource == nil else {
+                rmDebug("🗣 MICROPHONE VERIFY skipped: dictation active"); return
+            }
+            let recorder = DictationRecorder()
+            do {
+                try recorder.start(deviceID: microphone.id)
+                try await Task.sleep(for: .seconds(3))
+                let audio = recorder.stop()
+                rmDebug("🗣 MICROPHONE VERIFY hold=\(hold) device=\(microphone.name) samples=\(audio.samples.count) duration=\(audio.duration) rms=\(audio.rms)")
+            } catch {
+                _ = recorder.stop()
+                rmDebug("🗣 MICROPHONE VERIFY failed: \(error.localizedDescription)")
+                return
+            }
+        }
+    }
+
     /// A dropped release must not record forever.
     static let maximumDuration: TimeInterval = 300
     /// The largest slice the render callback accepts; the HAL asks for far fewer frames.
     private static let maximumFrames = 8_192
 
     private var unit: AudioUnit?
+    private let processing = DispatchQueue(label: "com.vvhisper.microphone-conversion")
+    private var resampler: DictationMicrophoneResampler?
+    private var callbacks = 0
+    private var renderErrors = 0
+    private var lastRenderError: OSStatus = noErr
     private let lock = NSLock()
     private var samples: [Float] = []
-    /// Set before the unit starts and only read by its render callback afterwards.
+    /// Set before capture starts; called only on the serial processing queue afterwards.
     private var onSamples: (@Sendable ([Float]) -> Void)?
     /// The render callback's scratch buffer, allocated before the unit starts.
     private let scratch = UnsafeMutablePointer<Float>.allocate(capacity: DictationRecorder.maximumFrames)
@@ -292,8 +395,7 @@ final class DictationRecorder: @unchecked Sendable {
         scratch.deallocate()
     }
 
-    /// `onSamples` receives each slice's 16 kHz mono samples on the HAL's IO thread: the level
-    /// meter and the streaming session both read them there.
+    /// `onSamples` receives 16 kHz mono on the processing queue, after native-rate capture.
     func start(deviceID: AudioDeviceID, onSamples: (@Sendable ([Float]) -> Void)? = nil) throws {
         self.onSamples = onSamples
         var description = AudioComponentDescription(componentType: kAudioUnitType_Output,
@@ -309,36 +411,46 @@ final class DictationRecorder: @unchecked Sendable {
         var enable: UInt32 = 1
         var disable: UInt32 = 0
         var device = deviceID
-        var format = AudioStreamBasicDescription(
-            mSampleRate: DictationAudio.sampleRate, mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
-            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4, mChannelsPerFrame: 1,
-            mBitsPerChannel: 32, mReserved: 0)
-        var maximumFrames = UInt32(Self.maximumFrames)
-        var callback = AURenderCallbackStruct(inputProc: { refCon, flags, timestamp, bus, frames, _ in
-            Unmanaged<DictationRecorder>.fromOpaque(refCon).takeUnretainedValue()
-                .render(flags: flags, timestamp: timestamp, bus: bus, frames: frames)
-            return noErr
-        }, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-        let steps: [(String, OSStatus)] = [
-            // Bus 1 is the input element, bus 0 the output element, which stays off.
-            ("enable input", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
-                                                  &enable, UInt32(MemoryLayout<UInt32>.size))),
-            ("disable output", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
-                                                    &disable, UInt32(MemoryLayout<UInt32>.size))),
-            ("select device", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                                   &device, UInt32(MemoryLayout<AudioDeviceID>.size))),
-            ("set format", AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
-                                                &format, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))),
-            ("set slice", AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
-                                               &maximumFrames, UInt32(MemoryLayout<UInt32>.size))),
-            ("set callback", AudioUnitSetProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
-                                                  &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))),
-            ("initialize", AudioUnitInitialize(unit)),
-            ("start", AudioOutputUnitStart(unit)),
-        ]
-        for (step, status) in steps where status != noErr {
-            throw DictationError("Could not start recording (\(step): \(status)).")
+        func check(_ status: OSStatus, _ step: String) throws {
+            guard status == noErr else { throw DictationError("Could not start recording (\(step): \(status)).") }
+        }
+        // AUHAL can convert channel layout and PCM representation, but not input sample rate.
+        // Select the device before reading its native format; never change the system input.
+        do {
+            try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
+                &enable, UInt32(MemoryLayout<UInt32>.size)), "enable input")
+            try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+                &disable, UInt32(MemoryLayout<UInt32>.size)), "disable output")
+            try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &device, UInt32(MemoryLayout<AudioDeviceID>.size)), "select device")
+            var native = AudioStreamBasicDescription()
+            var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1,
+                &native, &size), "read device format")
+            resampler = try DictationMicrophoneResampler(sampleRate: native.mSampleRate)
+            var format = AudioStreamBasicDescription(
+                mSampleRate: native.mSampleRate, mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+                mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4, mChannelsPerFrame: 1,
+                mBitsPerChannel: 32, mReserved: 0)
+            try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+                &format, size), "set native-rate format")
+            var maximumFrames = UInt32(Self.maximumFrames)
+            var callback = AURenderCallbackStruct(inputProc: { refCon, flags, timestamp, bus, frames, _ in
+                Unmanaged<DictationRecorder>.fromOpaque(refCon).takeUnretainedValue()
+                    .render(flags: flags, timestamp: timestamp, bus: bus, frames: frames)
+                return noErr
+            }, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+            try check(AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+                &maximumFrames, UInt32(MemoryLayout<UInt32>.size)), "set slice")
+            try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+                &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "set callback")
+            try check(AudioUnitInitialize(unit), "initialize")
+            try check(AudioOutputUnitStart(unit), "start")
+            rmDebug("🗣 Microphone capture nativeRate=\(native.mSampleRate) outputRate=\(DictationAudio.sampleRate)")
+        } catch {
+            _ = stop()
+            throw error
         }
     }
 
@@ -349,8 +461,24 @@ final class DictationRecorder: @unchecked Sendable {
             AudioComponentInstanceDispose(unit)
             self.unit = nil
         }
+        // Finish queued input before returning the clip or closing the ASR streams.
+        processing.sync {
+            if let resampler { accept(resampler.finish()) }
+            resampler = nil
+        }
         lock.lock(); defer { lock.unlock() }
+        rmDebug("🗣 Microphone capture stopped callbacks=\(callbacks) renderErrors=\(renderErrors) lastError=\(lastRenderError) samples=\(samples.count)")
         return DictationAudio(samples: samples)
+    }
+
+    private func accept(_ chunk: [Float]) {
+        guard !chunk.isEmpty else { return }
+        lock.lock()
+        let remaining = max(0, Int(Self.maximumDuration * DictationAudio.sampleRate) - samples.count)
+        let accepted = Array(chunk.prefix(remaining))
+        samples.append(contentsOf: accepted)
+        lock.unlock()
+        if !accepted.isEmpty { onSamples?(accepted) }
     }
 
     private func render(flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
@@ -359,12 +487,17 @@ final class DictationRecorder: @unchecked Sendable {
         var list = AudioBufferList(mNumberBuffers: 1,
                                    mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: frames * 4,
                                                          mData: UnsafeMutableRawPointer(scratch)))
-        guard AudioUnitRender(unit, flags, timestamp, bus, frames, &list) == noErr else { return }
+        let status = AudioUnitRender(unit, flags, timestamp, bus, frames, &list)
+        lock.lock()
+        callbacks += 1
+        if status != noErr { renderErrors += 1; lastRenderError = status }
+        lock.unlock()
+        guard status == noErr else { return }
         let chunk = Array(UnsafeBufferPointer(start: scratch, count: Int(frames)))
-        onSamples?(chunk)
-        lock.lock(); defer { lock.unlock() }
-        guard Double(samples.count) < Self.maximumDuration * DictationAudio.sampleRate else { return }
-        samples.append(contentsOf: chunk)
+        processing.async { [self] in
+            guard let resampler else { return }
+            accept(resampler.append(chunk))
+        }
     }
 }
 
@@ -401,6 +534,7 @@ enum DictationTyper {
     @MainActor
     static func type(_ text: String) async {
         for chunk in chunks(text) {
+            guard !Task.isCancelled else { return }
             RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: true, text: chunk)?.post(tap: .cghidEventTap)
             RemoteInputHandler.makeKeyEvent(keyCode: 0, flags: [], keyDown: false, text: chunk)?.post(tap: .cghidEventTap)
             try? await Task.sleep(nanoseconds: 4_000_000)
@@ -551,7 +685,7 @@ final class DictationIndicator {
             // was final, and the bubble never followed in Claude or ChatGPT (2026-11-10).
             guard let point else { behind(); return }
             self.place(point, expected: expected)
-            if let expected, [.glyph, .afterGlyph, .textEnd, .wrappedEnd].contains(point.accuracy), point.offset != expected {
+            if let expected, [.glyph, .afterGlyph, .textEnd, .wrappedEnd, .estimatedCaret].contains(point.accuracy), point.offset != expected {
                 self.staleReads += 1
                 behind()
             }
@@ -638,6 +772,7 @@ final class DictationController: ObservableObject {
     /// Increments per hold so a slow transcript from an older hold never overwrites a newer
     /// hold's status. Its text is still typed: the user spoke it.
     private var holdCount = 0
+    private var editMonitor: DictationEditMonitor?
 
     /// The Computer Use bar, supplied by the app delegate, for Auto Computer Use.
     var computerUse: ComputerUseHandoff?
@@ -668,7 +803,7 @@ final class DictationController: ObservableObject {
     var recordingSource: Source? { recorder == nil ? nil : source }
 
     /// `followsLaterSessions`: a first-generation remote, whose tail re-press continues the hold.
-    func begin(source: Source = .remote, followsLaterSessions: Bool = false) {
+    func begin(source: Source = .remote, followsLaterSessions: Bool = false, remoteGeneration: RemoteGeneration = .unknown) {
         guard recorder == nil else { return }
         let settings = DictationSettings.load()
         // The remote's voice comes straight from the voice helper; only the Mac's own
@@ -755,10 +890,16 @@ final class DictationController: ObservableObject {
             }
             capture = recorder
         } else {
+            let gain: VoiceInputGain
+            switch remoteGeneration {
+            case .glassTouchSurface: gain = VoiceInputGain.load(.siriGlass)
+            case .aluminumClickpad: gain = VoiceInputGain.load(.siriAluminum)
+            case .unknown: gain = VoiceInputGain()
+            }
             let reader = DictationBridgeAudioReader(
                 path: MicrophoneBridgeManager.dictationAudioPath, holdStartedAt: Date(),
                 excluding: Set(bridgeSessionsTaken), followsLaterSessions: followsLaterSessions,
-                onSamples: onSamples)
+                gain: gain, onSamples: onSamples)
             reader.start()
             capture = reader
         }
@@ -771,6 +912,18 @@ final class DictationController: ObservableObject {
         if let refinement { startRefinement(refinement, settings: settings) }
         recordingStartedAt = Date()
         holdCount += 1
+        let editHold = holdCount
+        let monitor = DictationEditMonitor { [weak self, weak live, weak refinement] in
+            live?.cancel()
+            live?.typewriter.stop("you edited the text")
+            refinement?.cancel()
+            guard let self, editHold == self.holdCount else { return }
+            self.cancel()
+            self.indicator.hide()
+            self.phase = .finished("Dictation cancelled because you edited the text.")
+        }
+        editMonitor = monitor
+        monitor.start()
         phase = .recording
         // The bar shows the words itself; the orange cursor is for the editor they type into.
         if target.kind != .computerUse { indicator.listen() }
@@ -885,6 +1038,8 @@ final class DictationController: ObservableObject {
     /// Drops the hold: nothing is transcribed or typed. The hotkey uses it when the key turns out
     /// to be part of a shortcut (another key pressed while it is held).
     func cancel() {
+        editMonitor?.stop()
+        editMonitor = nil
         guard let recorder else { return }
         self.recorder = nil
         takeBridgeSessions(from: recorder)
@@ -914,15 +1069,20 @@ final class DictationController: ObservableObject {
         self.refinement = nil
         let target = self.target
         let settings = DictationSettings.load()
-        Task { @MainActor in
+        let monitor = editMonitor
+        editMonitor = nil
+        let processing = Task { @MainActor in
+            defer { monitor?.stop() }
             // No drain grace: the remote's audio comes from the helper's completed session
             // file, not from the virtual device's loopback, so nothing is still in flight.
             let audio = recorder.stop()
+            guard monitor?.cancelled != true else { return }
             live?.session?.finish()
             refinement?.session?.finish()
             await self.finish(audio, settings: settings, hold: hold, live: live, source: source,
                               editorText: context?.text, refinement: refinement, target: target)
         }
+        monitor?.processingTask = processing
     }
 
     /// Synchronous, before the next hold can begin: an aluminum re-press ends this hold and
@@ -961,9 +1121,13 @@ final class DictationController: ObservableObject {
             return
         }
         let started = Date()
+        let destination = DictationPolishDestination.capture()
         do {
             let accurate = try await Self.accurateText(refinement, audio: audio, settings: settings, editorText: editorText)
-            let text = Self.finalText(accurate.text, settings: settings)
+            guard !Task.isCancelled else { return }
+            guard let polish = await polishUnlessEdited(Self.finalText(accurate.text, settings: settings),
+                                                       settings: settings, hold: hold, live: nil) else { return }
+            let text = DictationSentencePunctuation.apply(polish.text, enabled: settings.sentencePunctuation)
             let elapsed = Date().timeIntervalSince(started)
             rmDebug(String(format: "🗣 Dictation %@%@: %.1f s audio (peak %.0f dBFS) → %d chars in %.2f s%@",
                            settings.provider.rawValue, refinement == nil ? "" : " via \(accurate.via)", audio.duration,
@@ -980,10 +1144,15 @@ final class DictationController: ObservableObject {
                 if hold == holdCount { phase = .finished("Sent \(text.count) characters to Computer Use.") }
                 return
             }
+            guard destination?.isCurrent == true else {
+                if hold == holdCount { phase = .finished("Stopped typing because focus changed while processing dictation.") }
+                return
+            }
             await DictationTyper.type(text)
+            guard !Task.isCancelled else { return }
             if hold == holdCount {
                 phase = .finished(String(format: "Typed %d characters with %@ in %.1f s.",
-                                         text.count, settings.provider.title, elapsed))
+                                         text.count, settings.provider.title, elapsed) + (polish.notice.map { " " + $0 } ?? ""))
             }
         } catch {
             rmDebug("⚠️ Dictation \(settings.provider.rawValue) failed: \(error.localizedDescription)")
@@ -1018,8 +1187,10 @@ final class DictationController: ObservableObject {
         } catch {
             route = "stream (refinement failed: \(error.localizedDescription))"
         }
+        guard !Task.isCancelled else { return }
         if text == nil {
             await live.waitForEnd(timeout: 4)
+            guard !Task.isCancelled else { return }
             guard live.succeeded else {
                 let reason = live.failure ?? "unknown"
                 rmDebug("⚠️ Dictation seedASR failed: stream \(reason), \(route)")
@@ -1031,7 +1202,10 @@ final class DictationController: ObservableObject {
         } else {
             live.cancel()
         }
-        let final = Self.finalText(text ?? "", settings: settings)
+        // Do not finish the typewriter yet: its draft underline stays up throughout this await.
+        guard let polish = await polishUnlessEdited(Self.finalText(text ?? "", settings: settings),
+                                                   settings: settings, hold: hold, live: live) else { return }
+        let final = DictationSentencePunctuation.apply(polish.text, enabled: settings.sentencePunctuation)
         Self.settle(target, live: live)
         if target.kind == .computerUse {
             // The polished transcript replaces the streamed words in the bar and goes out as the
@@ -1042,6 +1216,7 @@ final class DictationController: ObservableObject {
         } else {
             await live.typewriter.finish(final)
         }
+        guard !Task.isCancelled else { return }
         let elapsed = Date().timeIntervalSince(released)
         let firstText = live.firstTextAt.map { String(format: "%.2f s", $0.timeIntervalSince(live.startedAt)) } ?? "none"
         let stopped = live.typewriter.stoppedReason
@@ -1060,8 +1235,29 @@ final class DictationController: ObservableObject {
             phase = .finished("No speech recognized.")
         } else {
             phase = .finished(String(format: "Typed %d characters as you spoke; settled %.1f s after release.",
-                                     final.count, elapsed))
+                                     final.count, elapsed) + (polish.notice.map { " " + $0 } ?? ""))
         }
+    }
+
+    private func polishUnlessEdited(_ text: String, settings: DictationSettings, hold: Int,
+                                    live: DictationLiveHold?) async -> DictationPolisher.Result? {
+        guard !Task.isCancelled else { return nil }
+        let wait = DictationPolishWait { [weak self] in
+            live?.typewriter.stop("you edited the text while polishing")
+            guard let self, hold == self.holdCount else { return }
+            self.indicator.hide()
+            self.phase = .finished("Polishing cancelled because you edited the text.")
+        }
+        return await wait.run(monitorKeyboard: settings.polishDictation && !text.isEmpty) {
+            await Self.polish(text, settings: settings)
+        }
+    }
+
+    private static func polish(_ text: String, settings: DictationSettings) async -> DictationPolisher.Result {
+        let result = await DictationPolisher.polish(text, enabled: settings.polishDictation,
+            key: settings.polishDictation ? DictationKeychain.polishKey() : nil)
+        if let notice = result.notice { rmDebug("🗣 " + notice) }
+        return result
     }
 
     private func fail(_ message: String) {

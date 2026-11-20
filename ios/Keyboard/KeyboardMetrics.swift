@@ -3,12 +3,14 @@ import UIKit
 /// iOS 27 Figma references: 12890:27040 / 31610 / 31654 / 30558, and 12740:24279.
 /// Keep device-specific safe areas system-owned rather than drawing a phone frame.
 struct KeyboardMetrics {
-    enum Arrangement { case phone, outerPortrait, innerPortrait, outerLandscape, innerLandscape }
+    enum Arrangement { case phone, outerPortrait, innerPortrait, outerLandscape, innerLandscape, tablet }
     let arrangement: Arrangement
+    let mini: Bool
+    var tablet: Bool { arrangement == .tablet }
     var inlineAccessories: Bool { arrangement == .outerPortrait || arrangement == .innerPortrait || arrangement == .outerLandscape }
-    var belowAccessories: Bool { arrangement == .phone }
+    var belowAccessories: Bool { !mini && arrangement == .phone }
     var split: Bool { arrangement == .innerLandscape }
-    let inset: CGFloat
+    private(set) var inset: CGFloat
     let keyHeight: CGFloat
     let rowGap: CGFloat
     let keyGap: CGFloat
@@ -18,15 +20,23 @@ struct KeyboardMetrics {
     let returnWidth: CGFloat
     let cornerRadius: CGFloat
     let fontSize: CGFloat
-    var candidateHeight: CGFloat { split ? 43.333 : arrangement == .outerLandscape ? 43 : 47 }
-    var bottomInset: CGFloat { arrangement == .outerLandscape ? 4 : split ? 3.667 : arrangement == .innerPortrait ? 3.333 : arrangement == .outerPortrait ? 6.667 : 0 }
-    var contentHeight: CGFloat { candidateHeight + 4 * keyHeight + 3 * rowGap + bottomInset + (belowAccessories ? 50 : 0) }
+    var candidateHeight: CGFloat { mini ? 0 : split ? 43.333 : arrangement == .outerLandscape ? 43 : 47 }
+    var topInset: CGFloat { mini ? inset : 0 }
+    var bottomInset: CGFloat { mini ? inset : arrangement == .outerLandscape ? 4 : split ? 3.667 : arrangement == .innerPortrait ? 3.333 : arrangement == .outerPortrait ? 6.667 : 0 }
+    var contentHeight: CGFloat { topInset + candidateHeight + (mini ? 1 : tablet ? 5 : 4) * keyHeight + (mini ? 0 : tablet ? 4 : 3) * rowGap + bottomInset + (belowAccessories ? 50 : 0) }
+    var miniFunctionWidth: CGFloat { max(44, min(60, shiftWidth)) }
     var switcherWidth: CGFloat { split ? 46.667 : arrangement == .outerLandscape ? 45.333 : arrangement == .innerPortrait ? 50.667 : arrangement == .outerPortrait ? 39.667 : 42 }
     let modeWidth: CGFloat
     var letterFont: UIFont { UIFont(name: "SFCompact-Regular", size: fontSize) ?? .systemFont(ofSize: fontSize) }
 
-    init(width: CGFloat, landscape: Bool = false) {
-        if width >= 750 && landscape || width >= 800 {
+    init(width: CGFloat, landscape: Bool = false, mini: Bool = false, tablet: Bool = false) {
+        self.mini = mini
+        if tablet && width >= 600 {
+            arrangement = .tablet
+            inset = 8; keyHeight = landscape ? 54 : 50; rowGap = 8; keyGap = 7
+            middleInset = 20; sideGap = 12; shiftWidth = 76; returnWidth = 100
+            modeWidth = 60; cornerRadius = 8; fontSize = 24
+        } else if width >= 750 && landscape || width >= 800 {
             arrangement = .innerLandscape
             inset = 10.333; keyHeight = 42.333; rowGap = 13; keyGap = 10.333
             middleInset = 39.67; sideGap = 26; shiftWidth = 92.667
@@ -54,14 +64,21 @@ struct KeyboardMetrics {
             returnWidth = min(120, (width - 13.34) * 0.32)
             modeWidth = min(93, (width - 13.34) * 0.238); cornerRadius = 8.5; fontSize = 25
         }
+        // Mini has no candidate strip to provide breathing room. Match its top
+        // and sides, including the full-layout Duo variant with no side inset.
+        if mini { inset = max(8, inset) }
     }
+
+    @MainActor static let actionKeyFill = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
+    @MainActor static let actionKeyInk = UIColor { $0.userInterfaceStyle == .dark ? .black : .white }
 
     @MainActor static let keyFill = UIColor { traits in
         let dark = traits.userInterfaceStyle == .dark
         if traits.accessibilityContrast == .high || UIAccessibility.isReduceTransparencyEnabled {
             return UIColor(white: dark ? 0.27 : 1, alpha: 1)
         }
-        // Let the system keyboard's blurred, tinted backdrop show through each cap.
-        return UIColor(white: 1, alpha: dark ? 0.18 : 0.78)
+        // Near-white caps in light mode, with a little of the system's tinted
+        // backdrop still visible. Keep the darker glass treatment in dark mode.
+        return UIColor(white: 1, alpha: dark ? 0.18 : 0.96)
     }
 }

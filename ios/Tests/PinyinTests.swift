@@ -21,6 +21,52 @@ final class PinyinTests: XCTestCase {
         for byte in text.utf8 { result = await action(.key(Int32(byte))) }
         return result
     }
+    private func candidates(_ offset: Int, revision: Int) async -> PinyinEngine.CandidateBatch? {
+        await withCheckedContinuation { continuation in
+            PinyinEngine.shared.candidates(after: offset, revision: revision) { continuation.resume(returning: $0) }
+        }
+    }
+
+    func testBrowsingPastFirstPagePreservesSpaceAndAbsoluteSelection() async throws {
+        let first = await type("shi")
+        let start = first.candidates.count
+        let fetched = await candidates(start, revision: first.revision)
+        let batch = try XCTUnwrap(fetched)
+        XCTAssertEqual(batch.offset, start)
+        XCTAssertEqual(batch.texts.count, 32)
+        let unchanged = await action(.prepare)
+        XCTAssertEqual(unchanged.candidates, first.candidates)
+        XCTAssertEqual(unchanged.page, 0)
+        XCTAssertEqual(unchanged.preedit, first.preedit)
+        XCTAssertTrue(unchanged.committed.isEmpty)
+        let selected = await action(.chooseAbsolute(start + 4))
+        XCTAssertEqual(selected.committed, batch.texts[4])
+        XCTAssertTrue(selected.input.isEmpty)
+
+        let again = await type("shi")
+        _ = await candidates(again.candidates.count, revision: again.revision)
+        let space = await action(.choose(0))
+        XCTAssertEqual(space.committed, again.candidates.first)
+        let stale = await candidates(start, revision: first.revision)
+        XCTAssertNil(stale)
+    }
+
+    func testCandidateBrowsingRejectsStaleSameSpellingAndDoesNotSkipBetweenBatches() async throws {
+        let old = await type("shi")
+        let current = await type("shi")
+        let stale = await candidates(0, revision: old.revision)
+        XCTAssertNil(stale)
+        let fetchedFirst = await candidates(0, revision: current.revision)
+        let first = try XCTUnwrap(fetchedFirst)
+        XCTAssertEqual(Array(first.texts.prefix(current.candidates.count)), current.candidates)
+        let fetchedSecond = await candidates(32, revision: current.revision)
+        let second = try XCTUnwrap(fetchedSecond)
+        let fetchedBoundary = await candidates(31, revision: current.revision)
+        let boundary = try XCTUnwrap(fetchedBoundary)
+        XCTAssertEqual(first.texts.last, boundary.texts.first)
+        XCTAssertEqual(Array(boundary.texts.dropFirst()), Array(second.texts.prefix(31)))
+        _ = await action(.clear)
+    }
 
     func testRealDictionaryConvertsPinyinAndCommitsCandidate() async throws {
         let result = await type("nihao")
@@ -30,6 +76,21 @@ final class PinyinTests: XCTestCase {
         let chosen = await action(.choose(index))
         XCTAssertEqual(chosen.committed, "你好")
         XCTAssertEqual(chosen.input, "")
+    }
+
+    func testPinyinCorrectionOffersMistypedPhrasesWithoutChangingRawInput() async throws {
+        for (input, expected) in [("zhdiao", "知道"), ("wozhdiao", "我知道"), ("nihoa", "你好"), ("huanyaun", "还原")] {
+            let result = await type(input)
+            XCTAssertEqual(result.input, input)
+            let choices = PinyinCandidates().choices(for: result, letterCase: .lowercase)
+            XCTAssertEqual(choices.first?.text, expected)
+            XCTAssertTrue(choices.contains { $0.text == expected }, "\(input): \(choices.map(\.text))")
+            if let chosen = choices.first(where: { $0.text == expected }) {
+                let committed = await action(chosen.spaceAction)
+                XCTAssertEqual(committed.committed, expected)
+                XCTAssertTrue(committed.input.isEmpty)
+            }
+        }
     }
 
 
@@ -82,6 +143,38 @@ final class PinyinTests: XCTestCase {
             XCTAssertEqual(first.text, expected, "Wrong first candidate for \(spelling)")
             let committed = await action(first.spaceAction)
             XCTAssertEqual(committed.committed, expected, "Wrong Space commit for \(spelling)")
+            XCTAssertTrue(committed.input.isEmpty)
+        }
+    }
+
+    func testDesignVocabularyRanksFirstAndCommitsAsOnePhrase() async throws {
+        for (spelling, expected) in [
+            ("zoucha", "走查"), ("huanyuan", "还原"), ("shejizoucha", "设计走查"),
+            ("shijuehuanyuan", "视觉还原"), ("jiaohusheji", "交互设计"),
+            ("shejixitong", "设计系统"), ("zidongbuju", "自动布局"),
+            ("zujianbianti", "组件变体"),
+            ("weijiaohu", "微交互"), ("chukongrequ", "触控热区")
+        ] {
+            let snapshot = await type(spelling)
+            XCTAssertNil(snapshot.error)
+            let first = try XCTUnwrap(PinyinCandidates().choices(for: snapshot, letterCase: .lowercase).first)
+            XCTAssertEqual(first.text, expected, spelling)
+            let committed = await action(first.spaceAction)
+            XCTAssertEqual(committed.committed, expected, spelling)
+            XCTAssertTrue(committed.input.isEmpty)
+        }
+    }
+
+    func testCelebrityNamesAreSelectableOnTheFirstPage() async throws {
+        for (spelling, expected) in [
+            ("dilireba", "迪丽热巴"), ("zhaolusi", "赵露思"), ("yiyangqianxi", "易烊千玺"),
+            ("tanjianci", "檀健次"), ("wangyibo", "王一博"), ("zhoujielun", "周杰伦"),
+            ("liudehua", "刘德华")
+        ] {
+            let snapshot = await type(spelling)
+            let index = try XCTUnwrap(snapshot.candidates.firstIndex(of: expected), "\(spelling): \(snapshot.candidates)")
+            let committed = await action(.choose(index))
+            XCTAssertEqual(committed.committed, expected)
             XCTAssertTrue(committed.input.isEmpty)
         }
     }

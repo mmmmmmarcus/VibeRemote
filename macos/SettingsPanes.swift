@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import RemoteAudioProtocol
 
 /// Settings metrics and colors, matching Spotter's Settings window so both apps read as one
 /// family: a 190-point sidebar of icon-tile rows and native grouped-Form panes.
@@ -488,6 +489,10 @@ private struct RemotePane: View {
                         .accessibilityIdentifier("settings.restoreDefaults")
                     }
             }
+            VoiceInputGainSection(device: generation == .glassTouchSurface ? .siriGlass : .siriAluminum)
+                .id(generation)
+            VoiceReleaseBufferSection(device: generation == .glassTouchSurface ? .siriGlass : .siriAluminum)
+                .id(generation)
             TextCursorGuide(generation: generation)
             DevicePane(model: model, setIdleTimeout: { timeout in setIdleTimeout(timeout) }, actions: actions)
         }
@@ -1400,5 +1405,74 @@ struct HardwareDiagnosticsView: View {
         }
         .formStyle(.grouped)
         .onAppear(perform: actions.refreshDiagnostics)
+    }
+}
+
+/// Settings only; all capture timing is latched at the beginning of a hold.
+struct VoiceReleaseBufferSection: View {
+    let device: VoiceInputDevice
+    @AppStorage private var enabled: Bool
+    @AppStorage private var duration: Double
+    init(device: VoiceInputDevice) {
+        self.device = device
+        _enabled = AppStorage(wrappedValue: true, device.enabledKey)
+        _duration = AppStorage(wrappedValue: 1, device.durationKey)
+    }
+    var body: some View {
+        Section {
+            Toggle("Release Buffer", isOn: $enabled)
+                .accessibilityIdentifier("settings.\(device.rawValue).releaseBuffer")
+            SettingsRow(title: "Buffer Time") {
+                HStack {
+                    Slider(value: $duration, in: VoiceReleaseBuffer.range, step: 0.1)
+                        .frame(minWidth: 120, maxWidth: 210)
+                        .accessibilityLabel("Buffer Time")
+                        .accessibilityValue(String(format: "%.1f seconds", duration))
+                        .accessibilityIdentifier("settings.\(device.rawValue).releaseBufferTime")
+                    Text(String(format: "%.1f s", duration))
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                }
+                .disabled(!enabled)
+            }
+        } footer: {
+            Text(device == .soundcore
+                 ? "Keeps the microphone recording after you release the dictation key."
+                 : "Retains trailing audio after you release Siri, up to the selected time. Siri Remote firmware controls how long its microphone continues sending audio.")
+        }
+        .onAppear { duration = VoiceReleaseBuffer(duration: duration).duration }
+        .onChange(of: enabled) { _, _ in UserDefaults.standard.synchronize() }
+        .onChange(of: duration) { _, _ in UserDefaults.standard.synchronize() }
+    }
+}
+
+/// Each device keeps its own gain; changes take effect on the next recording.
+struct VoiceInputGainSection: View {
+    let device: VoiceInputDevice
+    @AppStorage private var decibels: Double
+
+    init(device: VoiceInputDevice) {
+        self.device = device
+        _decibels = AppStorage(wrappedValue: 0, VoiceInputGain.key(device))
+    }
+
+    var body: some View {
+        Section {
+            SettingsRow(title: "Input Gain") {
+                HStack {
+                    Slider(value: $decibels, in: VoiceInputGain.range, step: 1)
+                        .frame(minWidth: 120, maxWidth: 210)
+                        .accessibilityLabel("Input Gain")
+                        .accessibilityValue(String(format: "%.0f decibels", decibels))
+                        .accessibilityIdentifier("settings.\(device.rawValue).inputGain")
+                    Text(decibels == 0 ? "0 dB" : String(format: "+%.0f dB", decibels))
+                        .monospacedDigit()
+                        .frame(width: 56, alignment: .trailing)
+                }
+            }
+        } footer: {
+            Text("Amplifies audio sent to dictation. Applies to the next recording.")
+        }
+        .onAppear { decibels = VoiceInputGain(decibels: decibels).decibels }
     }
 }

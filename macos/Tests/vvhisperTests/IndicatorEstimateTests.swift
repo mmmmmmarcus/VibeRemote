@@ -4,6 +4,95 @@ import XCTest
 
 /// The dictation cursor's fallbacks for editors without per-character geometry (ChatGPT).
 final class IndicatorEstimateTests: XCTestCase {
+    private let editor = CGRect(x: 90, y: 490, width: 500, height: 240)
+
+    private func estimate(_ text: String, _ offset: Int, _ leaves: [CaretInsertionPoint.TextLeaf],
+                          lineHeight: CGFloat? = nil) -> CGRect? {
+        CaretInsertionPoint.estimatedCaret(text: text, offset: offset, leaves: leaves,
+                                          editor: editor, fontSize: 16, lineHeight: lineHeight)
+    }
+
+    func testExistingTextSupportsCaretBeforeAndInsideText() throws {
+        let text = "Already written text"
+        let leaf = CaretInsertionPoint.TextLeaf(text: text, frame: CGRect(x: 100, y: 500, width: 200, height: 24))
+        let start = try XCTUnwrap(estimate(text, 0, [leaf]))
+        let middle = try XCTUnwrap(estimate(text, 8, [leaf]))
+        let end = try XCTUnwrap(estimate(text, text.utf16.count, [leaf]))
+        XCTAssertEqual(start.minX, 100)
+        XCTAssertGreaterThan(middle.minX, start.minX)
+        XCTAssertLessThan(middle.minX, end.minX)
+        XCTAssertEqual(middle.minY, 500)
+        XCTAssertEqual(end.minX, 300)
+    }
+
+    func testBlankLinesFollowActualCaretNotLastNonemptyLine() throws {
+        let leaf = CaretInsertionPoint.TextLeaf(text: "hello", frame: CGRect(x: 100, y: 500, width: 40, height: 24))
+        let text = "hello\n\n"
+        let beforeBreak = try XCTUnwrap(estimate(text, 5, [leaf]))
+        let firstBlank = try XCTUnwrap(estimate(text, 6, [leaf]))
+        let secondBlank = try XCTUnwrap(estimate(text, 7, [leaf]))
+        XCTAssertEqual(beforeBreak.minX, 140)
+        XCTAssertEqual(beforeBreak.minY, 500)
+        XCTAssertEqual(firstBlank.minX, 100)
+        XCTAssertEqual(firstBlank.minY, 524)
+        XCTAssertEqual(secondBlank.minX, 100)
+        XCTAssertEqual(secondBlank.minY, 548)
+        // CRLF is one displayed line break, with two UTF-16 units.
+        XCTAssertEqual(try XCTUnwrap(estimate("hello\r\n", 7, [leaf])).minY, 524)
+        XCTAssertEqual(CaretInsertionPoint.trailingBreaksBeforeCaret(text, offset: 5), 0)
+        XCTAssertEqual(CaretInsertionPoint.trailingBreaksBeforeCaret(text, offset: 7), 2)
+    }
+
+    func testCaretFindsItsOwnParagraphIncludingEmptyParagraphBetweenLeaves() throws {
+        let leaves = [
+            CaretInsertionPoint.TextLeaf(text: "first", frame: CGRect(x: 100, y: 500, width: 40, height: 24)),
+            CaretInsertionPoint.TextLeaf(text: "second", frame: CGRect(x: 100, y: 548, width: 60, height: 24))
+        ]
+        let text = "first\n\nsecond\n"
+        XCTAssertEqual(try XCTUnwrap(estimate(text, 3, leaves)).minY, 500)
+        XCTAssertEqual(try XCTUnwrap(estimate(text, 6, leaves)).minY, 524)
+        let second = try XCTUnwrap(estimate(text, 7, leaves))
+        XCTAssertEqual(second.minX, 100)
+        XCTAssertEqual(second.minY, 548)
+        XCTAssertEqual(try XCTUnwrap(estimate(text, 14, leaves)).minY, 572)
+    }
+
+    func testWrappedTextAndFollowingBlankLineWithoutPreviouslyLearnedFont() throws {
+        let first = "So I was thinking that we should probably", second = "change it"
+        let firstWidth = (first as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width
+        let text = first + " " + second
+        let leaf = CaretInsertionPoint.TextLeaf(text: text, frame: CGRect(x: 100, y: 500, width: ceil(firstWidth), height: 48))
+        XCTAssertEqual(try XCTUnwrap(estimate(text, 3, [leaf])).minY, 500)
+        let lastRow = try XCTUnwrap(estimate(text, first.utf16.count + 1, [leaf]))
+        XCTAssertEqual(lastRow.minY, 524)
+        XCTAssertEqual(lastRow.minX, 100, accuracy: 1)
+        let blank = try XCTUnwrap(estimate(text + "\n", text.utf16.count + 1, [leaf]))
+        XCTAssertEqual(blank.minX, 100)
+        XCTAssertEqual(blank.minY, 548)
+    }
+
+    func testUnicodeOffsetsAndOnlyBlankLines() throws {
+        let text = "Hi 👨‍👩‍👧‍👦 café"
+        let leaf = CaretInsertionPoint.TextLeaf(text: text, frame: CGRect(x: 100, y: 500, width: 120, height: 24))
+        XCTAssertNil(estimate(text, 4, [leaf]), "inside a grapheme is not a valid caret")
+        XCTAssertEqual(try XCTUnwrap(estimate(text, text.utf16.count, [leaf])).minX, 220)
+        let start = CaretInsertionPoint.editorStart(editor)
+        let blank = try XCTUnwrap(estimate("\n\n", 2, []))
+        XCTAssertEqual(blank.minX, start.minX)
+        XCTAssertEqual(blank.minY, start.minY + 2 * start.height)
+    }
+
+    func testStalePartialAndOffscreenLeavesAreRejected() {
+        let leaf = CaretInsertionPoint.TextLeaf(text: "old text", frame: CGRect(x: 100, y: 500, width: 100, height: 24))
+        XCTAssertNil(estimate("new text", 3, [leaf]))
+        XCTAssertNil(estimate("old text plus more", 3, [leaf]))
+        XCTAssertNil(estimate("before old text", 3, [leaf]))
+        XCTAssertNil(estimate("old text", 3, []))
+        let offscreen = CaretInsertionPoint.TextLeaf(text: "old text", frame: CGRect(x: 100, y: 100, width: 100, height: 24))
+        XCTAssertNil(estimate("old text", 3, [offscreen]))
+        XCTAssertNil(estimate("old text", 3, [leaf], lineHeight: 0))
+    }
+
     /// ChatGPT's placeholder is the element's title/description, not AXPlaceholderValue.
     func testPlaceholderMatchesAnyOfTheElementsLabels() {
         let isPlaceholder = CaretInsertionPoint.isPlaceholder

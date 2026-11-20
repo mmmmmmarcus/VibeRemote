@@ -286,7 +286,7 @@ final class CaretNavigationTests: XCTestCase {
         let resources = try XCTUnwrap(SettingsAssets.bundledResources(in: app))
         let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
         let image = try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, bundle: resources))
-        XCTAssertEqual(image.width, 96)
+        XCTAssertEqual(image.width, 128)
         XCTAssertEqual(image.height, 128)
         for generation in [RemoteGeneration.glassTouchSurface, .aluminumClickpad] {
             let scene = try RemoteModelScene.make(generation: generation, bundle: resources)
@@ -725,8 +725,8 @@ final class CaretNavigationTests: XCTestCase {
         let stem = canvas.stemRect
         let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
         canvas.appearance = appearance
-        canvas.previewArtwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false)), size: CGSize(width: 24, height: 32))
-        canvas.artwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance)), size: CGSize(width: 24, height: 32))
+        canvas.previewArtwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance, includeSymbol: false)), size: CGSize(width: 32, height: 32))
+        canvas.artwork = NSImage(cgImage: try XCTUnwrap(CaretBubbleArtwork.image(appearance: appearance)), size: CGSize(width: 32, height: 32))
         let stages: [(CGFloat, CGFloat, CGFloat)] = [(0.65, 0, 0), (0.72, 0.32, 0), (0.78, -0.32, 0), (1.03, 0.08, 1), (1, 0, 1),
                                                   (0.65, -0.38, 0), (0.65, 0.38, 0), (1, -0.38, 1), (1, 0.38, 1)]
         for (index, stage) in stages.enumerated() {

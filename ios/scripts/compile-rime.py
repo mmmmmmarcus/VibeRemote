@@ -11,7 +11,8 @@ root = Path(__file__).resolve().parents[1]
 resources = root / 'Typing/Resources/Rime'
 # Fail before deployment if a vendored source was edited or only partly downloaded.
 provenance = json.loads((resources / 'dictionary-provenance.json').read_text())
-for name, metadata in provenance['files'].items():
+sources = provenance['files'] | provenance.get('local_tables', {}) | provenance.get('local_resources', {})
+for name, metadata in sources.items():
     if hashlib.sha256((resources / name).read_bytes()).hexdigest() != metadata['sha256']:
         raise SystemExit('Dictionary source checksum mismatch: ' + name)
 library = root / 'build/dependencies/librime-static.xcframework/macos-arm64_x86_64'
@@ -31,13 +32,13 @@ with tempfile.TemporaryDirectory(prefix='vvhisper-rime-') as temporary:
                  'vvhisper_lexicon.table.bin', 'vvhisper_lexicon.reverse.bin'):
         if not (user / 'build' / name).is_file():
             raise SystemExit('Missing compiled dictionary: ' + name)
-    # Bundle compiled tables and notices only, not 28 MB of build-time YAML sources.
+    # Bundle compiled tables and notices, not the build-time YAML sources.
     # The complete, unmodified dictionary sources remain in the repository.
     destination = root / 'build/resources/Rime'
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(user / 'build', destination / 'build')
     shutil.copytree(resources / 'Licenses', destination / 'Licenses')
-    for name in ('PinyinSyllables.txt', 'Pinyin-LICENSE.txt', 'RimeIce-LICENSE.txt',
+    for name in ('PinyinSyllables.txt', 'EnglishWords.txt', 'Pinyin-LICENSE.txt', 'RimeIce-LICENSE.txt', 'VvhisperLexicon-LICENSE.txt',
                  'dictionary-provenance.json'):
         shutil.copyfile(resources / name, destination / name)

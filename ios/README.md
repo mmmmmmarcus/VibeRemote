@@ -1,4 +1,476 @@
-# vvhisper for iOS — first local prototype
+# vvhisper for iOS and iPadOS — local prototype
+
+### Media mixing, editing pills and iPad layout — 2026-11-20
+
+The ready microphone now uses normal audio mode with mixing and Bluetooth stereo
+output. Measurement mode was lowering other apps' playback levels; no system volume
+is changed and no ducking is requested. Empty recognition finishes without a notice.
+
+The left shortcut pill expands to Paste, newly copied Code, 1Password, Messages and
+Phone, and Clipboard History. Phone and Messages only open an app;
+they never populate a recipient or make a call. iOS may reject the empty Phone URL,
+in which case the shortcut asks you to open Phone manually.
+
+The right editing pill owns left/right word delete/restore, down for a line break,
+and up for end-of-text. Ordinary keys no longer interpret editing swipes. Space
+trackpad, held Delete, pinch and dictation slides retain their separate behavior.
+Double-Space inserts `. ` in English or `。` in Chinese. Chinese full letters now
+include a dedicated `。` key.
+
+iPad support shares the app, extension and settings. At >=600 points it uses a
+continuous five-row layout with a number row, Tab, wider Return and arrow keys.
+Narrow windows fall back to the phone layout; mini keeps its single row. The minimum
+OS remains 27.0. The installed 27.1 simulator runtime supports only the Duo, so
+actual iPad launch is pending a compatible runtime/device; UIKit layout tests cover
+744/834/1194/1366-point widths. Device media playback and app shortcuts remain
+unverified while hardware is disconnected.
+
+Validation: 241 iOS tests passed, followed by 10 focused pill tests and nine
+candidate/tablet regressions after final refinements. The signed device build passes
+strict signature verification and declares both iPhone and iPad device families.
+This records source/build/test coverage, not installation or physical acceptance.
+
+### Compact keyboard and emoji — 2026-11-20
+
+Mini mode is now one row: **Expand · Dictate · Delete Word · Enter**. Expand or
+pinch out restores full letters. Mini Delete removes one word per tap/repeat,
+including Chinese word boundaries; full-mode Delete remains character-based.
+The language key is absent from mini, so release-to-translate is full-mode only.
+
+Light-mode voice feedback now uses white fill and a soft white halo; it never
+pulses black ink over the caps. Dark mode retains its white level response.
+
+The smiley opens a local emoji panel with nine categories, skin tones, ABC,
+Delete and a system globe. Unicode Emoji 16.0 data and its license are bundled.
+Emoji insert literally, and no emoji history is saved or sent over the network.
+
+A dictation slide into Enter now requests Return only when the final host field
+advertises **Send**. Other fields keep the finalized text without a newline and
+show “Text ready. Tap Send in the app.” iOS exposes no universal send-message API;
+the host still owns what its advertised Send action does. Ordinary Enter taps
+retain normal host behavior. Earlier build notes below describe historical behavior.
+
+Validation: all 238 iOS tests passed. The signed device build passed strict signature
+verification. Native test renders cover the single-row mini layout in portrait and
+landscape, light and dark, plus quiet/soft/strong voice feedback. The Duo was disconnected,
+so installation, live emoji interaction and Send behavior in third-party apps remain
+unverified for this build. Duo-specific floating-keyboard support is also unconfirmed.
+
+### Sentence Punctuation — 2026-11-19
+
+**Voice Input → Sentence Punctuation** defaults on, independently of polishing.
+It controls the final ending of one short dictated sentence: On retains an existing
+ending or adds a period (`。` when Han is present); Off removes its terminal sentence
+punctuation, including before closing quotes/brackets. Interior punctuation stays.
+The limit is 120 Unicode scalars and 20 words, or 40 scalars when Han is present.
+Longer passages, multiple sentences/lines, URLs, email addresses and ambiguous dotted
+text such as abbreviations remain unchanged; decimal points are preserved.
+
+The host captures this choice at hold start and applies it after optional polishing,
+including disabled, failed or interrupted polishing. It does not alter streaming
+drafts or normal keyboard typing, and does not make a separate network request.
+The helper and shared behavioral fixtures match the Mac implementation.
+
+Validation: all 220 iOS tests passed, including the shared fixtures, independent
+setting persistence, per-hold values and final output after successful/disabled/failed
+polishing. The signed build passed strict signature verification and was installed on the
+Duo without uninstalling. The toggle defaulted On, persisted Off after reopening
+settings, and was restored to On. Live spoken dictation was not retested for this
+change; output behavior has the shared fixture and polishing-path test coverage.
+
+### Typing assistance — 2026-11-19
+
+English offers local spelling corrections in the candidate strip and applies close
+corrections when finishing a word. Immediate Delete restores the original spelling;
+it will not correct that same word again. Known product/design terms, Pinyin, acronyms,
+URL/email/numeric fields, hidden context and the host's autocorrection preference are
+protected. Suggestions only own letters entered through this keyboard, never pasted
+or dictated text. Missing system spelling data leaves text unchanged except for a
+small set of common slips. Joined words can be split when the system suggests them.
+
+Chinese Pinyin tests bounded single-slip repairs (adjacent transpositions, repeated
+letters and nearby keys) against the existing Rime dictionary. Only complete Chinese
+results appear, and exact Pinyin retains its existing ranking. Typo suggestions commit
+through the same tap/Space path; the raw spelling stays marked until then. This does
+not guess a different word for a valid but unintended Pinyin spelling.
+
+**Keyboard → Typing Assistance** has independent, default-on English Auto-Correction
+and Smart Spacing controls. Smart spacing adds a space after selecting an English
+candidate and after English punctuation; a redundant Space is consumed and subsequent
+punctuation replaces only the keyboard's own trailing space. Directly typed dots stay
+unspaced for domains/decimals. Chinese characters remain unspaced. All processing is
+local, with no typed-text logging, network calls or persistent learning.
+
+Validation: 213 simulator tests passed across typing, Pinyin phrase ranking,
+gestures, haptics and dictation. Targeted keyboard checks also cover correction
+undo, settings, delayed editor acknowledgements and nil empty proxy contexts.
+The animation build was installed on the Duo on November 19; physical full/mini
+hold tests verified legend hide/restore, quiet strip and pinch transitions.
+The acoustic test returned no recognized speech, so live amplitude sensitivity
+remains unverified. See `build/verification/quiet-keys-device-nov19.json`.
+
+The final signed typing build was installed without uninstalling. All 23 targeted
+checks passed after the final proxy/settings fixes. On the physical Duo, `teh`
+offered **the**, Space committed it, and Delete restored `teh`; `wozhdiao` offered
+**我知道** first and Space committed it. Typing `hello,` followed by an explicit
+Space and `world` produced exactly `hello, world`. The new settings page showed
+both controls enabled. Synthetic test text was cleared and Chinese mode restored.
+See `build/verification/typing-assistance-device-check.json`.
+
+### Edge taps and thumb movement — 2026-11-18
+
+A brief finger drift no longer cancels a tap before reaching the swipe threshold.
+Movement of 14 points stops a pending hold; intentional left/right swipes still
+require 36 points and down requires 28. A large unsupported movement cancels the
+press. Existing dictation, cursor and delete holds keep their established behavior.
+
+A separate physical comparison found an iOS-hosted boundary: the Duo outer display
+is 466 points wide, but the extension receives a 452-point hosted window, leaving
+about 7 points at each side outside its input surface. At 5.6 points from either
+screen edge, Apple accepted Q/P/A/L while vvhisper received none; at 9.3 points,
+vvhisper accepted all four. Enlarging key hit targets inside the extension cannot
+capture touches outside that window. Apple documents that the system determines
+custom keyboard width. Geometry-only temporary diagnostics were removed after the
+measurement; no new runtime probes or private API were retained.
+
+Validation: 181 unit tests passed. The signed build was installed without
+uninstalling. On the real Duo, 18.6-point inward drifts that previously dropped
+Q/P now committed Q/P/A/L, and Shift, Delete and symbol/alphabet switching worked.
+Deliberate word deletion, restoration and line separators were also verified.
+The simulator coordinate UI test failed its first baseline center-key tap before
+reaching the new checks; it is not counted as passing. See
+`build/verification/edge-tap-device-comparison.json` for evidence and limits.
+
+### Text polishing — 2026-11-19
+
+After final Seed recognition, a separate Volcengine Ark language-model request corrects
+grammar/spelling and natural phrasing. It sends only the transcript and editing
+instructions: no tools or editor context. The prompt preserves meaning, tone,
+uncertainty, negations, names, numbers, facts and mixed languages, and never answers
+questions or follows instructions contained in the transcript.
+
+Open **Voice Input → Polish Dictation**. The toggle defaults on; add a **Volcengine
+Ark API Key** on this iPhone. The fixed model is Seed 2.0 Mini
+(`doubao-seed-2-0-mini-260428`), with thinking disabled. Requests use
+`https://ark.cn-beijing.volces.com/api/v3/chat/completions`. The key is stored in a
+separate host-only, device-only Keychain item. ASR keys and existing OpenRouter
+keys/models are never reused. Mac credentials are not copied and the extension never reads them.
+Only subsequent holds use changed settings. Without a key, dictation keeps the
+recognized text and shows a setup notice; provider/model charges may apply once configured.
+
+The recognized draft stays marked during the text-only pass. A complete, valid
+JSON text response replaces it; disabled/missing setup, network failure, a 15 s
+resource timeout, empty/truncated/invalid responses all preserve recognized text.
+The keyboard allows 25 s for final ASR plus polishing. Edits, field/caret changes,
+cancellation and new holds invalidate stale replacement/submission. Slide-to-cancel
+still restores the selection displaced by that hold. No transcripts, keys or
+provider bodies are logged. iOS host apps control marked-text appearance; the
+extension cannot guarantee a visible underline in every app and never changes
+document underline formatting. Live provider verification requires a configured key.
+
+The November 19 underline fix was checked through the real keyboard extension on
+the Duo: a synthetic draft remains marked while pending, final text replaces it,
+and the visible blue underline clears. This checks editor delivery, not provider
+latency. Real proxies can exclude marked text from their context; final text is
+committed with `insertText` rather than another `setMarkedText` followed by unmarking.
+The follow-up empty-field cancellation fix was checked on the Duo with English
+and Chinese drafts from empty fields, plus the prefilled-field case. All three
+synthetic flows completed and cleared the visible underline. The 227-test suite
+also covers nil surrounding context for an owned draft and rejection of changed
+documents or hidden context in a previously nonempty field.
+
+### Release to translate — 2026-11-19
+
+While dictating, slide onto the language key and release to translate: Chinese
+speech becomes English, and English speech becomes Simplified Chinese. The key
+highlights indigo while targeted; slide away to keep the original language.
+This works in full mode without switching the typing language or sending
+the text. Mini no longer has a language key. Polishing and translation share one Ark request and the existing key.
+The gesture works with automatic polishing off; failures retain the transcript.
+Validation: 232 tests passed, including full/mini layouts, release-only translation,
+slide-away, cancel/send precedence, changed fields and stale completions. Synthetic
+live Ark requests returned valid English and Chinese output in about 1.1–1.2 s.
+The signed build was installed on the Duo; silent physical drags verified indigo
+hover feedback in full and mini mode and disarming on exit. A spoken end-to-end
+translation on the phone remains to be checked.
+
+### Quiet Keys — from the center — 2026-11-18
+
+The approved [Quiet Keys A](Design/Prototypes/quiet-keys.html) is implemented natively.
+Text legends fade out together on hold; a group of neutral key fills responds from
+the center and widens with speech. The host supplies a short-lived volume scalar
+from the existing microphone stream, never raw audio. Silence fades the field away;
+release restores legends without a polishing animation. The candidate strip stays
+empty through recording and refinement. Mini uses a soft fill inside Dictate with
+the same quiet response on its function keys. Both appearances and Reduce Motion are
+supported. See the [motion specification](Design/Prototypes/QUIET_KEYS.md).
+
+The visibility refinement uses a 6% noise gate with a square-root response for
+softer speech, 35 ms attack and 140 ms release. Light mode now uses up to 90%
+white fill and a 6-point white halo; dark mode uses up to 32% white. Opacity tracks
+volume, with no black pulses in light appearance.
+Mini uses the same response inside Dictate. Reduce Motion retains a stationary,
+lower-contrast indication. Microphone/ASR gain and the quiet candidate strip are unchanged.
+The refinement passed 193 tests, including softer-speech response and unchanged
+layout/session guards. Full/mini light/dark renders were inspected, and the signed
+build was installed on the Duo. Live speech sensitivity still needs an in-hand check.
+
+The molecule renderer is removed from the app and keyboard; the studies below are
+historical references. Streaming and final replacement remain in the host text field.
+
+Validation: 180 simulator tests passed, including stale/future/session checks,
+RMS bounds, silence, attack/release, Reduce Motion, cancellation, final replacement
+and full/mini geometry across five layouts. The signed final Debug build passed
+strict signature verification and was installed on the Duo without uninstalling.
+Physical light-mode checks covered full and mini holds, legend fade/restore,
+center response, quiet strip, and pinch transitions. The on-device comparison led
+to reducing the light base shade to 3.5% so keycaps remain visible against the
+system backdrop. Dark, reduced-motion and other geometries have simulator/model
+coverage; they were not rechecked physically in this iteration. Artifacts and
+install hashes are under `build/verification/quiet-keys-*`.
+
+### Previous molecule dictation animation (superseded) — 2026-11-18
+
+The earlier [molecule study](Design/Prototypes/README.md) ran in UIKit before Quiet Keys replaced it.
+Visible streaming text builds a monochrome field from the center: four particles
+per Chinese (Han) character, one per other letter/digit, ignoring spaces and
+punctuation. Silence adds none; corrections adjust the count, with a width-based
+safety cap of at most 320. The cloud occupies a shallow central band with more
+clearance from the top edge and keys. Release sends every molecule directly from
+its current position to the top-center opening in 330 ms, with no gathering stage.
+The transcript stays in the host text field; final polishing replaces it immediately,
+even when the visual sequence has not finished.
+
+Full mode uses the candidate strip. Mini mode keeps the entire animation inside
+the Dictate key and its rounded corners, scaling density and the receiving opening
+for the smaller space. The canvas receives no touches. Cancelling, changing the
+layout or dismissing the keyboard clears it. Idle, detached and waiting-for-final
+states do not run display frames. Reduce Motion uses stationary molecules.
+
+Validation of the weighted-text revision: all 179 simulator tests pass. Coverage
+checks Chinese/English grapheme weights, silence and transcript corrections, the
+shallow listening band, immediate departure from existing positions, bounded density,
+Reduce Motion, immediate final-text insertion, stale-session rejection, cancellation
+and clipped mini geometry across five layouts.
+Native light/dark full/mini listening and send renders were reviewed in
+`build/verification/molecules-stream-count-layouts.png`.
+The signed Debug app and keyboard passed strict signature verification under
+Q9MD524YL5 and were installed on the Duo without uninstalling. The phone's UI
+automation channel still fails to establish (exit 74), so launch, physical
+dictation smoothness and battery behavior remain unverified. The weighted-text,
+direct-flight revision was also signed, verified and installed on the Duo without
+uninstalling on 2026-11-18.
+
+### Key gaps and Chinese candidate browsing
+
+Every gap within the keys belongs to the nearest key in its row, including staggered-row
+insets and the split keyboard's center. The whole area left of A types A; the
+whole area right of L types L, including the top and bottom corners of that row.
+Tap to type; hold a gap to dictate. Keycap
+sizes and positions stay the same. The candidate panel and the system-owned area
+remain separate from key targeting.
+
+The installed-extension touch test reproduced a failure that local hit-test tests
+missed: completely transparent gaps never received a touch event. The touch
+surface now has an imperceptible background fill so iOS forwards those events,
+while the system keyboard backdrop remains visible.
+
+Chinese candidates follow the [iPhone candidate-list interaction](https://support.apple.com/en-ie/guide/iphone/iph3c50f96e/27/ios/27):
+swipe horizontally to browse, or use the right-hand chevron to expand a vertically
+scrolling list over the letter rows. Choices keep their natural text widths; the
+first stays highlighted and Space accepts it. Selecting a choice collapses the
+panel. More candidates load on demand without changing inline composition or
+resetting scroll position. This uses our Rime dictionary, not Apple's private IME.
+
+Validation (2026-11-18): all 156 simulator regression tests pass, plus an installed
+extension UI test that sends 61 coordinate taps and checks the editor after each.
+It covers both sides of every horizontal letter gap, vertical row gaps, and the
+outer A/L areas. The regression suite also covers full/mini/symbol/split layouts,
+wide-gap tap and hold behavior, later
+Rime candidate selection, stable Space commits, stale-result rejection, scrolling,
+expansion and composition cleanup. Collapsed/expanded view renders were inspected.
+The signed Debug app and keyboard extension passed strict signature verification
+under Q9MD524YL5 and were installed on the Duo over Wi-Fi without uninstalling.
+Physical gesture and visual comparison remain unverified because the phone's
+XCTest connection still fails to start, including with Xcode 27.2.
+
+
+### Haptics and editing swipes
+
+Settings → Haptics now separates **Strength** from **Sharpness** (soft to crisp).
+Both have 1% slider/stepper adjustments and a **Test Tap** preview. Strength zero
+turns haptics off. The app and keyboard use the same short haptic transient, with
+UIKit feedback as a fallback when the custom engine is unavailable.
+Rapid taps now use eight prewarmed players, with each reserved until its pulse
+finishes, so two-thumb bursts cannot restart an unfinished pulse. Engine restart
+and completion callbacks are generation/token guarded; no late feedback is queued.
+The rapid-playback, retirement, failure, dismissal and Off regressions pass as
+part of the 188-test iOS suite. Debug's explicit `--verify-haptics` fixture checks
+80 requests at 40 ms intervals in the real extension and exports only counts,
+timing and error codes to `Documents/haptic-device-check.json`. API completion
+does not measure how each pulse feels in the hand.
+The signed build was installed on the Duo on 2026-11-18. The real keyboard
+extension completed all 80 requests in 3.201 seconds with 80 custom starts,
+80 completions, zero fallbacks and no reported errors. Evidence is in
+`build/verification/rapid-haptics-device-check.json`.
+
+A follow-up found a separate input-routing omission: stationary two-thumb chords
+replayed their letters without requesting any feedback. Ordinary keys now pulse
+on accepted finger-down; the pinch handler acknowledges any fingers intercepted
+before key tracking, and text replay/release adds no duplicate pulse. VoiceOver
+activation still gets one pulse. Strength and Sharpness retain their saved values.
+The new overlap regressions reproduced zero feedback before the fix and cover
+staggered thumbs, simultaneous same-key touches, ordinary rollover and cancellation.
+For device QA, `--verify-haptics --observe-haptic-touches` observes 24 externally
+driven touches in the synthetic field instead of generating haptics directly.
+All 192 tests pass. The updated signed build was installed on the Duo; twelve
+physical two-finger taps produced 24 haptic requests, starts and completions,
+with zero fallbacks or errors (`build/verification/haptic-touch-device-check.json`).
+This covers event delivery and playback callbacks; subjective feel remains manual.
+
+Before a hold starts, swipe **left** to delete the preceding word, **right** to
+restore a swipe-deleted word, or **down** for a line break. Down inserts Unicode
+LINE SEPARATOR directly instead of invoking Return/Send; a host may restrict which
+line separators it supports. Pinyin commits before the edit. Restore is limited
+to the current field and uninterrupted editing session; deleted text stays only
+in memory. Existing dictation, held-Space cursor control, symbol alternatives and
+held-delete gestures retain their behavior. The mini Dictate button is reserved
+for voice and two-finger mode pinches; one-finger editing swipes start on its other keys.
+
+Paste, Paste Code and 1Password use plain icon buttons without a background.
+Explicit Paste may ask for clipboard permission.
+
+Validation (2026-11-17): all 141 tests pass, including word boundaries, consecutive
+restore, delayed proxy acknowledgements, field-change guards, gesture conflicts,
+Pinyin commitment, fine haptic settings and transparent helper buttons. Signed
+Debug and Release builds pass strict app/extension signature verification; Debug
+verification hooks are absent from Release. Debug was installed on the Duo without
+removing app data, and the main Settings page was launched. The explicit synthetic
+device check confirmed custom haptic playback in the extension and the existing
+5.5-second Space-hold cursor regression. This confirms playback, not perceived
+haptic quality or physical swipe feel. Those checks remain manual while the
+screen-control runner is blocked by the Xcode/iOS mismatch. Owned temporary
+DerivedData was removed and the pre-existing simulator returned to Shutdown.
+
+### Space-hold cursor movement
+
+Hold Space briefly until the haptic, then drag to move the cursor. Horizontal
+distance moves through whole characters (including Chinese, emoji and accents);
+vertical distance moves between explicit text lines while retaining the column.
+Release to stop; there is no momentum or extra space. This works in full,
+symbol and split layouts. A normal Space tap still inserts a space or accepts the
+first Chinese candidate. Starting a cursor hold also accepts that candidate before
+moving, without adding a trailing space. Holds starting in a gap still dictate.
+
+Movement uses [Apple's public text proxy](https://developer.apple.com/documentation/uikit/handling-text-interactions-in-custom-keyboards).
+The host provides text context rather than visual caret/line geometry, so vertical
+movement follows available newline boundaries, not automatic visual wrapping.
+No microphone session or Full Access is needed for cursor movement. Cursor commands
+wait for the host's acknowledgement, so delayed context updates, changing context
+windows and an empty side at a document boundary do not end a held gesture.
+
+Validation (2026-11-17): all 141 simulator tests pass. The cursor checks cover
+distance/reversal, fractional split-key coordinates, boundaries, Chinese/emoji/
+accented characters, delayed proxy acknowledgements, document-edge nil context,
+context-window refresh, explicit-line movement, Pinyin commitment, both split Space
+keys, mini/symbol layouts, stale paste/polish rejection and gesture cancellation.
+The cursor update's signed Debug and Release app/extension passed strict signature verification
+under personal team Q9MD524YL5. Debug was installed without uninstalling on
+iPhone[marcus] (Duo, `00008160-000934DA0C200036`). Its explicit synthetic
+`--verify-cursor` check exercised the real extension-to-host proxy: move two
+characters, remain held at 4.5 seconds, move one more, release at 5.5 seconds.
+The expected caret and unchanged text were verified. The immediate-snapshot
+comparison also passed; the user's physical-touch cancellation was not reproduced.
+Screen-control QA is blocked because the iOS 27.2.1 device's automation runner
+fails with the installed Xcode 27.1. This self-check is not a physical finger test.
+Debug verification commands are absent from Release. The pre-existing simulator
+was returned to Shutdown, and temporary test/build DerivedData was removed.
+
+### Mini mode and easy input
+
+**Pinch in** for mini mode, or **pinch out** to restore the full keyboard. This
+replaces the two-finger up/down swipe. The switch happens during the pinch,
+without waiting for your fingers to lift. Horizontal, vertical and diagonal
+pinches work, including keeping one finger anchored. Moving both fingers together
+does not switch modes. A second finger can land up to 250 ms later.
+The last full/mini selection is remembered when you
+dismiss, switch away from, or restart the keyboard, including without Full Access.
+The keyboard scales slightly with your fingers, then resizes
+and fades into the selected mode; Reduce Motion uses a brief fade. Mini mode's top
+and side padding match, with at least 8 points of space. Mini is a single row:
+Expand, Dictate, Delete Word, Enter. Hold Dictate to speak, release to finish,
+slide to Delete to cancel, or Enter to finish and request Send where supported.
+Dictate waits a quarter-second for a second finger before starting voice; a shorter
+tap does nothing. Expand returns to full letters. Entering mini mode commits the
+highlighted Chinese candidate first.
+VoiceOver offers Mini Keyboard on Space and Full Keyboard on Dictate.
+
+The pinch update passes 159 regression tests and an installed-extension simulator
+UI test: pinch in, reopen with mini remembered, pinch out, then type a character.
+Both fingers can start on one wide key; close starting fingers are accepted while
+small jitter is ignored. The test verifies no stray characters during switching.
+The signed Debug update was installed on the Duo with app data preserved. Physical
+gesture feel remains unverified; the device was locked during this verification.
+
+The earlier swipe-based, remembered-mode update passed all 148 tests, including
+short diagonal swipes, staggered fingers, one-shot recognition, stationary/pinch
+rejection, dismissal and controller recreation, saved full-mode restoration, and
+two fingers on Dictate without voice activation. The signed Debug app and keyboard
+pass strict signature verification. Installed on the Duo with app data preserved;
+Try Keyboard was launched. Physical gesture feel remains unverified because the
+screen-control runner is blocked by the Xcode/iOS mismatch. Temporary build/test
+DerivedData was removed; both pre-existing Duo simulators are Shutdown.
+
+The earlier swipe-based mini-mode follow-up passed all 128 tests, including unequal finger travel,
+diagonal swipes, rejection of stationary/opposing movement, equal top/side padding
+at five sizes, animated reversal, dismissal cleanup and Reduce Motion. Native
+light/dark mini-layout renders were reviewed in `build/verification/mini-padding.png`.
+The final clipping change also passed the eight mini-mode tests. The signed Debug
+update was installed on the Duo with app data preserved and the test page launched.
+Physical two-finger feel remains unverified while the Duo's screen-control runner
+is blocked by the Xcode/iOS mismatch.
+
+Chinese symbol pages now use **，。？！：；（）【】「」**, with Latin alternatives on
+hold. English and URL/email fields retain ASCII punctuation. Paste preserves the
+original text exactly.
+
+The empty candidate strip provides right-aligned, icon-only **Paste** and **Open
+1Password**, with a monochrome 1Password mark and accessible action labels.
+All helper artwork fits the same 20-point image box inside a 44-point control.
+Paste extracts a copied code when the host marks its field as a verification
+code field. **Paste Code** appears only when a new clipboard version contains one
+unambiguous code. It disappears after use, clipboard replacement, or two minutes.
+The visible, idle keyboard checks version metadata and inspects each new version
+once; iOS may ask for paste permission. First setup/reboot establishes a baseline
+without inspecting old clipboard text. Only version/expiry metadata is saved;
+the monitor itself does not save clipboard text. The separately authorized local
+history below retains observed text, potentially including copied codes; neither
+feature logs contents. This is copied-code detection,
+not incoming-SMS access. Opening 1Password is a shortcut: copy an item there,
+return to the original app, and paste. It does not embed iOS AutoFill or automatically
+return from 1Password. See [Apple's paste control](https://developer.apple.com/documentation/uikit/uipastecontrol)
+and [1Password AutoFill](https://support.1password.com/ios-autofill/) for the separate
+system-managed flows.
+
+Initial validation (2026-11-17): all 107 simulator tests passed, including mini layouts at
+five sizes, two-finger gesture policy, Chinese candidate commitment before
+shrinking, dictation cancel/finish, punctuation, copied-code extraction and stale
+paste rejection. Native UIKit light/dark renders were reviewed; contact sheets
+are in `build/verification/`. The signed arm64 app and keyboard pass strict
+signature verification, and both provisioning profiles include the Duo.
+The icon strip retains right alignment and accessible action labels.
+The 126-test suite covers newly copied-code detection, one read per version,
+denied access, expiry, clipboard replacement during a read, single-use pasting,
+metadata-only persistence and controller restart/reboot handling.
+The copied-code Debug build passed strict signing validation and was installed on
+the Duo without removing app data. Its launch was refused because the phone had
+locked again; device paste-prompt/UI verification remains pending. Open the
+keyboard once to establish its clipboard baseline, then copy a code and return.
+Clipboard versions follow Apple's [changeCount](https://developer.apple.com/documentation/uikit/uipasteboard/changecount).
+Light/dark icon-strip renders were reviewed. The subsequent combined
+cursor build above was installed and launched after the Duo reconnected.
+Physical gesture/1Password/paste checks remain for the user. The signed app remains
+in `build/vvhisper.app`.
 
 A UIKit app automatically prepares a bounded microphone session when opened (15 minutes by default). A custom
 keyboard provides offline Chinese Pinyin + English QWERTY, candidate selection,
@@ -6,7 +478,8 @@ shift/caps lock, numbers/symbols, delete, space, return, and keyboard switching.
 release to finish. Holding consumes the key instead of inserting its character.
 While recording, slide into **Delete** to cancel immediately (red feedback), or
 into **Return** to stop recording and send after polishing (blue feedback).
-Return uses the host field's normal action, which can send or insert a newline.
+For this gesture, Return is emitted only in a Send field; other fields keep the
+final text without a newline and ask the user to send from the app.
 Direct holds on Shift, Space, Return, Delete, numbers/symbols and other function
 keys never start dictation. Character keys show a raised preview on press, including
 their current capitalization or symbol. The preview disappears when dictation
@@ -15,12 +488,14 @@ cursor or changing fields cancels pending refinement and preserves visible text.
 
 The keyboard uses the iOS 27 Figma reference for key geometry, spacing, typography,
 and the system keyboard-switcher artwork, with responsive iPhone / Duo layouts.
-The 中 / EN language key sits immediately left of the emoji/system keyboard key.
+The language key sits immediately left of the emoji/system keyboard key. It uses
+`character.book.closed`, localized to Chinese or English for the current typing mode.
 Tap it to switch between Chinese Pinyin and direct English typing; the selected
 mode is remembered locally, including without Full Access.
-Settings → **Experimental → Mixed Chinese & English** optionally combines
-candidates in Chinese mode; it is **off by default**. When enabled, the language
-key shows **中英 / EN**, and EN still types directly.
+Chinese mode also suggests recognized English words without changing modes.
+Settings → **Experimental → More English Suggestions** additionally favors
+capitalized and unfinished English spelling; it is **off by default**. When enabled,
+the language key keeps its Chinese symbol, and English mode still types directly.
 Candidates use the full strip; errors and polishing status temporarily use that same strip. Recording hides key text and leaves the strip blank. Return occupies the former microphone
 position; hold a letter key to dictate. A hold automatically opens the host
 when its microphone session needs enabling; an error can offer a retry button. This is not Apple's keyboard and
@@ -32,19 +507,33 @@ through Seed, independently of the typed keyboard layout.
 ## Chinese and English typing
 
 Chinese mode uses Rime's offline Simplified Chinese Pinyin engine with
-Rime Ice's character, base and extended phrase dictionaries (891,394 source
-entries, before compilation/deduplication). Upstream word frequencies and phrase
-segmentation determine the Chinese order. `wozhidaole` offers **我知道了** first.
+Rime Ice's character, base, extended and Tencent phrase dictionaries (1,872,937
+source entries, before compilation/deduplication), plus 101 authored design
+glossary entries such as **走查**, **视觉还原**, **组件变体** and **触控热区**.
+The expanded source includes names such as **迪丽热巴** and **赵露思**.
+Upstream word frequencies and phrase segmentation determine the Chinese order;
+the local glossary is imported last to preserve existing weights.
+`wozhidaole` offers **我知道了** first.
 Type `nihao`, then choose **你好** or press Space to accept it. Space always follows
-the highlighted first choice. By default, Chinese mode follows the dictionary order without
-English detection or completion candidates. Raw Pinyin such as `haode` stays in
+the highlighted first choice. Chinese mode also offers recognized English words:
+unambiguous English such as `design`, `layout` and `figma` leads the row, while
+spellings that are also valid Pinyin, such as `can`, keep Chinese first and offer
+English alongside it. Recognition uses the local system dictionary and 277 bundled
+common/design English hints. Non-Pinyin prefixes can offer up to two completions.
+Space accepts a highlighted English word with a trailing space; tapping accepts
+the word alone. Raw Pinyin such as `haode` stays in
 the inline composition and is omitted from the candidate row when Chinese
 candidates exist; Return can still accept the Latin spelling. If there are no
 Chinese choices, the spelling remains a fallback. Swipe the row for more
-candidates; its arrow buttons change pages. Shift changes capitalization without
+candidates horizontally. Tap the downward chevron or swipe down from the strip
+to expand a wrapping, scrollable candidate panel. The chevron has a 56-point-wide,
+full-strip touch target and points upward when expanded. Expansion uses a short slide and fade;
+Reduce Motion uses a fade only. Pulling never commits a word, and bottom-row
+controls remain available.
+Shift changes capitalization without
 changing languages. Return accepts unfinished Pinyin as Latin spelling; a second Return
 performs the editor's normal return action. Backspace edits the pending composition
-before deleting document text. The × candidate cancels composition.
+before deleting document text.
 
 English mode inserts letters directly into the field, with ordinary Space,
 Return and Delete behavior and no Chinese composition or candidate suggestions.
@@ -52,8 +541,8 @@ Switching modes preserves unfinished visible spelling and returns to the letter
 layout. Keystrokes queued behind a Pinyin edit stay in order across the switch.
 The typing mode does not change Seed's speech-language recognition.
 
-The optional mixed-typing experiment combines Rime candidates with local English
-word recognition and completions. Recognized English words, unconverted Latin
+The optional More English Suggestions experiment uses a broader English policy.
+Recognized English words, unconverted Latin
 spelling and capitalized words can lead the row; Space accepts that English word
 with a trailing space. Tapping the candidate accepts the word alone. Chinese
 phrases such as `haode` keep **好的** first without a redundant raw-spelling choice.
@@ -62,7 +551,7 @@ word and queued taps. Existing haptic settings survive the preference upgrade.
 
 Pending Pinyin appears as marked text in the host field using UITextDocumentProxy.
 Choosing a candidate replaces that spelling; Backspace updates the marked range.
-The × candidate removes the pending spelling. Changing the field/selection or
+Changing the field/selection or
 dismissing the keyboard abandons candidate state and preserves the visible spelling. Finish a typed
 composition before starting a voice hold. Typing does not need Full Access, a Seed
 key, a running host voice session, or a network connection; voice keeps its existing
@@ -90,6 +579,8 @@ Apple Developer team Q9MD524YL5. The app/keyboard require a provisioned App Grou
 ./build.sh
 xcrun devicectl device install app --device YOUR_UDID build/vvhisper.app
 ./test.sh
+# Coordinate taps against the installed extension; use a dedicated simulator.
+IOS_TEST_DESTINATION='platform=iOS Simulator,id=YOUR_SIMULATOR_UDID' ./test-touches.sh
 ```
 
 The build and test scripts fetch a pinned, SHA-256-verified Rime XCFramework into
@@ -657,3 +1148,77 @@ preference migration, persistence and exact session expiry boundaries. Native UI
 contact sheets were reviewed in light/dark appearances. Signed arm64 device builds
 passed. Live Spotlight comparison, physical session-expiry testing and installation
 of this update remain pending: CoreDevice reports the Duo unavailable.
+
+## Local clipboard history — 2026-11-20
+
+Shortcuts → Clipboard History shows up to five unique text clips, newest first.
+Repeated copies move an item to the top. Text is retained when the visible keyboard
+observes a new clipboard version, or after explicit Paste through vvhisper. The
+system may request paste permission. Copies made while vvhisper cannot observe the
+clipboard cannot all be recovered; this is not access to an OS history service.
+
+Each clip is bounded to 20,000 UTF-16 units. Original text and whitespace are kept
+for pasting; only menu previews are shortened. Selecting history validates the
+original field/cursor, leaves the system clipboard untouched and does not reorder
+items. Clear History clears only vvhisper's list, without rereading the same clip.
+Storage is local to the keyboard, protected while locked and excluded from backups.
+No clips are logged or sent to ASR/polishing. This applies to iPhone and iPad layouts
+and supersedes the earlier no-history decision.
+
+## Punctuation, emoji stability and dictation contrast — 2026-11-20
+
+The English and Chinese punctuation pages follow Apple's per-language key order.
+Chinese preserves ASCII symbols where Apple does, includes its six-key punctuation
+row, and retains visible 「」. Its face-mark key opens local text emoticons.
+
+Keyboard switching now tolerates a missing document identifier during teardown
+and late text callbacks, rather than trapping in Swift's UUID bridge. The shortcut
+and editing pills are raised three points. While dictating in light mode, resting
+key fills fade to 22% so the center-out white volume highlights are easier to see;
+icons and touch targets remain intact, and fills restore when dictation ends.
+
+Validation for this update: 250 simulator unit/integration tests passed. The signed
+Debug build was installed on the Duo without removing app data. Six consecutive
+local Emoji → ABC round trips passed on the device; no new vvhisper crash report
+was present afterward. Both native English punctuation pages and both native
+Chinese pages were captured as references. The installed English pages and raised
+pills were checked visually. Native UIKit contact sheets cover full/mini listening
+contrast and restoration. Installed Chinese-page and live speech-level checks
+remain pending. The separate simulator UI test could not select the extension
+reliably and did not complete; it is not counted as a pass.
+
+Listening sensitivity refinement (2026-11-20): use a gentler 0.65-power visual
+response instead of the square-root lift. Quiet/ordinary speech illuminates a
+narrower center region; loud speech can still reach full extent. Keep the approved
+light-mode opacity, noise gate, attack/release timing and ASR audio unchanged.
+The 17 focused meter, rendering and keyboard-lifecycle tests passed.
+
+Action keys (2026-11-20): named Return actions such as Send, Search, Go and Done
+use black fill with white text/icons in light appearance, reversed in dark
+appearance. Full and mini layouts share the style; ordinary newline Return keeps
+its normal fill. Voice-meter highlights cannot wash out the action key. Seventeen
+focused lifecycle, dictation-feedback and compact-keyboard tests passed.
+
+Candidate-strip refinement: hide the shortcut pill while candidates are visible
+and use the freed left space for suggestions. Restore shortcuts when candidates
+clear; keep the right gesture pill while the panel is collapsed. Fifteen focused
+candidate, pill/layout and keyboard-lifecycle tests passed.
+
+## Compact emoji panel and emoji candidates — 2026-11-20
+
+Hold Language for the system keyboard picker; a short tap still switches Chinese
+and English. The emoji panel has one compact row of navigation/category icons,
+including a keyboard-return icon and globe. Removing its category title and bottom
+action row gives the grid more height. Skin-tone choices are available by holding
+an emoji that supports them.
+
+English and Chinese names/keywords can suggest up to three emojis alongside words.
+Matching uses bundled Unicode CLDR 47 data locally. A word stays first, so Space
+does not automatically substitute emoji. Explicit selection replaces the current
+owned word or Pinyin composition. Matching never sends or saves typed queries.
+
+Validation: all 258 simulator tests passed, including bilingual emoji replacement,
+stale-field rejection, compact-panel navigation and language-hold tap suppression.
+The signed Debug build is installed on the Duo without removing app data. Native
+input-mode picker behavior on a physical hold remains pending a screen-control
+window; unit tests do not verify UIKit’s system picker.

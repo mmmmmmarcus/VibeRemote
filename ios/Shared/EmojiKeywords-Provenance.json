@@ -1,0 +1,22 @@
+{
+  "version": "CLDR 47.0.0",
+  "license": "Unicode-Emoji-LICENSE.txt",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/47.0.0/cldr-json/cldr-annotations-full/annotations/en/annotations.json",
+      "sha256": "2405d3f2e4c5812a4faf93d965630246269e0177ce907d863c7d6bb197e957c1"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/47.0.0/cldr-json/cldr-annotations-derived-full/annotationsDerived/en/annotations.json",
+      "sha256": "8ebc16e27adf6c555c9ce467335cee8fc9416e5d8646a91bd4eacbb450ebee22"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/47.0.0/cldr-json/cldr-annotations-full/annotations/zh/annotations.json",
+      "sha256": "c57fcb31e7f2ace00343b8578ae30a7856270bb23dc94e5ea02f3858ed875ef2"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/47.0.0/cldr-json/cldr-annotations-derived-full/annotationsDerived/zh/annotations.json",
+      "sha256": "1c3a4eb778737042aba1e14ff69a4264b22348981e51f0a34b98645d0b29ea1e"
+    }
+  ]
+}

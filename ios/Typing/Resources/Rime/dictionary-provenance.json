@@ -14,7 +14,27 @@
     "cn_dicts/ext.dict.yaml": {
       "sha256": "f713d82f5a3c38bf955fef631353c6bd08c3e1ae6674d7db0c4f286480d760a1",
       "entries": 339214
+    },
+    "cn_dicts/tencent.dict.yaml": {
+      "sha256": "af31db5df83239e50ee6da015ab5801953be544117fcf7419988ca315f55102b",
+      "entries": 981543
     }
   },
-  "entry_count": 891394
+  "entry_count": 1872937,
+  "local_tables": {
+    "cn_dicts/vvhisper_design.dict.yaml": {
+      "sha256": "d56b638f1f763e52d01184197996aa7ccf06ad2a72a93891cddd693d7d8adabe",
+      "entries": 101,
+      "origin": "Authored for vvhisper",
+      "license": "MIT"
+    }
+  },
+  "local_resources": {
+    "EnglishWords.txt": {
+      "sha256": "9e84de72aec1cdb0025006c11a7f9df7fac9094900de7e00a2f269971710e312",
+      "entries": 277,
+      "origin": "Authored for vvhisper",
+      "license": "MIT"
+    }
+  }
 }

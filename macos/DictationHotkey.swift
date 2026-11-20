@@ -1,12 +1,8 @@
 import AppKit
 import Carbon.HIToolbox
 
-/// Settings › Dictation › Alternative Dictation Hotkey (2026-11-11, user's request): one keyboard
-/// modifier that dictates the way a Siri hold does — hold to record, release to transcribe and type.
-/// The remote's microphone only streams while Siri is physically held, so the hotkey records the
-/// Mac's own microphone (`DictationController.Source.macMicrophone`) without changing the system
-/// input. Everything after recording (streaming, dictionary, refinement, the orange cursor) is the
-/// same path a Siri hold takes.
+/// One keyboard modifier for voice input. Mac input uses hold-to-talk; Soundcore supports
+/// both a short tap to latch listening and a longer hold that ends on release.
 enum DictationHotkey: String, CaseIterable, Sendable {
     case none, leftOption, rightOption, leftCommand, rightCommand, leftControl, rightControl
 
@@ -136,6 +132,49 @@ struct ComputerUseDoubleTap {
     }
 }
 
+/// Both gestures coexist without a mode switch. A second isolated press ends latched
+/// listening on release; turning that press into a shortcut leaves listening intact.
+struct SoundcoreHotkeyGesture {
+    enum Effect: Equatable { case none, begin, latch, stop, cancel }
+    static let tapDuration: TimeInterval = 0.22
+    private(set) var handsFree = false
+    private var downAt: TimeInterval?
+    private var stopOnRelease = false
+
+    mutating func reset() { self = Self() }
+
+    mutating func press(at time: TimeInterval) -> Effect {
+        guard downAt == nil else { return .none }
+        downAt = time
+        stopOnRelease = handsFree
+        return handsFree ? .none : .begin
+    }
+
+    mutating func release(at time: TimeInterval) -> Effect {
+        guard let start = downAt else { return .none }
+        downAt = nil
+        if stopOnRelease {
+            reset()
+            return .stop
+        }
+        if time >= start, time - start <= Self.tapDuration {
+            handsFree = true
+            return .latch
+        }
+        reset()
+        return .stop
+    }
+
+    mutating func interrupt() -> Effect {
+        let preserveListening = handsFree && stopOnRelease
+        downAt = nil
+        stopOnRelease = false
+        if preserveListening { return .none }
+        reset()
+        return .cancel
+    }
+}
+
 /// Watches the keyboard for the chosen hotkey and drives `DictationController`. Global monitors
 /// cover other apps (they need the Accessibility grant vvhisper already has); local monitors
 /// cover vvhisper's own windows. Events vvhisper posts itself (a Siri mapping that holds Right
@@ -146,6 +185,7 @@ final class DictationHotkeyMonitor {
 
     var onComputerUseRequested: (() -> Void)?
     private var taps = ComputerUseDoubleTap()
+    private var soundcoreGesture = SoundcoreHotkeyGesture()
     private var lastHotkey: DictationHotkey = .none
     private var gate = DictationHotkeyGate()
     private var monitors: [Any] = []
@@ -162,11 +202,60 @@ final class DictationHotkeyMonitor {
         }) { monitors.append(local) }
     }
 
+    func resetSoundcoreGesture() { soundcoreGesture.reset() }
+
+    private func handleSoundcore(_ effect: DictationHotkeyGate.Effect, at time: TimeInterval) {
+        let microphone = SoundcoreManager.shared
+        let action: SoundcoreHotkeyGesture.Effect
+        switch effect {
+        case .none: return
+        case .begin: action = soundcoreGesture.press(at: time)
+        case .end: action = soundcoreGesture.release(at: time)
+        case .cancel: action = soundcoreGesture.interrupt()
+        }
+        switch action {
+        case .none: break
+        case .begin:
+            if !microphone.resumeDictationKey() {
+                // Ignore presses during the final packet drain or another input's session.
+                guard DictationController.shared.recordingSource == nil else {
+                    soundcoreGesture.reset(); return
+                }
+                DictationController.shared.begin(source: .soundcore)
+            }
+            guard DictationController.shared.recordingSource == .soundcore else {
+                soundcoreGesture.reset(); return
+            }
+            microphone.updateDictationListening(handsFree: false)
+        case .latch:
+            guard DictationController.shared.recordingSource == .soundcore else {
+                soundcoreGesture.reset(); return
+            }
+            microphone.updateDictationListening(handsFree: true)
+        case .stop: microphone.releaseDictationKey()
+        case .cancel: microphone.endDictation(cancel: true)
+        }
+    }
+
     private func handle(_ event: NSEvent) {
         if let source = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID),
            source == Int64(ProcessInfo.processInfo.processIdentifier) { return }
         let hotkey = DictationHotkey.load()
-        if hotkey != lastHotkey { taps.reset(); lastHotkey = hotkey }
+        if hotkey != lastHotkey {
+            if DictationController.shared.recordingSource == .soundcore {
+                SoundcoreManager.shared.endDictation(cancel: true)
+            }
+            gate = DictationHotkeyGate()
+            soundcoreGesture.reset()
+            taps.reset()
+            lastHotkey = hotkey
+        }
+        if event.type == .keyDown, Int(event.keyCode) == kVK_Escape,
+           DictationController.shared.recordingSource == .soundcore,
+           (event.cgEvent?.flags.rawValue ?? 0) & DictationHotkeyGate.otherModifiers == 0 {
+            SoundcoreManager.shared.endDictation(cancel: true)
+            return
+        }
         let effect: DictationHotkeyGate.Effect
         switch event.type {
         case .flagsChanged:
@@ -178,25 +267,28 @@ final class DictationHotkeyMonitor {
             return
         }
         if event.type == .keyDown || (event.type == .flagsChanged && Int(event.keyCode) != hotkey.keyCode) { taps.reset() }
+        if SoundcoreManager.shared.useForHotkey || DictationController.shared.recordingSource == .soundcore {
+            // Soundcore taps belong to voice input, never the Computer Use double-tap.
+            taps.reset()
+            handleSoundcore(effect, at: event.timestamp)
+            return
+        }
         switch effect {
         case .none: break
         case .begin:
             _ = taps.update(down: true, now: event.timestamp)
             rmDebug("🗣 Dictation hotkey \(hotkey.title) down")
-            DictationController.shared.begin(source: SoundcoreManager.shared.useForHotkey ? .soundcore : .macMicrophone)
+            DictationController.shared.begin(source: .macMicrophone)
         case .end:
             let open = taps.update(down: false, now: event.timestamp)
-            if DictationController.shared.recordingSource == .soundcore {
-                SoundcoreManager.shared.endDictation(cancel: taps.shortRelease)
-            } else if DictationController.shared.recordingSource == .macMicrophone {
+            if DictationController.shared.recordingSource == .macMicrophone {
                 if taps.shortRelease { DictationController.shared.cancel() }
                 else { DictationController.shared.end() }
             }
             if open { onComputerUseRequested?() }
         case .cancel:
             taps.reset()
-            if DictationController.shared.recordingSource == .soundcore { SoundcoreManager.shared.endDictation(cancel: true) }
-            else if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.cancel() }
+            if DictationController.shared.recordingSource == .macMicrophone { DictationController.shared.cancel() }
         }
     }
 }

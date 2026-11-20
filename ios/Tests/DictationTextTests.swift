@@ -40,6 +40,100 @@ final class DictationTextTests: XCTestCase {
         XCTAssertEqual(proxy.backspaces, 0)
     }
 
+    func testDelayedMarkedWritesDoNotCancelAndFinalUnmarksAfterAcknowledgement() {
+        for limit: Int? in [nil, 8] {
+            let proxy = TextViewProxy("prefix ", selection: .init(location: 7, length: 0))
+            proxy.contextLimit = limit; proxy.defersMarkedEdits = true; proxy.defersTextEdits = true; proxy.nilAtEmptyContext = true
+            let session = DictationTextSession(id: UUID(), proxy: proxy)
+            show("rough speech", session: session, proxy: proxy)
+            XCTAssertTrue(session.matches(proxy)) // The write is still in flight.
+            XCTAssertEqual(proxy.editor.text, "prefix ")
+            proxy.flushTextEdits()
+            XCTAssertTrue(session.matches(proxy)) // The acknowledgement is not a user edit.
+            XCTAssertNotNil(proxy.editor.markedTextRange)
+            proxy.returnKeyType = .send
+        session.finishRecording(submitAfterPolish: true)
+            let final = reply(session, "Polished speech.", step: 3, final: true)
+            XCTAssertEqual(session.receive(final, in: proxy, now: now), .partial)
+            XCTAssertEqual(session.receive(final, in: proxy, now: now), .partial)
+            XCTAssertEqual(proxy.unmarks, 1)
+            XCTAssertEqual(proxy.editor.text, "prefix rough speech")
+            proxy.flushTextEdits()
+            XCTAssertEqual(session.receive(final, in: proxy, now: now), .finished)
+            XCTAssertEqual(proxy.unmarks, 1)
+            proxy.flushTextEdits()
+            XCTAssertNil(proxy.editor.markedTextRange)
+            XCTAssertEqual(proxy.editor.text, "prefix Polished speech.\n")
+            XCTAssertEqual(session.receive(final, in: proxy, now: now), .ignored)
+        }
+    }
+
+    func testDelayedDraftCancellationUnmarksWithoutReplacingAnUnrelatedField() {
+        for changedField in [false, true] {
+            let proxy = TextViewProxy("", selection: .init(location: 0, length: 0))
+            proxy.defersMarkedEdits = true
+            let session = DictationTextSession(id: UUID(), proxy: proxy)
+            show("visible draft", session: session, proxy: proxy)
+            proxy.flushTextEdits()
+            if changedField { proxy.documentIdentifier = UUID() }
+            session.cancel(in: proxy)
+            proxy.flushTextEdits()
+            XCTAssertEqual(proxy.editor.text, "visible draft")
+            XCTAssertEqual(proxy.unmarks, changedField ? 0 : 1)
+            if !changedField { XCTAssertNil(proxy.editor.markedTextRange) }
+            XCTAssertEqual(session.receive(reply(session, "late", step: 3, final: true), in: proxy, now: now), .ignored)
+        }
+    }
+
+    func testRemoteProxyExcludingMarkedTextCommitsAndClearsUnderline() async {
+        let proxy = TextViewProxy("prefix  suffix", selection: .init(location: 7, length: 0))
+        proxy.excludesMarkedContext = true
+        let session = DictationTextSession(id: UUID(), proxy: proxy)
+        show("rough speech", session: session, proxy: proxy)
+        XCTAssertEqual(proxy.documentContextBeforeInput, "prefix ")
+        XCTAssertTrue(session.matches(proxy))
+        XCTAssertNotNil(proxy.editor.markedTextRange)
+        await Task.yield()
+        session.finishRecording()
+        let final = reply(session, "Polished speech.", step: 3, final: true)
+        XCTAssertEqual(session.receive(final, in: proxy, now: now), .finished)
+        XCTAssertEqual(proxy.editor.text, "prefix Polished speech. suffix")
+        XCTAssertNil(proxy.editor.markedTextRange)
+    }
+
+    func testInitiallyEmptyRemoteFieldKeepsDictationWithNilMarkedContext() async {
+        for (rough, final) in [("rough speech", "Polished speech."), ("我知道了", "我知道了。"), ("first\nsecond", "First.\nSecond.")] {
+            let proxy = TextViewProxy("", selection: .init(location: 0, length: 0))
+            proxy.excludesMarkedContext = true; proxy.nilAtEmptyContext = true
+            let session = DictationTextSession(id: UUID(), proxy: proxy)
+            show(rough, session: session, proxy: proxy)
+            XCTAssertTrue(proxy.hasText)
+            XCTAssertNil(proxy.documentContextBeforeInput)
+            XCTAssertNil(proxy.documentContextAfterInput)
+            XCTAssertTrue(session.matches(proxy))
+            await Task.yield()
+            session.finishRecording()
+            XCTAssertEqual(session.receive(reply(session, final, step: 3, final: true), in: proxy, now: now), .finished)
+            XCTAssertEqual(proxy.editor.text, final)
+            XCTAssertNil(proxy.editor.markedTextRange)
+        }
+    }
+
+    func testEmptyMarkedContextStillRejectsOtherFieldsAndHiddenNonemptyContext() {
+        for wasEmpty in [false, true] {
+            let prefix = wasEmpty ? "" : "prefix "
+            let proxy = TextViewProxy(prefix, selection: .init(location: prefix.count, length: 0))
+            proxy.excludesMarkedContext = true; proxy.nilAtEmptyContext = true
+            let session = DictationTextSession(id: UUID(), proxy: proxy)
+            show("draft", session: session, proxy: proxy)
+            if wasEmpty { proxy.documentIdentifier = UUID() }
+            else { proxy.hidesContext = true }
+            XCTAssertFalse(session.matches(proxy))
+            XCTAssertEqual(session.receive(reply(session, "must not replace", step: 3, final: true), in: proxy, now: now), .destinationChanged)
+            XCTAssertEqual(proxy.editor.text, prefix + "draft")
+        }
+    }
+
     func testChineseEmojiAndMultilineFinalReplaceASelectionUsingUTF16() {
         let proxy = TextViewProxy("开头旧文字结尾", selection: NSRange(location: 2, length: 3))
         let session = DictationTextSession(id: UUID(), proxy: proxy)
@@ -72,6 +166,23 @@ final class DictationTextTests: XCTestCase {
         XCTAssertEqual(proxy.editor.text, "hello world")
         XCTAssertEqual(session.receive(reply(session, "replacement", step: 3, final: true), in: proxy, now: now), .ignored)
         XCTAssertEqual(proxy.editor.text, "hello world")
+    }
+
+    func testDeletionWhilePolishingRejectsLateResultAndKeepsEdit() {
+        let proxy = TextViewProxy("", selection: .init(location: 0, length: 0))
+        let session = DictationTextSession(id: UUID(), proxy: proxy)
+        show("hello", session: session, proxy: proxy)
+        session.finishRecording()
+        var polishing = reply(session, "hello", step: 3)
+        polishing.polishing = true
+        _ = session.receive(polishing, in: proxy, now: now)
+        session.cancel(in: proxy)
+        XCTAssertNil(proxy.editor.markedTextRange)
+        proxy.deleteBackward()
+        let edited = proxy.editor.text
+        XCTAssertEqual(session.receive(reply(session, "Replacement.", step: 4, final: true), in: proxy, now: now), .ignored)
+        XCTAssertEqual(proxy.editor.text, edited)
+        XCTAssertEqual(edited, "hell")
     }
 
     func testCursorSelectionFieldAndExternalEditsRejectLateReplacement() {
@@ -142,11 +253,13 @@ final class DictationTextTests: XCTestCase {
         let proxy = TextViewProxy("prefix ", selection: NSRange(location: 7, length: 0))
         let session = DictationTextSession(id: UUID(), proxy: proxy)
         show("rough speech", session: session, proxy: proxy)
+        proxy.returnKeyType = .send
         session.finishRecording(submitAfterPolish: true)
         session.finishRecording() // A later release cannot erase the gesture's intent.
         XCTAssertEqual(proxy.editor.text, "prefix rough speech")
         var returns = 0
         proxy.onInsert = { text in
+            if text == "Polished speech." { return }
             XCTAssertEqual(text, "\n")
             XCTAssertEqual(proxy.editor.text, "prefix Polished speech.")
             XCTAssertNil(proxy.editor.markedTextRange)
@@ -164,7 +277,8 @@ final class DictationTextTests: XCTestCase {
         for mode in 0..<6 {
             let proxy = TextViewProxy("existing draft", selection: NSRange(location: 14, length: 0))
             let session = DictationTextSession(id: UUID(), proxy: proxy)
-            session.finishRecording(submitAfterPolish: true)
+            proxy.returnKeyType = .send
+        session.finishRecording(submitAfterPolish: true)
             var response = reply(session, "final", step: 1, final: true)
             switch mode {
             case 0: response.text = ""
@@ -174,7 +288,7 @@ final class DictationTextTests: XCTestCase {
             case 4: response.updatedAt = now.addingTimeInterval(-16)
             default: response.id = UUID()
             }
-            proxy.onInsert = { _ in XCTFail("No Return without a valid nonempty final") }
+            proxy.onInsert = { text in XCTAssertNotEqual(text, "\n", "No Return without a valid nonempty final") }
             _ = session.receive(response, in: proxy, now: now)
             XCTAssertFalse(proxy.editor.text.contains("\n"))
         }
@@ -183,9 +297,12 @@ final class DictationTextTests: XCTestCase {
     func testHostChangingFieldsWhileAcceptingFinalCannotReceivePendingReturn() {
         let proxy = TextViewProxy("", selection: NSRange(location: 0, length: 0))
         let session = DictationTextSession(id: UUID(), proxy: proxy)
+        proxy.returnKeyType = .send
         session.finishRecording(submitAfterPolish: true)
-        proxy.onWrite = { proxy.documentIdentifier = UUID() }
-        proxy.onInsert = { _ in XCTFail("Do not send in the host's newly focused field") }
+        proxy.onInsert = { text in
+            XCTAssertNotEqual(text, "\n", "Do not send in the host's newly focused field")
+            proxy.documentIdentifier = UUID()
+        }
         _ = session.receive(reply(session, "final", step: 1, final: true), in: proxy, now: now)
         XCTAssertEqual(proxy.editor.text, "final")
     }
@@ -196,29 +313,46 @@ final class DictationTextTests: XCTestCase {
 @MainActor
 final class TextViewProxy: NSObject, UITextDocumentProxy {
     var keyboardAppearance: UIKeyboardAppearance = .default
+    var textContentType: UITextContentType!
+    var keyboardType: UIKeyboardType = .default
+    var returnKeyType: UIReturnKeyType = .default
     let editor = UITextView()
     var documentIdentifier = UUID()
     var contextLimit: Int?
     var hidesContext = false
+    var nilAtEmptyContext = false
     var paragraphContextOnly = false
+    var defersCursorMoves = false
+    var defersTextEdits = false
+    var defersMarkedEdits = false
+    var excludesMarkedContext = false
+    private var pendingTextEdits: [() -> Void] = []
+    private(set) var pendingCursorMoves: [Int] = []
     var onWrite: (() -> Void)?
     var onInsert: ((String) -> Void)?
     private(set) var writes = 0
     private(set) var backspaces = 0
+    private(set) var unmarks = 0
     init(_ text: String, selection: NSRange) {
         super.init()
         editor.text = text; editor.selectedRange = selection
     }
     var documentContextBeforeInput: String? {
         if hidesContext { return nil }
-        var text = (editor.text as NSString).substring(to: editor.selectedRange.location)
+        let position = excludesMarkedContext ? editor.markedTextRange?.start : nil
+        let offset = position.map { editor.offset(from: editor.beginningOfDocument, to: $0) } ?? editor.selectedRange.location
+        var text = (editor.text as NSString).substring(to: offset)
         if paragraphContextOnly { text = text.components(separatedBy: "\n").last ?? "" }
+        if nilAtEmptyContext && text.isEmpty { return nil }
         return contextLimit.map { String(text.suffix($0)) } ?? text
     }
     var documentContextAfterInput: String? {
         if hidesContext { return nil }
-        var text = (editor.text as NSString).substring(from: NSMaxRange(editor.selectedRange))
+        let position = excludesMarkedContext ? editor.markedTextRange?.end : nil
+        let offset = position.map { editor.offset(from: editor.beginningOfDocument, to: $0) } ?? NSMaxRange(editor.selectedRange)
+        var text = (editor.text as NSString).substring(from: offset)
         if paragraphContextOnly { text = text.components(separatedBy: "\n").first ?? "" }
+        if nilAtEmptyContext && text.isEmpty { return nil }
         return contextLimit.map { String(text.prefix($0)) } ?? text
     }
     var selectedText: String? {
@@ -226,13 +360,35 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     }
     var documentInputMode: UITextInputMode? { nil }
     var hasText: Bool { editor.hasText }
-    func insertText(_ text: String) { onInsert?(text); editor.insertText(text) }
-    func deleteBackward() { backspaces += 1; editor.deleteBackward() }
+    func insertText(_ text: String) {
+        onInsert?(text)
+        if defersTextEdits { pendingTextEdits.append { [weak self] in self?.editor.insertText(text) } }
+        else { editor.insertText(text) }
+    }
+    func deleteBackward() {
+        backspaces += 1
+        if defersTextEdits { pendingTextEdits.append { [weak self] in self?.editor.deleteBackward() } }
+        else { editor.deleteBackward() }
+    }
+    func flushTextEdits() { let edits = pendingTextEdits; pendingTextEdits = []; edits.forEach { $0() } }
     func adjustTextPosition(byCharacterOffset offset: Int) {
+        if defersCursorMoves { pendingCursorMoves.append(offset); return }
         editor.selectedRange = NSRange(location: max(0, min(editor.text.utf16.count, editor.selectedRange.location + offset)), length: 0)
     }
-    func setMarkedText(_ markedText: String, selectedRange: NSRange) {
-        writes += 1; editor.setMarkedText(markedText, selectedRange: selectedRange); onWrite?()
+    func flushCursorMoves() {
+        let offsets = pendingCursorMoves; pendingCursorMoves = []
+        for offset in offsets {
+            editor.selectedRange = NSRange(location: max(0, min(editor.text.utf16.count, editor.selectedRange.location + offset)), length: 0)
+        }
     }
-    func unmarkText() { editor.unmarkText(); onWrite?() }
+    func setMarkedText(_ markedText: String, selectedRange: NSRange) {
+        writes += 1
+        if defersMarkedEdits { pendingTextEdits.append { [weak self] in self?.editor.setMarkedText(markedText, selectedRange: selectedRange); self?.onWrite?() } }
+        else { editor.setMarkedText(markedText, selectedRange: selectedRange); onWrite?() }
+    }
+    func unmarkText() {
+        unmarks += 1
+        if defersMarkedEdits { pendingTextEdits.append { [weak self] in self?.editor.unmarkText(); self?.onWrite?() } }
+        else { editor.unmarkText(); onWrite?() }
+    }
 }

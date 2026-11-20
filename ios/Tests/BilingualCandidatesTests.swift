@@ -4,6 +4,64 @@ import UIKit
 
 @MainActor
 final class BilingualCandidatesTests: XCTestCase {
+    func testConservativeModeOffersKnownEnglishEvenWithoutSystemDictionary() {
+        let checker = ControlledEnglishChecker(); checker.dictionaryUnavailable = true
+        let provider = BilingualCandidates(checker: checker)
+        for word in ["design", "layout", "figma", "hello", "prototype", "component"] {
+            let choices = provider.choices(for: .init(input: word, candidates: ["中文"]),
+                                           letterCase: .lowercase, policy: .conservative)
+            XCTAssertEqual(choices.first?.text, word)
+            guard case .english(let spaced) = choices.first?.spaceAction else { return XCTFail(word) }
+            XCTAssertEqual(spaced, word + " ")
+            guard case .english(let tapped) = choices.first?.action else { return XCTFail(word) }
+            XCTAssertEqual(tapped, word)
+            XCTAssertTrue(choices.contains { $0.text == "中文" })
+        }
+    }
+
+    func testConservativeModeKeepsAmbiguousPinyinFirstButOffersEnglish() {
+        let checker = ControlledEnglishChecker(); checker.words = ["can", "name"]
+        let provider = BilingualCandidates(checker: checker)
+        for word in ["can", "name"] {
+            let choices = provider.choices(for: .init(input: word, candidates: ["中文", "候选"]),
+                                           letterCase: .initialCapital, policy: .conservative)
+            XCTAssertEqual(choices.map(\.text), ["中文", word.capitalized, "候选"])
+            guard case .choose(0) = choices.first?.spaceAction else { return XCTFail("Keep Chinese first") }
+            guard case .choose(1) = choices.last?.action else { return XCTFail("Preserve Rime indices") }
+        }
+    }
+
+    func testConservativeModeDoesNotPromoteRawPinyinOrCapitalization() {
+        let checker = ControlledEnglishChecker(); checker.dictionaryUnavailable = true
+        let provider = BilingualCandidates(checker: checker)
+        for word in ["haode", "wozhidaole", "zoucha", "huanyuan"] {
+            let choices = provider.choices(for: .init(input: word, commitPreview: word, candidates: ["中文"]),
+                                           letterCase: .uppercase, policy: .conservative)
+            XCTAssertEqual(choices.map(\.text), ["中文"])
+        }
+    }
+
+    func testConservativeCompletionsAreBoundedAndPreservePagedChinese() {
+        let checker = ControlledEnglishChecker()
+        checker.suggestions = ["hello", "Hello", "help", "helicopter", "unrelated"]
+        let choices = BilingualCandidates(checker: checker).choices(
+            for: .init(input: "hel", candidates: ["和", "何"]), letterCase: .initialCapital, policy: .conservative)
+        XCTAssertEqual(choices.map(\.text), ["和", "Hello", "Help", "何"])
+        let paged = BilingualCandidates(checker: checker).choices(
+            for: .init(input: "design", candidates: ["第二页"], page: 1), letterCase: .lowercase, policy: .conservative)
+        XCTAssertEqual(paged.first?.text, "第二页")
+        XCTAssertEqual(paged.filter { $0.text == "design" }.count, 1)
+    }
+
+    func testPinyinAmbiguityUsesWholeSyllablesNotInitials() {
+        for word in ["haode", "wozhidaole", "can", "name", "zoucha", "huanyuan"] {
+            XCTAssertTrue(PinyinSpelling.isComplete(word), word)
+        }
+        for word in ["design", "layout", "figma", "hello", "prototype", "component", "wzdl", ""] {
+            XCTAssertFalse(PinyinSpelling.isComplete(word), word)
+        }
+    }
+
     func testRecognizedEnglishAndChineseAppearTogetherWithMatchingSpaceChoice() {
         let checker = ControlledEnglishChecker()
         checker.words = ["can"]

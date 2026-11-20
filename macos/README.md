@@ -23,6 +23,15 @@ currently applies only to Siri Remote dictation holds; the keyboard path uses th
 and explicit submission. The first-run guide still emphasizes remote setup and is part
 of the planned product-design work.
 
+## Chinese and English dictation
+
+Seed ASR uses its default Chinese-English model for live output, final refinement and
+fallback transcription. Speak Mandarin, English, or mix both in one sentence without
+switching languages. Settings shows **Chinese + English** for Seed; other services retain
+their own language picker. This applies to Mac, Siri Remote and Soundcore input, including
+Soundcore's hold and hands-free gestures. Words stay in their spoken language rather than
+being translated. Recognition accuracy still needs checking with the user's speech.
+
 ## Settings and diagnostics
 
 Dictionary has its own Settings tab and uses the same saved vocabulary across voice inputs.
@@ -33,6 +42,40 @@ stay open when Settings closes. It shares the app's existing hardware connection
 Build targets and source assets now use vvhisper. A small set of old identifiers is kept
 for installed permissions, saved data and driver compatibility; see
 [Naming compatibility](Design/NamingCompatibility.md).
+
+Each Siri Remote model and Soundcore Work has a **Release Buffer** toggle and **Buffer Time**
+slider in its device tab: 0.1–2.0 seconds, in 0.1-second steps, defaulting to enabled at 1 second.
+Soundcore continues recording until this time elapses after key release; pressing again
+within the buffer continues the sentence. Cancel and disconnect stop immediately. Siri
+Remote retains the available trailing audio; firmware determines how long its microphone
+continues transmitting. The black-glass remote's former fixed 0.3-second tail now uses this
+setting. Audio already in transit still drains when the optional buffer is off.
+
+Mac microphones are captured through AUHAL at the device's native sample rate, then
+converted to 16 kHz mono on a serial processing queue. AUHAL does not resample input;
+requesting 16 kHz directly from a 48 kHz MacBook microphone can deliver no audio.
+The explicit `--verify-mac-microphone` launch flag checks the selected input with two
+three-second captures in memory, logging sample counts and levels only (no ASR or files).
+
+Each Siri Remote model and Soundcore Work has an **Input Gain** slider in its device
+settings: 0 to +24 dB, in 1 dB steps, defaulting to 0 dB. The value is captured when a
+recording starts and amplifies decoded audio before vvhisper's live transcription,
+final/refinement transcription, and level meter. Samples are limited to the valid PCM
+range. It does not change system volume or the remote's third-party held-key mappings.
+
+The menu-bar menu's **Microphone** submenu switches the same voice-input preference as
+Settings → Dictation. It lists System Input, currently available Mac microphones, and
+Soundcore Work only while connected and ready. Saved disconnected devices stay out of
+the menu. Switching inputs cancels an active keyboard-triggered recording; Siri's own
+microphone remains tied to its physical button. The Mac's system input is not changed.
+
+Soundcore supports both gestures on the same dictation key: hold to talk and release to
+finish, or tap briefly (up to 0.22 seconds) to keep listening hands-free, then tap again to
+finish. Both use the device's release buffer. The shared dictation cursor shows microphone
+state and audio level; Escape cancels immediately. Soundcore taps no longer trigger
+Computer Use double-tap; Mac microphone
+hotkeys keep their existing behavior. Disconnect, cancellation and the existing 115-second
+capture limit clear hands-free state; reconnection never resumes listening automatically.
 
 ## Optional Siri Remote integration
 
@@ -150,6 +193,10 @@ With Seed ASR and **Streaming Output** on, the words stream into the focused edi
 speak. Text already typed is never deleted while you hold Siri; when you let go, the whole clip is recognized once more by the accurate recognizer and
 the text is refined in place. That accurate pass is uploaded while you speak, so it usually lands within a second of letting go, and it places periods by meaning, not by how long you paused to think. Without it the clip is transcribed when you let go. Text is typed as keystrokes, never through the clipboard, and
 corrections only ever delete what the current hold typed.
+
+Live draft words have a temporary orange underline while awaiting refinement. It clears
+when the final text is ready or dictation stops. This is visual feedback, not saved text
+formatting; it appears where the editor exposes usable accessibility text geometry.
 
 **Dictionary.** Settings › Dictionary lists names and terms dictation tends to get
 wrong. Seed ASR listens for them when it refines the text after you let go, OpenAI is given them
@@ -516,3 +563,18 @@ Double-press Siri on the remote, or double-press your selected dictation
 Hotkey, to open the Computer Use bar above the Dock. Hold either trigger for ordinary
 dictation. Use two quick taps (each under 220 ms, with the second release within 450 ms
 of the first). Keyboard shortcuts using the modifier do not count as double presses.
+
+**Polish Dictation** adds a text-only Seed 2.0 Mini editing pass after recognition to correct
+grammar and spelling and improve sentence flow while preserving meaning and language.
+It is enabled by default; add its API key in Settings > Dictation. The Volcengine Ark key is
+stored separately from ASR and Computer Use. The fixed model is `doubao-seed-2-0-mini-260428`
+with thinking disabled. The request has no tools and receives only the transcript.
+Draft underlines remain until this pass finishes. Missing credentials, request failures,
+empty or truncated responses keep the recognized transcript and report polishing skipped
+or unavailable. Meaning preservation is a model instruction, not a semantic guarantee.
+
+**Sentence Punctuation** in Dictation settings controls ending punctuation for one short
+sentence, independently of polishing. It defaults on. Turn it off for casual messages
+such as `Thanks` instead of `Thanks.`; commas remain. Longer and multi-sentence dictation
+keep their punctuation. Short means up to 120 Unicode scalars and 20 words (40 scalars
+when Chinese characters are present). The rule is applied after polishing.

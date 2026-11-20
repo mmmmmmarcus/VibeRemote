@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The keyboard dictation hotkey; idle until one is chosen in Settings › Dictation.
         DictationHotkeyMonitor.shared.start()
         SoundcoreManager.shared.start()
+        if CommandLine.arguments.contains("--verify-mac-microphone") {
+            Task { await DictationRecorder.verifySelectedMicrophone() }
+        }
         
         // Create menu bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -134,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.disconnectIdleRemote(deviceKey: deviceKey)
         }
         remoteInputHandler?.onDictationBegin = { generation in
-            DictationController.shared.begin(followsLaterSessions: generation == .glassTouchSurface)
+            DictationController.shared.begin(followsLaterSessions: generation == .glassTouchSurface, remoteGeneration: generation)
         }
         remoteInputHandler?.onDictationEnd = {
             if DictationController.shared.recordingSource == .remote { DictationController.shared.end() }

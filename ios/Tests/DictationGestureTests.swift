@@ -16,6 +16,7 @@ final class DictationGestureTests: XCTestCase {
         KeyboardLanguage.english.save()
         let proxy = TextViewProxy("keep ", selection: NSRange(location: 5, length: 0))
         let keyboard = KeyboardViewController()
+        proxy.returnKeyType = .send
         keyboard.testingDocumentProxy = proxy; keyboard.testingVoiceAvailable = true
         keyboard.testingLandscape = landscape
         keyboard.loadViewIfNeeded()
@@ -43,6 +44,24 @@ final class DictationGestureTests: XCTestCase {
         keyboard.receiveVoiceReply(reply(id, "spoken text", step: 1))
         keyboard.receiveVoiceReply(reply(id, "spoken text continues", step: 2))
     }
+
+    func testTypingPressCancelsPolishBeforeReleaseAndKeepsEdit() throws {
+        try withKeyboard { keyboard, proxy in
+            let (source, id) = try start(keyboard)
+            preview(id, keyboard: keyboard)
+            source.releasePress()
+            XCTAssertEqual(keyboard.testingVoiceCommands.last?.phase, .finish)
+            let letter = try key("b", in: keyboard)
+            XCTAssertTrue(letter.press(at: 1, point: CGPoint(x: letter.bounds.midX, y: letter.bounds.midY)))
+            XCTAssertEqual(keyboard.testingVoiceCommands.last?.phase, .cancel)
+            XCTAssertNil(proxy.editor.markedTextRange)
+            let visible = proxy.editor.text
+            XCTAssertFalse(keyboard.receiveVoiceReply(reply(id, "Late replacement.", step: 3, final: true)))
+            XCTAssertEqual(proxy.editor.text, visible)
+            letter.releasePress()
+            XCTAssertEqual(proxy.editor.text, visible! + "b")
+        }
+    }
     private func slide(_ source: KeyControl, into target: KeyControl) {
         let point = source.convert(CGPoint(x: target.bounds.midX, y: target.bounds.midY), from: target)
         XCTAssertTrue(source.movePress(to: point, at: 0.5))
@@ -56,7 +75,7 @@ final class DictationGestureTests: XCTestCase {
                     for control in controls {
                         let letter = page == 0 && control.value.count == 1 && control.value.first?.isASCII == true && control.value.first?.isLetter == true
                         let symbol = page > 0 && !KeyboardSymbols.alternatives(for: control.value).isEmpty
-                        XCTAssertEqual(control.onHold != nil, letter || symbol, control.value)
+                        XCTAssertEqual(control.onHold != nil, letter || symbol || ["space", "language"].contains(control.value), control.value)
                         XCTAssertNotNil(control.onGapHold, control.value)
                         XCTAssertNotNil(control.onHoldMove, control.value)
                     }
@@ -68,7 +87,7 @@ final class DictationGestureTests: XCTestCase {
     }
 
     func testHoldingFunctionKeysKeepsTheirNormalSingleTapBehavior() throws {
-        for value in ["shift", "space", "return", "language", "123"] {
+        for value in ["shift", "return", "123"] {
             try withKeyboard { keyboard, proxy in
                 let function = try key(value, in: keyboard)
                 function.press(at: 0, point: .zero); function.advancePress(to: 1)
@@ -76,13 +95,24 @@ final class DictationGestureTests: XCTestCase {
                 function.releasePress()
                 XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
                 switch value {
-                case "space": XCTAssertEqual(proxy.editor.text, "keep  ")
                 case "return": XCTAssertEqual(proxy.editor.text, "keep \n")
                 case "shift": XCTAssertEqual(try key("a", in: keyboard).label.text, "A")
-                case "language": XCTAssertEqual(try key("language", in: keyboard).label.text, "中")
                 default: XCTAssertNotNil(try key("1", in: keyboard))
                 }
             }
+        }
+    }
+
+    func testLanguageHoldConsumesTapWithoutStartingDictation() throws {
+        try withKeyboard { keyboard, _ in
+            let language = try key("language", in: keyboard)
+            let original = language.accessibilityLabel
+            XCTAssertNotNil(language.onSystemKeyboard)
+            language.press(at: 0, point: .zero); language.advancePress(to: 1); language.releasePress()
+            XCTAssertEqual(language.accessibilityLabel, original)
+            XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
+            language.press(at: 2, point: .zero); language.releasePress()
+            XCTAssertNotEqual(try key("language", in: keyboard).accessibilityLabel, original)
         }
     }
 
@@ -231,6 +261,71 @@ final class DictationGestureTests: XCTestCase {
         }
     }
 
+    func testLanguageHoverTranslatesOnlyOnReleaseAcrossFullLayouts() throws {
+        let savedMode = UserDefaults.standard.object(forKey: KeyboardLayoutMode.preferenceKey)
+        defer { if let savedMode { UserDefaults.standard.set(savedMode, forKey: KeyboardLayoutMode.preferenceKey) }
+                else { UserDefaults.standard.removeObject(forKey: KeyboardLayoutMode.preferenceKey) } }
+        for mini in [false] {
+            for (width, landscape): (CGFloat, Bool) in [(375, false), (466, false), (655, false), (529, true), (802, true)] {
+                KeyboardLayoutMode.full.save()
+                try withKeyboard(width: width, landscape: landscape) { keyboard, proxy in
+                    if mini {
+                        keyboard.setMiniMode(true)
+                        keyboard.view.frame.size.height = KeyboardMetrics(width: width, landscape: landscape, mini: true).contentHeight
+                        keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
+                    }
+                    let source = try key(mini ? "dictate" : "a", in: keyboard)
+                    XCTAssertTrue(source.press(at: 0, point: CGPoint(x: source.bounds.midX, y: source.bounds.midY)))
+                    source.advancePress(to: 0.5)
+                    let id = try XCTUnwrap(keyboard.testingVoiceCommands.last?.id)
+                    preview(id, keyboard: keyboard)
+                    let language = try key("language", in: keyboard)
+                    let originalLanguage = language.accessibilityLabel
+                    let taps = keyboard.testingTapFeedbackCount
+                    slide(source, into: language); slide(source, into: language)
+                    XCTAssertEqual(keyboard.testingTapFeedbackCount, taps + 1)
+                    XCTAssertEqual(language.dictationFeedback, .translate)
+                    XCTAssertEqual(language.backgroundColor, .systemIndigo)
+                    XCTAssertEqual(keyboard.testingVoiceCommands.map(\.phase), [.recording])
+                    XCTAssertNil(keyboard.testingVoiceCommands.last?.translate)
+                    source.releasePress()
+                    XCTAssertEqual(keyboard.testingVoiceCommands.map(\.phase), [.recording, .finish])
+                    XCTAssertEqual(keyboard.testingVoiceCommands.last?.translate, true)
+                    XCTAssertNil(language.dictationFeedback)
+                    XCTAssertEqual(language.accessibilityLabel, originalLanguage)
+                    keyboard.receiveVoiceReply(reply(id, "翻译后的文字。", step: 3, final: true))
+                    XCTAssertEqual(proxy.editor.text, "keep 翻译后的文字。")
+                    XCTAssertNil(proxy.editor.markedTextRange)
+                }
+            }
+        }
+    }
+
+    func testLeavingTranslationTargetDisarmsAndCancelOrSendTakePrecedence() throws {
+        for destination in ["space", "gap", "delete", "return", "changedField", "cancel"] {
+            try withKeyboard { keyboard, proxy in
+                let (source, id) = try start(keyboard)
+                preview(id, keyboard: keyboard)
+                let language = try key("language", in: keyboard)
+                slide(source, into: language)
+                if destination == "gap" {
+                    let point = source.convert(CGPoint(x: language.bounds.midX, y: -2), from: language)
+                    XCTAssertTrue(source.movePress(to: point, at: 0.6))
+                } else if destination == "changedField" { proxy.documentIdentifier = UUID() }
+                else if destination == "cancel" { source.cancelPress() }
+                else { slide(source, into: try key(destination, in: keyboard)) }
+                source.releasePress()
+                XCTAssertNil(language.dictationFeedback)
+                XCTAssertNil(keyboard.testingVoiceCommands.last?.translate)
+                let cancelled = ["delete", "changedField", "cancel"].contains(destination)
+                XCTAssertEqual(keyboard.testingVoiceCommands.last?.phase, cancelled ? .cancel : .finish)
+                let before = proxy.editor.text
+                keyboard.receiveVoiceReply(reply(id, "Final.", step: 3, final: true))
+                XCTAssertEqual(proxy.editor.text, cancelled ? before : "keep Final." + (destination == "return" ? "\n" : ""))
+            }
+        }
+    }
+
     func testTargetGapsDoNotCancelOrSubmitAndLeavingKeyboardCancels() throws {
         try withKeyboard { keyboard, proxy in
             let (source, id) = try start(keyboard)
@@ -247,13 +342,13 @@ final class DictationGestureTests: XCTestCase {
         }
     }
 
-    func testQuickSlideBeforeHoldDoesNotActivateEitherTarget() throws {
+    func testQuickSwipeBeforeHoldDoesNotActivateDictationTargets() throws {
         for value in ["delete", "return"] {
             try withKeyboard { keyboard, proxy in
                 let source = try key("a", in: keyboard), target = try key(value, in: keyboard)
                 source.press(at: 0, point: .zero)
                 let point = source.convert(CGPoint(x: target.bounds.midX, y: target.bounds.midY), from: target)
-                XCTAssertFalse(source.movePress(to: point, at: 0.1))
+                _ = source.movePress(to: point, at: 0.1)
                 source.advancePress(to: 1); source.releasePress()
                 XCTAssertNil(target.dictationFeedback)
                 XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)

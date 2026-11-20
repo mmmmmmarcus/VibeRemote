@@ -9,9 +9,9 @@ import RemoteAudioProtocol
 /// hears only what the device plays.
 final class DictationAudioWriter: @unchecked Sendable {
     /// A new remote's end marker can precede its last packet by one BLE interval (16 ms
-    /// observed). The output's 250 ms settle also covers the playback snapshot; the file only
-    /// needs that trailing packet, so it settles sooner. Late packets after completion are
-    /// left out of the file; the output still plays them.
+    /// observed). This is the minimum technical settle; the configured aluminum release
+    /// window may hold the file open longer. Glass already applies its buffer in the parser.
+    /// Late packets after completion are left out of the file; the output still plays them.
     static let settle: TimeInterval = 0.1
     /// The app reads within milliseconds of completion (or at its own drain deadline), so the
     /// speech does not need to outlive that by much.
@@ -23,6 +23,8 @@ final class DictationAudioWriter: @unchecked Sendable {
     private var header: DictationAudioFile.Header?
     private var writtenSamples = 0
     private var ending = false
+    private var settleDelay = DictationAudioWriter.settle
+    private var endDeadline: DispatchTime?
     private var revision: UInt64 = 0
 
     init(path: String) {
@@ -31,8 +33,9 @@ final class DictationAudioWriter: @unchecked Sendable {
         unlink(path + ".new")
     }
 
-    func voiceStarted() {
+    func voiceStarted(settle: TimeInterval = DictationAudioWriter.settle) {
         queue.sync {
+            settleDelay = settle
             completeLocked()
             revision &+= 1
             let header = DictationAudioFile.Header(session: UUID(), startedAt: Date())
@@ -53,6 +56,7 @@ final class DictationAudioWriter: @unchecked Sendable {
             self.header = header
             writtenSamples = 0
             ending = false
+            endDeadline = nil
         }
     }
 
@@ -76,6 +80,7 @@ final class DictationAudioWriter: @unchecked Sendable {
         queue.sync {
             guard handle != nil else { return }
             ending = true
+            endDeadline = .now() + settleDelay
             scheduleCompletionLocked()
         }
     }
@@ -83,7 +88,7 @@ final class DictationAudioWriter: @unchecked Sendable {
     private func scheduleCompletionLocked() {
         revision &+= 1
         let expected = revision
-        queue.asyncAfter(deadline: .now() + Self.settle) { [weak self] in
+        queue.asyncAfter(deadline: max(.now() + Self.settle, endDeadline ?? .now())) { [weak self] in
             guard let self, self.ending, self.revision == expected else { return }
             self.completeLocked()
         }

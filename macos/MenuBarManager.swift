@@ -17,6 +17,29 @@ enum RemoteStatusBadge: Equatable, Sendable {
     }
 }
 
+/// Available voice-input choices, independent of menu rendering and saved device names.
+enum MicrophoneMenuChoice: Equatable {
+    case system
+    case device(DictationMicrophoneChoice)
+    case soundcore
+
+    static func available(_ microphones: [DictationAudioDevice.Microphone], soundcoreReady: Bool) -> [Self] {
+        [.system] + microphones.map { .device(DictationMicrophoneChoice(uid: $0.uid, name: $0.name)) }
+            + (soundcoreReady ? [.soundcore] : [])
+    }
+
+    static func selected(saved: DictationMicrophoneChoice?, soundcoreSelected: Bool,
+                         available: [Self]) -> Self? {
+        if soundcoreSelected { return available.contains(.soundcore) ? .soundcore : nil }
+        if let saved, let choice = available.first(where: {
+            if case .device(let device) = $0 { return device.uid == saved.uid }
+            return false
+        }) { return choice }
+        // A missing CoreAudio input already falls back to the system-input route.
+        return .system
+    }
+}
+
 /// Compact battery visualization used by the menu's device summary. Drawing the percentage
 /// and progress in one view keeps their alignment stable at every menu width and appearance.
 @MainActor
@@ -297,31 +320,33 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         }
     }
 
-    /// The menu-bar glyph: the Apple TV remote SF Symbol, with a status badge notched into
-    /// the bottom-right corner (slash for disconnected, refresh for bridge startup). Falls
-    /// back to a hand-drawn remote if the symbol is unavailable (older macOS). The image
-    /// stays a template so macOS keeps tinting it for light/dark menu bars.
-    /// Static template drawn from Voice Balloon.svg and Voice Bars.svg in vvhisper.icon.
+    /// Static template drawn from Figma 1408:781 and the app icon's voice bars.
     /// Badge is retained only for source compatibility; device state never changes the glyph.
     static func makeRemoteIcon(badge: RemoteStatusBadge = .none) -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 20), flipped: true) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            context.translateBy(x: 3, y: 0)
-            context.scaleBy(x: 20 / 216, y: 20 / 216)
+            // Center the 18 pt glyph (90% size) in the existing menu-bar slot.
+            context.translateBy(x: 2, y: 1)
+            context.scaleBy(x: 18 / 224, y: 18 / 224)
             let balloon = NSBezierPath()
-            balloon.move(to: NSPoint(x: 86, y: 0))
-            balloon.curve(to: NSPoint(x: 172, y: 86), controlPoint1: NSPoint(x: 133.496, y: 0), controlPoint2: NSPoint(x: 172, y: 38.5035))
-            balloon.curve(to: NSPoint(x: 131.502, y: 158.988), controlPoint1: NSPoint(x: 172, y: 116.788), controlPoint2: NSPoint(x: 155.821, y: 143.796))
-            balloon.curve(to: NSPoint(x: 90, y: 215.848), controlPoint1: NSPoint(x: 110.649, y: 172.015), controlPoint2: NSPoint(x: 90, y: 191.261))
-            balloon.line(to: NSPoint(x: 82, y: 215.848))
-            balloon.curve(to: NSPoint(x: 40.4981, y: 158.988), controlPoint1: NSPoint(x: 82, y: 191.261), controlPoint2: NSPoint(x: 61.3507, y: 172.015))
-            balloon.curve(to: NSPoint(x: 0, y: 86), controlPoint1: NSPoint(x: 16.1786, y: 143.796), controlPoint2: NSPoint(x: 0, y: 116.788))
-            balloon.curve(to: NSPoint(x: 86, y: 0), controlPoint1: NSPoint(x: 0, y: 38.5035), controlPoint2: NSPoint(x: 38.5035, y: 0))
+            balloon.move(to: NSPoint(x: 144.5, y: 0))
+            balloon.curve(to: NSPoint(x: 224, y: 79.5), controlPoint1: NSPoint(x: 188.407, y: 0), controlPoint2: NSPoint(x: 224, y: 35.5934))
+            balloon.curve(to: NSPoint(x: 144.5, y: 159), controlPoint1: NSPoint(x: 224, y: 123.407), controlPoint2: NSPoint(x: 188.407, y: 159))
+            balloon.line(to: NSPoint(x: 138, y: 159))
+            balloon.curve(to: NSPoint(x: 122, y: 175), controlPoint1: NSPoint(x: 129.163, y: 159), controlPoint2: NSPoint(x: 122, y: 166.163))
+            balloon.line(to: NSPoint(x: 122, y: 224))
+            balloon.line(to: NSPoint(x: 102, y: 224))
+            balloon.line(to: NSPoint(x: 102, y: 175))
+            balloon.curve(to: NSPoint(x: 86, y: 159), controlPoint1: NSPoint(x: 102, y: 166.163), controlPoint2: NSPoint(x: 94.8366, y: 159))
+            balloon.line(to: NSPoint(x: 79.5, y: 159))
+            balloon.curve(to: NSPoint(x: 0, y: 79.5), controlPoint1: NSPoint(x: 35.5934, y: 159), controlPoint2: NSPoint(x: 0, y: 123.407))
+            balloon.curve(to: NSPoint(x: 79.5, y: 0), controlPoint1: NSPoint(x: 0, y: 35.5934), controlPoint2: NSPoint(x: 35.5934, y: 0))
+            balloon.line(to: NSPoint(x: 144.5, y: 0))
             balloon.close()
             NSColor.black.setFill()
             balloon.fill()
             context.setBlendMode(.clear)
-            for rect in [NSRect(x: 38, y: 65, width: 20, height: 44), NSRect(x: 76, y: 45, width: 20, height: 84), NSRect(x: 114, y: 65, width: 20, height: 44)] {
+            for rect in [NSRect(x: 64, y: 57, width: 20, height: 44), NSRect(x: 102, y: 37, width: 20, height: 84), NSRect(x: 140, y: 57, width: 20, height: 44)] {
                 NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
             }
             return true
@@ -665,29 +690,33 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         } else {
             statusTitle = soundcore ? SoundcoreManager.shared.status : (microphoneStatus.running ? "Connected" : "Starting")
         }
-        let title = NSTextField(labelWithString: statusTitle)
+        let deviceName: String
+        if soundcore {
+            deviceName = "Soundcore Work"
+        } else {
+            switch remoteGeneration {
+            case .glassTouchSurface: deviceName = remoteName ?? "Siri Remote Black Glass"
+            case .aluminumClickpad: deviceName = remoteName ?? "Siri Remote Aluminum"
+            case .unknown: deviceName = remoteName ?? "Siri Remote"
+            }
+        }
+        let title = NSTextField(labelWithString: deviceName)
         title.translatesAutoresizingMaskIntoConstraints = false
         title.font = .systemFont(ofSize: 14, weight: .semibold)
         title.textColor = .labelColor
 
-        var generation: NSTextField?
+        var supportingLabel: NSTextField?
         var battery: RemoteBatteryRingView?
         let rowHeight: CGFloat
         if connected {
-            let fallbackText: String
-            switch remoteGeneration {
-            case .glassTouchSurface: fallbackText = "1st Generation"
-            case .aluminumClickpad: fallbackText = "2nd / 3rd Generation"
-            case .unknown: fallbackText = "Generation Unknown"
-            }
-            let subtitle = NSTextField(labelWithString: soundcore ? "Soundcore Work" : (remoteName ?? fallbackText))
+            let subtitle = NSTextField(labelWithString: statusTitle)
             subtitle.translatesAutoresizingMaskIntoConstraints = false
             subtitle.font = .systemFont(ofSize: 11.5)
             subtitle.textColor = .secondaryLabelColor
 
             let gauge = RemoteBatteryRingView(percent: soundcore ? SoundcoreManager.shared.info?.battery : remoteBatteryPercent)
             gauge.translatesAutoresizingMaskIntoConstraints = false
-            generation = subtitle
+            supportingLabel = subtitle
             battery = gauge
             // The gauge is centered, so it needs the same breathing room as the text stack.
             rowHeight = max(
@@ -702,16 +731,17 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         container.autoresizingMask = [.width]
         container.addSubview(title)
 
-        if let generation, let battery {
-            container.addSubview(generation)
+        if let supportingLabel, let battery {
+            container.addSubview(supportingLabel)
             container.addSubview(battery)
 
             NSLayoutConstraint.activate([
                 title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
                 title.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
-                generation.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-                generation.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-                generation.trailingAnchor.constraint(lessThanOrEqualTo: battery.leadingAnchor, constant: -12),
+                title.trailingAnchor.constraint(lessThanOrEqualTo: battery.leadingAnchor, constant: -12),
+                supportingLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+                supportingLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+                supportingLabel.trailingAnchor.constraint(lessThanOrEqualTo: battery.leadingAnchor, constant: -12),
                 battery.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
                 battery.centerYAnchor.constraint(equalTo: container.centerYAnchor),
                 battery.widthAnchor.constraint(equalToConstant: Self.batteryGaugeDiameter),
@@ -743,6 +773,9 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
         if remoteConnected || SoundcoreManager.shared.ready || SoundcoreManager.shared.connecting {
             menu.addItem(.separator())
         }
+
+        menu.addItem(makeMicrophoneMenuItem())
+        menu.addItem(.separator())
 
         // Settings must remain reachable before pairing and while the remote sleeps.
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
@@ -841,6 +874,63 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
 
     private var inputAccessIsReady: Bool {
         remoteInputState == .ready || remoteInputState == .waitingForRemote
+    }
+
+    private func makeMicrophoneMenuItem() -> NSMenuItem {
+        let store = DictationSettingsStore.shared
+        store.refreshMicrophones()
+        let soundcore = SoundcoreManager.shared
+        let choices = MicrophoneMenuChoice.available(store.microphones, soundcoreReady: soundcore.ready)
+        let selected = MicrophoneMenuChoice.selected(saved: store.settings.hotkeyMicrophone,
+            soundcoreSelected: soundcore.useForHotkey, available: choices)
+        let parent = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Microphone")
+        for choice in choices {
+            let title: String
+            switch choice {
+            case .system:
+                title = store.systemMicrophone.map { "System Input (\($0.name))" } ?? "System Input"
+            case .device(let device): title = device.name
+            case .soundcore: title = "Soundcore Work"
+            }
+            let item = NSMenuItem(title: title, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice
+            item.state = choice == selected ? .on : .off
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func selectMicrophone(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? MicrophoneMenuChoice else { return }
+        let store = DictationSettingsStore.shared
+        store.refreshMicrophones()
+        let soundcore = SoundcoreManager.shared
+        // A device may disconnect while the menu is open. Never select a stale row.
+        let choices = MicrophoneMenuChoice.available(store.microphones, soundcoreReady: soundcore.ready)
+        guard choices.contains(choice) else { rebuildMenu(); return }
+        // Compare the saved route, not its fallback: explicitly choosing System Input
+        // must clear a disconnected device preference even when System Input is checked.
+        let saved: MicrophoneMenuChoice = soundcore.useForHotkey ? .soundcore
+            : store.settings.hotkeyMicrophone.map { .device($0) } ?? .system
+        guard saved != choice else { return }
+        switch DictationController.shared.recordingSource {
+        case .soundcore: soundcore.endDictation(cancel: true)
+        case .macMicrophone: DictationController.shared.cancel()
+        default: break
+        }
+        switch choice {
+        case .soundcore: soundcore.useForHotkey = true
+        case .system:
+            soundcore.useForHotkey = false
+            store.settings.hotkeyMicrophone = nil
+        case .device(let device):
+            soundcore.useForHotkey = false
+            store.settings.hotkeyMicrophone = device
+        }
+        rebuildMenu()
     }
 
     private func buildPermissionsMenu(includeBluetooth: Bool, onlyRequired: Bool) -> NSMenu {

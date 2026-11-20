@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Verify vvhisper iOS polishing setup",
+  "description": "Start on vvhisper's main Settings screen. Verify the saved polishing key, enabled polishing, and fixed model, then return to Settings. Does not enter credentials or change settings.",
+  "app": "com.vvhisper.ios",
+  "risk": "navigation",
+  "category": "developer",
+  "locale": "en",
+  "steps": [
+    {"kind": "launch_app", "bundle": "com.vvhisper.ios"},
+    {"kind": "wait_for", "expect": {"present": [{"label": "Polish Dictation"}, {"label": "Try Keyboard"}]}, "timeout_ms": 10000},
+    {"kind": "tap_label", "label": "Polish Dictation"},
+    {"kind": "wait_for", "expect": {"present": [{"label": "Saved"}, {"label": "Seed 2.0 Mini"}, {"kind": "Switch", "label": "Polish Dictation", "value": "1"}]}, "timeout_ms": 10000},
+    {"kind": "tap_label", "label": "BackButton"},
+    {"kind": "wait_for", "expect": {"present": [{"label": "Try Keyboard"}]}, "timeout_ms": 10000}
+  ]
+}

@@ -12,10 +12,24 @@ public enum VoiceEvent: Equatable {
 }
 
 public struct SiriRemotePacketParser {
-    public init() {}
+    /// Defaults retain the historical parser behavior for offline captures. The running
+    /// helper supplies the user's per-device preferences, latched for each voice session.
+    public init(releaseBuffer: @escaping (VoiceInputDevice) -> TimeInterval = { $0 == .siriGlass ? 0.3 : 0 }) {
+        self.releaseBuffer = releaseBuffer
+    }
+    private let releaseBuffer: (VoiceInputDevice) -> TimeInterval
+    public private(set) var currentDevice: VoiceInputDevice = .siriAluminum
+    public private(set) var currentReleaseBuffer: TimeInterval = 0
+    private mutating func beginVoice(_ device: VoiceInputDevice) -> TimeInterval {
+        let requested = releaseBuffer(device)
+        currentDevice = device
+        currentReleaseBuffer = requested.isFinite ? min(2, max(0, requested)) : 0
+        return currentReleaseBuffer
+    }
     private var pendingByHandle: [UInt16: PendingL2CAPPacket] = [:]
     private struct OldVoiceSession {
         let startedAt: TimeInterval
+        let releaseTail: TimeInterval
         var firstSequence: UInt16?
         var releaseLimit: UInt16?
         var trimmed = false
@@ -23,6 +37,7 @@ public struct SiriRemotePacketParser {
     private var oldVoiceSessions: [UInt16: OldVoiceSession] = [:]
     private struct NewVoiceSession {
         var sequence: UInt16
+        let releaseTail: TimeInterval
         var endedAt: TimeInterval?
     }
     private var newVoiceSessions: [UInt16: NewVoiceSession] = [:]
@@ -34,10 +49,6 @@ public struct SiriRemotePacketParser {
     /// Frames arrive every 20 ms while the microphone is live; a gap this long means the
     /// 1st-gen remote's voice session is over.
     private static let sniffedVoiceIdleTimeout: TimeInterval = 0.75
-
-    /// Audio the 1st-gen remote recorded up to this long after the physical Siri release is
-    /// still delivered, so a final syllable spoken while letting go is kept.
-    static let oldRemoteReleaseTail: TimeInterval = 0.3
 
     public mutating func events(from line: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> [VoiceEvent] {
         receivedAt = now
@@ -131,6 +142,7 @@ public struct SiriRemotePacketParser {
             var output: [VoiceEvent] = []
             if !directVoiceActive {
                 directVoiceActive = true
+                _ = beginVoice(.siriAluminum)
                 output.append(.started)
             }
             output.append(.packet(packet))
@@ -198,6 +210,7 @@ public struct SiriRemotePacketParser {
             lastSniffedPacketAt = now
             if !directVoiceActive {
                 directVoiceActive = true
+                _ = beginVoice(.siriGlass)
                 output.append(.started)
             }
             output.append(.packet(Data(packet)))
@@ -223,11 +236,11 @@ public struct SiriRemotePacketParser {
     /// keeps recording after release, then flushes ~2 s of frames. `state` turns 0x10 → 0x00
     /// on the first frame sent after release, and the sequence counts recorded 20 ms frames
     /// (dropped ones included). End the session at the frame recorded at release plus
-    /// `oldRemoteReleaseTail`, rather than waiting for the post-release recording to drain.
+    /// the session’s configured release buffer, rather than waiting for the post-release recording to drain.
     private mutating func oldProtocolEvents(from bytes: [UInt8], handle: UInt16) -> [VoiceEvent] {
         if bytes == [0x1B, 0x23, 0x00, 0x00, 0x10] {
             if let session = oldVoiceSessions[handle], !session.trimmed { return [] }
-            oldVoiceSessions[handle] = OldVoiceSession(startedAt: receivedAt)
+            oldVoiceSessions[handle] = OldVoiceSession(startedAt: receivedAt, releaseTail: beginVoice(.siriGlass))
             return [.started]
         }
         if bytes == [0x1B, 0x23, 0x00, 0x10, 0x00] {
@@ -254,7 +267,7 @@ public struct SiriRemotePacketParser {
             }
         }
         if bytes[3] == 0x10, bytes[4] == 0x00, session.releaseLimit == nil {
-            let recorded = max(0, ((receivedAt - session.startedAt + Self.oldRemoteReleaseTail) / 0.02).rounded())
+            let recorded = max(0, ((receivedAt - session.startedAt + session.releaseTail) / 0.02).rounded())
             session.releaseLimit = first &+ UInt16(clamping: Int(recorded))
         }
         if let limit = session.releaseLimit, Int16(bitPattern: sequence &- limit) > 0 {
@@ -317,16 +330,18 @@ public struct SiriRemotePacketParser {
             var events: [VoiceEvent] = []
             let sequence = UInt16(bytes[5]) | UInt16(bytes[6]) << 8
             if let previous = newVoiceSessions[handle], let endedAt = previous.endedAt,
-               receivedAt - endedAt <= 0.25, sequence == previous.sequence &+ 1 {
+               receivedAt - endedAt <= max(0.25, previous.releaseTail), sequence == previous.sequence &+ 1 {
                 // Real capture: 1B 39 can precede the final 1B 35 by one BLE interval.
                 // Preserve that tail in the old buffer; do not reset the HAL ring/session.
                 newVoiceSessions[handle]?.sequence = sequence
                 return [.packet(packet)]
             }
+            let tail: TimeInterval
             if newVoiceSessions[handle] == nil || newVoiceSessions[handle]?.endedAt != nil {
+                tail = beginVoice(.siriAluminum)
                 events.append(.started)
-            }
-            newVoiceSessions[handle] = NewVoiceSession(sequence: sequence, endedAt: nil)
+            } else { tail = newVoiceSessions[handle]?.releaseTail ?? 0 }
+            newVoiceSessions[handle] = NewVoiceSession(sequence: sequence, releaseTail: tail, endedAt: nil)
             events.append(.packet(packet))
             return events
         case 0x39:

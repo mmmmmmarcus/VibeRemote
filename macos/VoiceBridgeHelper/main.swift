@@ -461,7 +461,12 @@ do {
     let settledOutput = audioOutput.map { SettlingAudioOutput($0) }
     let dictationAudio = validateCapture ? nil : dictationAudioPath.map { DictationAudioWriter(path: $0) }
     var maximumPeak: Float = 0
-    var parser = SiriRemotePacketParser()
+    let releaseDefaults = UserDefaults(suiteName: "com.viberemote.app") ?? .standard
+    var parser = SiriRemotePacketParser { device in
+        // Cross-process settings refresh only at a new voice session, never per packet.
+        releaseDefaults.synchronize()
+        return VoiceReleaseBuffer.load(device, defaults: releaseDefaults).effectiveDuration
+    }
     var decodedPackets = 0
     var directHIDReports = 0
     var traceFirstPacket = true
@@ -509,8 +514,12 @@ do {
                 let received = Date()
                 let age = captureLineTimestamp(line, year: captureYear).map { String(format: "%.1f", received.timeIntervalSince($0) * 1000) } ?? "unknown"
                 log("Latency voice start epoch=\(String(format: "%.6f", received.timeIntervalSince1970)) captureAgeMs=\(age)")
-                settledOutput?.voiceStarted()
-                dictationAudio?.voiceStarted()
+                // Glass audio is trimmed by recorded-frame count in the parser. Aluminum
+                // firmware ends capture itself; preserve its configured late-packet window.
+                let tail = parser.currentDevice == .siriAluminum ? parser.currentReleaseBuffer : 0
+                settledOutput?.voiceStarted(settle: max(0.25, tail))
+                dictationAudio?.voiceStarted(settle: max(DictationAudioWriter.settle, tail))
+                log("Release buffer device=\(parser.currentDevice.rawValue) seconds=\(parser.currentReleaseBuffer)")
                 log("Voice started")
             case .packet(let packet):
                 guard voiceSessionGate.allowsPackets else { continue }

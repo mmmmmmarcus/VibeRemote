@@ -12,6 +12,39 @@ final class AudioPacketTests: XCTestCase {
         }
     }
 
+    func testConfiguredGlassTailCutsAtRecordedFrameBoundaryAndLatchesPerSession() {
+        for tail in [0.0, 0.1, 0.5, 1, 1.7, 2] {
+            var setting = tail
+            var parser = SiriRemotePacketParser { _ in setting }
+            let packet: [UInt8] = [0xB8] + Array(1...40)
+            func feed(_ payload: [UInt8], at time: TimeInterval) -> [VoiceEvent] {
+                records(payload, handle: 0x56).flatMap { parser.events(from: $0, now: time) }
+            }
+            XCTAssertEqual(feed([0x1B, 0x23, 0, 0, 0x10], at: 10), [.started])
+            XCTAssertEqual(feed(oldFrame(0, released: false, packet: packet), at: 10.02), [.packet(Data(packet))])
+            setting = 2 // A mid-hold setting change cannot alter this sentence's boundary.
+            XCTAssertEqual(feed(oldFrame(40, released: true, packet: packet), at: 11), [.packet(Data(packet))])
+            let boundary = UInt16(((1 + tail) / 0.02).rounded())
+            XCTAssertEqual(feed(oldFrame(boundary, released: true, packet: packet), at: 11.1), [.packet(Data(packet))])
+            XCTAssertEqual(feed(oldFrame(boundary + 1, released: true, packet: packet), at: 11.2), [.ended])
+            XCTAssertEqual(feed(oldFrame(boundary + 2, released: true, packet: packet), at: 11.3), [])
+        }
+    }
+
+    func testAluminumConfiguredTailPreservesLateFramesWithoutSwallowingNewPress() {
+        var parser = SiriRemotePacketParser { _ in 2 }
+        let packet: [UInt8] = [0xB8, 1, 2, 3]
+        func frame(_ sequence: UInt8) -> [UInt8] { [0x1B, 0x35, 0, 0, 0, sequence, 0, 4] + packet }
+        func feed(_ payload: [UInt8], at time: TimeInterval) -> [VoiceEvent] {
+            records(payload, handle: 0x4E).flatMap { parser.events(from: $0, now: time) }
+        }
+        XCTAssertEqual(feed(frame(10), at: 1), [.started, .packet(Data(packet))])
+        XCTAssertEqual(feed([0x1B, 0x39, 0, 0, 0], at: 2), [.ended])
+        XCTAssertEqual(feed(frame(11), at: 3.8), [.packet(Data(packet))])
+        XCTAssertEqual(feed(frame(0), at: 3.9), [.started, .packet(Data(packet))])
+        XCTAssertEqual(parser.currentDevice, .siriAluminum)
+    }
+
     func testNewRemoteTrailingPacketDoesNotStartAnotherVoiceSession() {
         var parser = SiriRemotePacketParser()
         func feed(_ payload: [UInt8], at time: TimeInterval, handle: UInt16 = 0x4E) -> [VoiceEvent] {

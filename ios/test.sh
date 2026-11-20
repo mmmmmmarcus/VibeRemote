@@ -14,4 +14,4 @@ if [[ -z "$destination" ]]; then
 fi
 xcodebuild -project vvhisperIOS.xcodeproj -scheme vvhisperIOS -configuration Debug \
   -destination "$destination" \
-  -derivedDataPath "$scratch" CODE_SIGNING_ALLOWED=NO test
+  -derivedDataPath "$scratch" CODE_SIGNING_ALLOWED=NO test "$@"

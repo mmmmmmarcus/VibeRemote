@@ -1,0 +1,15 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <queries><package android:name="com.onepassword.android"/><package android:name="com.agilebits.onepassword"/><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
+    <application android:label="vvhisper" android:icon="@mipmap/vvhisper" android:allowBackup="false" android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        <activity android:name=".SetupActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <service android:name=".KeyboardService" android:label="vvhisper" android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
+            <intent-filter><action android:name="android.view.InputMethod"/></intent-filter>
+            <meta-data android:name="android.view.im" android:resource="@xml/keyboard"/>
+        </service>
+    </application>
+</manifest>

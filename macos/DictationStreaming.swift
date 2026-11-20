@@ -44,6 +44,9 @@ enum SeedStreamFrame {
     /// `sentenceSilence` is `vad_segment_duration` in ms, documented as the silence after which a
     /// new sentence starts (default 3000). Measured 2026-11-12 it changed nothing on any endpoint,
     /// so dictation leaves it unset; the verifier's `--vad` keeps it measurable.
+    /// Omit audio.language deliberately: the default Seed model recognizes Chinese and
+    /// English together, including mixed utterances. This builder also serves nostream
+    /// refinement; forcing an English locale there would disagree with the live stream.
     static func requestJSON(appID: String, context: String? = nil, removeFillers: Bool = false,
                             sentenceSilence: Int? = nil) -> Data {
         var request: [String: Any] = ["model_name": "bigmodel", "enable_itn": true, "enable_punc": true,
@@ -495,6 +498,7 @@ final class DictationTypewriter {
     }
     var onEmit: (() -> Void)?
 
+    private let draftUnderline = DictationDraftUnderline()
     private var target = ""
     private var previousPartial = ""
     private var finishing = false
@@ -529,6 +533,7 @@ final class DictationTypewriter {
     func finish(_ text: String?, completion: @escaping () -> Void) {
         if let text, !isDone { target = DictationTyper.normalized(text) }
         finishing = true
+        draftUnderline.hide()
         if isDone { completion(); return }
         self.completion = completion
         schedule(0)
@@ -548,6 +553,7 @@ final class DictationTypewriter {
 
     private func complete() {
         isDone = true
+        draftUnderline.hide()
         timer?.invalidate(); timer = nil
         let done = completion
         completion = nil
@@ -630,7 +636,7 @@ final class DictationTypewriter {
             // Web editors need a beat after a replacement before more typing (Doubao skips a
             // round for the same reason).
             settleTicks = 1
-            onEmit?()
+            didEmit()
             schedule(DictationTypewriterPlan.tick)
             return
         }
@@ -638,7 +644,7 @@ final class DictationTypewriter {
         if finishing {
             type(plan.insert)
             displayed += plan.insert
-            onEmit?()
+            didEmit()
             schedule(DictationTypewriterPlan.tick)
             return
         }
@@ -646,8 +652,15 @@ final class DictationTypewriter {
         let chunk = DictationTypewriterPlan.chunk(plan.insert, characters: pace.characters)
         type(chunk)
         displayed += chunk
-        onEmit?()
+        didEmit()
         schedule(pace.interval)
+    }
+
+    private func didEmit() {
+        if !finishing, let focus, let element = focus.element, let anchor = focus.anchor, !displayed.isEmpty {
+            draftUnderline.update(DictationDraftSnapshot(pid: focus.pid, element: element, anchor: anchor, text: displayed))
+        }
+        onEmit?()
     }
 
     private func type(_ text: String) {
@@ -692,7 +705,7 @@ final class DictationTypewriter {
         displayed.removeLast(plan.delete)
         displayed += plan.insert
         deletedCharacters += plan.delete
-        onEmit?()
+        didEmit()
         schedule(DictationTypewriterPlan.tick)
     }
 

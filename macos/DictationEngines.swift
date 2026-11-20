@@ -346,6 +346,8 @@ struct SeedASRDictationEngine: DictationEngine {
                                       "enable_ddc": removeFillers]
         if let context { options["corpus"] = ["context": context] }
         if let sentenceSilence { options["vad_segment_duration"] = sentenceSilence }
+        // Keep the default Chinese-English model, matching the live and refinement streams.
+        // The generic language preference is intentionally not sent to Seed.
         let body: [String: Any] = [
             "user": ["uid": appID.isEmpty ? "viberemote" : appID],
             "audio": ["data": audio.wavData().base64EncodedString()],

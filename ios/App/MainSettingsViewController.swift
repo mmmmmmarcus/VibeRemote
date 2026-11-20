@@ -6,12 +6,18 @@ final class MainSettingsViewController: UITableViewController {
     private let loadPreferences: () -> KeyboardPreferences
     private let savePreferences: (KeyboardPreferences) throws -> Void
     private let mixedTypingSwitch = UISwitch()
-    private let hapticCell = HapticStrengthCell()
-    private lazy var feedback = UIImpactFeedbackGenerator(style: .light, view: view)
+    private let sentencePunctuationSwitch = UISwitch()
+    private let outputDefaults: UserDefaults
+    private let hapticCell = HapticParameterCell(title: "Strength", identifier: "keyboard.haptic-strength", allowsOff: true)
+    private let sharpnessCell = HapticParameterCell(title: "Sharpness", identifier: "keyboard.haptic-sharpness", allowsOff: false)
+    private let feedback = KeyboardHaptics()
+    private var lastHapticPreview: TimeInterval = 0
 
     init(loadPreferences: @escaping () -> KeyboardPreferences = { .load() },
-         savePreferences: @escaping (KeyboardPreferences) throws -> Void = { try $0.save() }) {
+         savePreferences: @escaping (KeyboardPreferences) throws -> Void = { try $0.save() },
+         outputDefaults: UserDefaults = .standard) {
         self.loadPreferences = loadPreferences; self.savePreferences = savePreferences
+        self.outputDefaults = outputDefaults
         preferences = loadPreferences()
         super.init(style: .insetGrouped)
     }
@@ -26,12 +32,20 @@ final class MainSettingsViewController: UITableViewController {
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 60
         hapticCell.update(preferences.hapticStrength)
+        sharpnessCell.update(preferences.hapticSharpness)
+        feedback.configure(preferences)
         hapticCell.onPrepare = { [weak self] in self?.feedback.prepare() }
-        hapticCell.onChange = { [weak self] strength in self?.setHapticStrength(strength) }
+        hapticCell.onChange = { [weak self] strength in self?.setHaptics(strength: strength) }
+        sharpnessCell.onPrepare = { [weak self] in self?.feedback.prepare() }
+        sharpnessCell.onChange = { [weak self] sharpness in self?.setHaptics(sharpness: sharpness) }
         mixedTypingSwitch.isOn = preferences.mixedTypingEnabled
-        mixedTypingSwitch.accessibilityLabel = "Mixed Chinese & English"
+        mixedTypingSwitch.accessibilityLabel = "More English Suggestions"
         mixedTypingSwitch.accessibilityIdentifier = "keyboard.mixed-typing"
         mixedTypingSwitch.addTarget(self, action: #selector(setMixedTyping), for: .valueChanged)
+        sentencePunctuationSwitch.isOn = DictationOutputSettings.load(outputDefaults).sentencePunctuation
+        sentencePunctuationSwitch.accessibilityLabel = "Sentence Punctuation"
+        sentencePunctuationSwitch.accessibilityIdentifier = "dictation.sentence-punctuation"
+        sentencePunctuationSwitch.addTarget(self, action: #selector(setSentencePunctuation), for: .valueChanged)
         VoiceHost.shared.onChange = { [weak self] in self?.refreshVoiceStatus() }
     }
 
@@ -39,13 +53,19 @@ final class MainSettingsViewController: UITableViewController {
         super.viewWillAppear(animated)
         preferences = loadPreferences()
         hapticCell.update(preferences.hapticStrength)
+        sharpnessCell.update(preferences.hapticSharpness)
+        feedback.configure(preferences); feedback.prepare()
         mixedTypingSwitch.isOn = preferences.mixedTypingEnabled
+        sentencePunctuationSwitch.isOn = DictationOutputSettings.load(outputDefaults).sentencePunctuation
         tableView.reloadData()
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        feedback.stop(); super.viewWillDisappear(animated)
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { 4 }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? 3 : section >= 2 ? 1 : 2
+        section == 0 ? 5 : section == 2 ? 3 : section == 3 ? 1 : 3
     }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         ["Voice Input", "Keyboard", "Haptics", "Experimental"][section]
@@ -54,13 +74,13 @@ final class MainSettingsViewController: UITableViewController {
         switch section {
         case 0: return "Voice input starts automatically and turns off \(preferences.voiceSessionTitle) after microphone activation, including during dictation. Only speech during a dictation hold is sent for transcription."
         case 1: return "Add vvhisper in Settings → General → Keyboard, then allow Full Access for dictation. Use the language key to switch typing languages."
-        case 2: return "Adjust the feel of each tap. Set the strength to Off for no haptics."
-        default: return "Offer Chinese and English candidates together in Chinese mode. You can still switch to English with the language key."
+        case 2: return "Strength controls force. Sharpness changes the tap from soft to crisp. Use − and + for 1% adjustments. Set Strength to Off for no haptics."
+        default: return "Chinese mode already suggests recognizable English words. Turn this on to also favor capitalized words and unfinished English spelling."
         }
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        if indexPath.section == 2 { return hapticCell }
+        if indexPath.section == 2, indexPath.row < 2 { return indexPath.row == 0 ? hapticCell : sharpnessCell }
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         var content = UIListContentConfiguration.valueCell()
         content.imageProperties.maximumSize = CGSize(width: 24, height: 24)
@@ -89,12 +109,33 @@ final class MainSettingsViewController: UITableViewController {
             content.secondaryText = preferences.voiceSessionTitle
             content.image = UIImage(systemName: "timer")
             cell.accessibilityIdentifier = "settings.voice-duration"
+        case (0, 3):
+            content.text = "Polish Dictation"
+            content.secondaryText = !DictationPolishSettings.load().enabled ? "Off" : ArkPolishKeychain.read() == nil ? "Add API Key" : "On"
+            content.image = UIImage(systemName: "text.badge.checkmark")
+            cell.accessibilityIdentifier = "settings.polishing"
+        case (0, 4):
+            content = .subtitleCell()
+            content.text = "Sentence Punctuation"
+            content.secondaryText = "Ending punctuation for one short dictated sentence. Longer passages stay unchanged."
+            content.secondaryTextProperties.numberOfLines = 0
+            cell.accessoryType = .none; cell.accessoryView = sentencePunctuationSwitch
+            cell.selectionStyle = .none
+            cell.accessibilityIdentifier = "settings.sentence-punctuation"
         case (1, 0):
             content.text = "Try Keyboard"
             content.image = UIImage(systemName: "character.cursor.ibeam")
             cell.accessibilityIdentifier = "settings.try-keyboard"
+        case (1, 2):
+            content.text = "Typing Assistance"
+            content.image = UIImage(systemName: "textformat.abc")
+            cell.accessibilityIdentifier = "settings.typing-assistance"
+        case (2, 2):
+            content.text = "Test Tap"; content.image = UIImage(systemName: "hand.tap")
+            content.textProperties.color = .systemBlue; cell.accessoryType = .none
+            cell.accessibilityIdentifier = "settings.test-haptic"
         case (3, 0):
-            content.text = "Mixed Chinese & English"
+            content.text = "More English Suggestions"
             content.image = UIImage(systemName: "character.bubble")
             cell.accessoryType = .none
             cell.accessoryView = mixedTypingSwitch
@@ -118,8 +159,11 @@ final class MainSettingsViewController: UITableViewController {
                 self?.setVoiceSessionMinutes(minutes) == true
             }
             navigationController?.pushViewController(picker, animated: true)
+        case (0, 3): navigationController?.pushViewController(PolishSettingsViewController(), animated: true)
         case (1, 0): navigationController?.pushViewController(KeyboardTestViewController(), animated: true)
         case (1, 1): UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+        case (1, 2): navigationController?.pushViewController(TypingSettingsViewController(load: loadPreferences, save: savePreferences), animated: true)
+        case (2, 2): feedback.tap()
         default: break
         }
     }
@@ -127,6 +171,9 @@ final class MainSettingsViewController: UITableViewController {
     private func refreshVoiceStatus() {
         guard isViewLoaded else { return }
         tableView.reloadRows(at: [IndexPath(row: 0, section: 0)], with: .none)
+    }
+    @objc private func setSentencePunctuation() {
+        DictationOutputSettings(sentencePunctuation: sentencePunctuationSwitch.isOn).save(outputDefaults)
     }
     @discardableResult func setVoiceSessionMinutes(_ minutes: Int) -> Bool {
         var updated = preferences
@@ -138,20 +185,25 @@ final class MainSettingsViewController: UITableViewController {
         tableView.reloadSections(IndexSet(integer: 0), with: .none)
         return true
     }
-    private func setHapticStrength(_ strength: Double) {
-        guard strength != preferences.hapticStrength else { return }
+    @discardableResult func setHaptics(strength: Double? = nil, sharpness: Double? = nil) -> Bool {
         let previous = preferences
-        preferences.hapticStrength = strength
+        if let strength { preferences.hapticStrength = KeyboardPreferences.normalizedStrength(strength) }
+        if let sharpness { preferences.hapticSharpness = KeyboardPreferences.normalizedSharpness(sharpness) }
+        guard previous != preferences else { return true }
         do { try savePreferences(preferences) }
         catch {
-            preferences = previous; hapticCell.update(previous.hapticStrength)
+            preferences = previous; hapticCell.update(previous.hapticStrength); sharpnessCell.update(previous.hapticSharpness)
             let alert = UIAlertController(title: "Couldn’t Save Setting", message: "Please try again.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
-            return
+            return false
         }
-        if strength > 0 { feedback.impactOccurred(intensity: CGFloat(strength)) }
+        hapticCell.update(preferences.hapticStrength); sharpnessCell.update(preferences.hapticSharpness)
+        feedback.configure(preferences)
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastHapticPreview >= 0.07 { feedback.tap(); lastHapticPreview = now }
         feedback.prepare()
+        return true
     }
 
     @objc private func setMixedTyping() {
@@ -203,28 +255,37 @@ private final class VoiceDurationViewController: UITableViewController {
     }
 }
 
-private final class HapticStrengthCell: UITableViewCell {
+private final class HapticParameterCell: UITableViewCell {
     private let slider = UISlider()
+    private let stepper = UIStepper()
     private let value = UILabel()
+    private let allowsOff: Bool
     var onPrepare: (() -> Void)?
     var onChange: ((Double) -> Void)?
 
-    init() {
+    init(title: String, identifier: String, allowsOff: Bool) {
+        self.allowsOff = allowsOff
         super.init(style: .default, reuseIdentifier: nil)
         selectionStyle = .none
         let label = UILabel()
-        label.text = "Strength"; label.font = .preferredFont(forTextStyle: .body)
+        label.text = title; label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true
         value.font = .preferredFont(forTextStyle: .body); value.adjustsFontForContentSizeCategory = true
         value.textColor = .secondaryLabel; value.textAlignment = .right
         value.setContentHuggingPriority(.required, for: .horizontal)
         let heading = UIStackView(arrangedSubviews: [label, value]); heading.axis = .horizontal; heading.spacing = 12
         slider.minimumValue = 0; slider.maximumValue = 1
-        slider.accessibilityLabel = "Haptic strength"
-        slider.accessibilityIdentifier = "keyboard.haptic-strength"
+        slider.accessibilityLabel = "Haptic \(title.lowercased())"
+        slider.accessibilityIdentifier = identifier
         slider.addTarget(self, action: #selector(prepareFeedback), for: .touchDown)
         slider.addTarget(self, action: #selector(changed), for: .valueChanged)
-        let stack = UIStackView(arrangedSubviews: [heading, slider])
+        stepper.minimumValue = 0; stepper.maximumValue = 100; stepper.stepValue = 1
+        stepper.accessibilityLabel = "Fine-adjust haptic \(title.lowercased())"
+        stepper.accessibilityIdentifier = identifier + ".fine"
+        stepper.addTarget(self, action: #selector(prepareFeedback), for: .touchDown)
+        stepper.addTarget(self, action: #selector(stepped), for: .valueChanged)
+        let controls = UIStackView(arrangedSubviews: [slider, stepper]); controls.spacing = 16; controls.alignment = .center
+        let stack = UIStackView(arrangedSubviews: [heading, controls])
         stack.axis = .vertical; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(stack)
         let guide = contentView.layoutMarginsGuide
@@ -237,12 +298,14 @@ private final class HapticStrengthCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(_ strength: Double) {
         slider.value = Float(strength)
-        let text = strength == 0 ? "Off" : "\(Int((strength * 100).rounded()))%"
-        value.text = text; slider.accessibilityValue = text
+        stepper.value = (strength * 100).rounded()
+        let text = strength == 0 && allowsOff ? "Off" : "\(Int((strength * 100).rounded()))%"
+        value.text = text; slider.accessibilityValue = text; stepper.accessibilityValue = text
     }
     @objc private func prepareFeedback() { onPrepare?() }
     @objc private func changed() {
         let strength = KeyboardPreferences.normalizedStrength(Double(slider.value))
         update(strength); onChange?(strength)
     }
+    @objc private func stepped() { let value = stepper.value / 100; update(value); onChange?(value) }
 }

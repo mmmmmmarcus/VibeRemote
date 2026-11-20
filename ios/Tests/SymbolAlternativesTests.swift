@@ -37,11 +37,21 @@ import UIKit
     func testSymbolHoldsSelectExactlyOnceAndNeverDictateAcrossLayouts() async throws {
         for (width, landscape): (CGFloat, Bool) in [(375, false), (466, false), (655, false), (529, true), (802, true)] {
             try await withKeyboard(width: width, landscape: landscape) { keyboard, proxy in
-                _ = try key("123", keyboard).accessibilityActivate(); keyboard.view.layoutIfNeeded()
                 let popup = try menu(keyboard)
+                @MainActor func showSymbols(_ page: Int) throws {
+                    if let abc = descendants(keyboard.view).compactMap({ $0 as? KeyControl }).first(where: { $0.value == "ABC" }) {
+                        _ = abc.accessibilityActivate()
+                    }
+                    _ = try key("123", keyboard).accessibilityActivate()
+                    if page == 2 { _ = try key("#+=", keyboard).accessibilityActivate() }
+                    keyboard.view.layoutIfNeeded()
+                }
                 for page in 1...2 {
-                    let controls = descendants(keyboard.view).compactMap { $0 as? KeyControl }.filter { $0.value.count == 1 }
-                    for source in controls {
+                    try showSymbols(page)
+                    let values = descendants(keyboard.view).compactMap { $0 as? KeyControl }.filter { $0.value.count == 1 }.map(\.value)
+                    for value in values {
+                        try showSymbols(page)
+                        let source = try key(value, keyboard)
                         let before = proxy.editor.text ?? ""
                         hold(source)
                         XCTAssertFalse(popup.isHidden, source.value)
@@ -56,8 +66,9 @@ import UIKit
                         XCTAssertEqual(proxy.editor.text, before + choice)
                         XCTAssertTrue(popup.isHidden)
                         XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
+                        let returned = choice.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.contains($0) }
+                        XCTAssertNotNil(try key(returned ? "q" : "ABC", keyboard))
                     }
-                    if page == 1 { _ = try key("#+=", keyboard).accessibilityActivate(); keyboard.view.layoutIfNeeded() }
                 }
             }
         }
@@ -83,9 +94,12 @@ import UIKit
             _ = quote.movePress(to: CGPoint(x: quote.bounds.midX, y: quote.bounds.midY), at: 0.5)
             quote.releasePress()
             XCTAssertEqual(proxy.editor.text, "\"")
-            hold(quote)
-            _ = quote.movePress(to: CGPoint(x: -1000, y: -1000), at: 0.5)
-            XCTAssertNil(popup.selectedSymbol); quote.releasePress()
+            XCTAssertNotNil(try key("q", keyboard))
+            _ = try key("123", keyboard).accessibilityActivate(); keyboard.view.layoutIfNeeded()
+            let nextQuote = try key("\"", keyboard)
+            hold(nextQuote)
+            _ = nextQuote.movePress(to: CGPoint(x: -1000, y: -1000), at: 0.5)
+            XCTAssertNil(popup.selectedSymbol); nextQuote.releasePress()
             XCTAssertEqual(proxy.editor.text, "\"")
         }
     }

@@ -14,10 +14,16 @@ final class SettlingAudioOutput: VoiceAudioOutput, @unchecked Sendable {
     private let output: any VoiceAudioOutput
     private let queue = DispatchQueue(label: "com.vvhisper.voiceSession")
     private var ending = false
+    private var settle: TimeInterval = 0.25
+    private var endDeadline: DispatchTime?
     private var revision: UInt64 = 0
     init(_ output: any VoiceAudioOutput) { self.output = output }
-    func voiceStarted() {
-        queue.sync { revision &+= 1; ending = false; output.voiceStarted() }
+    func voiceStarted() { voiceStarted(settle: 0.25) }
+    func voiceStarted(settle: TimeInterval) {
+        queue.sync {
+            self.settle = settle
+            revision &+= 1; ending = false; endDeadline = nil; output.voiceStarted()
+        }
     }
     func enqueue(_ buffer: AVAudioPCMBuffer, traceFirstPacket: Bool, captureTime: Date?) {
         queue.sync {
@@ -25,11 +31,11 @@ final class SettlingAudioOutput: VoiceAudioOutput, @unchecked Sendable {
             if ending { scheduleEnd() }
         }
     }
-    func voiceEnded() { queue.sync { ending = true; scheduleEnd() } }
+    func voiceEnded() { queue.sync { ending = true; endDeadline = .now() + settle; scheduleEnd() } }
     private func scheduleEnd() {
         revision &+= 1
         let expected = revision
-        queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        queue.asyncAfter(deadline: max(.now() + 0.25, endDeadline ?? .now())) { [weak self] in
             guard let self, self.ending, self.revision == expected else { return }
             self.ending = false
             self.output.voiceEnded()

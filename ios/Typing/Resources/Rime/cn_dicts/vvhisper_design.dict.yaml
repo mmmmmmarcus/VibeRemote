@@ -1,0 +1,109 @@
+# vvhisper product, interface and interaction design vocabulary.
+# Authored for vvhisper; MIT, see the repository LICENSE.
+# Imported after upstream tables so existing upstream frequencies take priority.
+---
+name: vvhisper_design
+version: "2026-11-18"
+sort: by_weight
+...
+走查	zou cha	120000
+还原	huan yuan	10000
+设计走查	she ji zou cha	10000
+体验走查	ti yan zou cha	10000
+交互走查	jiao hu zou cha	10000
+视觉走查	shi jue zou cha	10000
+界面走查	jie mian zou cha	10000
+设计还原	she ji huan yuan	10000
+视觉还原	shi jue huan yuan	10000
+还原度	huan yuan du	10000
+像素级还原	xiang su ji huan yuan	10000
+设计评审	she ji ping shen	10000
+交互评审	jiao hu ping shen	10000
+设计验收	she ji yan shou	10000
+设计交付	she ji jiao fu	10000
+交互设计	jiao hu she ji	10000
+视觉设计	shi jue she ji	10000
+产品设计	chan pin she ji	10000
+体验设计	ti yan she ji	10000
+动效设计	dong xiao she ji	10000
+无障碍设计	wu zhang ai she ji	10000
+设计系统	she ji xi tong	10000
+设计规范	she ji gui fan	10000
+交互规范	jiao hu gui fan	10000
+视觉规范	shi jue gui fan	10000
+设计语言	she ji yu yan	10000
+设计变量	she ji bian liang	10000
+设计令牌	she ji ling pai	10000
+颜色令牌	yan se ling pai	10000
+语义颜色	yu yi yan se	10000
+组件库	zu jian ku	10000
+组件变体	zu jian bian ti	10000
+组件属性	zu jian shu xing	10000
+组件化	zu jian hua	10000
+原子化设计	yuan zi hua she ji	10000
+布尔属性	bu er shu xing	10000
+自动布局	zi dong bu ju	10000
+约束布局	yue shu bu ju	10000
+响应式布局	xiang ying shi bu ju	10000
+自适应布局	zi shi ying bu ju	10000
+栅格系统	zha ge xi tong	10000
+布局网格	bu ju wang ge	10000
+基线网格	ji xian wang ge	10000
+信息架构	xin xi jia gou	10000
+信息层级	xin xi ceng ji	10000
+视觉层级	shi jue ceng ji	10000
+内容优先级	nei rong you xian ji	10000
+用户旅程	yong hu lv cheng	10000
+用户画像	yong hu hua xiang	10000
+用户流程	yong hu liu cheng	10000
+任务流程	ren wu liu cheng	10000
+可用性测试	ke yong xing ce shi	10000
+可访问性	ke fang wen xing	10000
+可达性	ke da xing	10000
+可供性	ke gong xing	10000
+认知负荷	ren zhi fu he	10000
+交互成本	jiao hu cheng ben	10000
+渐进披露	jian jin pi lu	10000
+防错设计	fang cuo she ji	10000
+错误恢复	cuo wu hui fu	10000
+边界情况	bian jie qing kuang	10000
+空状态	kong zhuang tai	10000
+加载态	jia zai tai	10000
+错误态	cuo wu tai	10000
+禁用态	jin yong tai	10000
+悬停态	xuan ting tai	10000
+按压态	an ya tai	10000
+焦点态	jiao dian tai	10000
+选中态	xuan zhong tai	10000
+骨架屏	gu jia ping	10000
+占位图	zhan wei tu	10000
+触控热区	chu kong re qu	10000
+点击热区	dian ji re qu	10000
+拇指热区	mu zhi re qu	10000
+可点击区域	ke dian ji qu yu	10000
+安全区域	an quan qu yu	10000
+手势冲突	shou shi chong tu	10000
+触觉反馈	chu jue fan kui	10000
+微交互	wei jiao hu	10000
+动效曲线	dong xiao qu xian	10000
+缓动曲线	huan dong qu xian	10000
+弹簧动画	tan huang dong hua	10000
+过渡动画	guo du dong hua	10000
+状态转场	zhuang tai zhuan chang	10000
+动效时序	dong xiao shi xu	10000
+输入反馈	shu ru fan kui	10000
+操作反馈	cao zuo fan kui	10000
+高保真	gao bao zhen	10000
+低保真	di bao zhen	10000
+交互原型	jiao hu yuan xing	10000
+线框图	xian kuang tu	10000
+矢量图	shi liang tu	10000
+像素密度	xiang su mi du	10000
+视觉一致性	shi jue yi zhi xing	10000
+跨平台一致性	kua ping tai yi zhi xing	10000
+界面密度	jie mian mi du	10000
+视觉噪声	shi jue zao sheng	10000
+设计债	she ji zhai	10000
+端到端体验	duan dao duan ti yan	10000
+深色模式	shen se mo shi	10000
+浅色模式	qian se mo shi	10000

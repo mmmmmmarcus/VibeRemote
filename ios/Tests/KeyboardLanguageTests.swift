@@ -60,6 +60,35 @@ final class KeyboardLanguageTests: XCTestCase {
         }
     }
 
+    func testEnglishCorrectionCandidateSpaceUndoAndSettingThroughKeyboard() async throws {
+        try await withKeyboard(.english) { keyboard, proxy in
+            try type("teh", in: keyboard)
+            XCTAssertEqual(control("candidate.typing.0", in: keyboard)?.accessibilityLabel, "the")
+            XCTAssertTrue(control("candidate.typing.0", in: keyboard)?.accessibilityTraits.contains(.selected) == true)
+            try tap("space", in: keyboard)
+            XCTAssertEqual(proxy.editor.text, "the ")
+            try tap("delete", in: keyboard)
+            XCTAssertEqual(proxy.editor.text, "teh")
+            try tap("space", in: keyboard)
+            XCTAssertEqual(proxy.editor.text, "teh ")
+            keyboard.applyKeyboardPreferences(KeyboardPreferences(autoCorrectionEnabled: false))
+            try type("adn ", in: keyboard)
+            XCTAssertEqual(proxy.editor.text, "teh adn ")
+            XCTAssertNil(control("candidate.typing.0", in: keyboard))
+        }
+    }
+
+    func testEnglishCandidateTapReplacesOwnedWordAndKeepsTyping() async throws {
+        try await withKeyboard(.english) { keyboard, proxy in
+            try type("recieve", in: keyboard)
+            let candidate = try XCTUnwrap(control("candidate.typing.0", in: keyboard) as? UIControl)
+            candidate.sendActions(for: .touchUpInside)
+            XCTAssertEqual(proxy.editor.text, "receive ")
+            try type("hello", in: keyboard)
+            XCTAssertEqual(proxy.editor.text, "receive hello")
+        }
+    }
+
     func testChineseInlineCompositionAndSpaceCommitRemainChinese() async throws {
         try await withKeyboard(.chinese) { keyboard, proxy in
             try type("wozhidaole", in: keyboard)
@@ -68,6 +97,35 @@ final class KeyboardLanguageTests: XCTestCase {
             XCTAssertNil(control("candidate.english", in: keyboard))
             try tap("space", in: keyboard)
             try await waitUntil { proxy.editor.text == "我知道了" && proxy.editor.markedTextRange == nil }
+        }
+    }
+
+    func testChineseTypoCandidateCommitsDisplayedCorrectionOnSpace() async throws {
+        try await withKeyboard(.chinese) { keyboard, proxy in
+            try type("wozhdiao", in: keyboard)
+            try await waitUntil { control("candidate.correction.0", in: keyboard)?.accessibilityLabel == "我知道" }
+            XCTAssertNotNil(proxy.editor.markedTextRange)
+            try tap("space", in: keyboard)
+            try await waitUntil { proxy.editor.text == "我知道" && proxy.editor.markedTextRange == nil }
+        }
+    }
+
+    func testChineseModeAcceptsEnglishThenChineseWithoutExperimentalSetting() async throws {
+        try await withKeyboard(.chinese) { keyboard, proxy in
+            try type("design", in: keyboard)
+            try await waitUntil { control("candidate.english", in: keyboard)?.accessibilityLabel == "design" }
+            XCTAssertEqual(control("candidate.english", in: keyboard)?.accessibilityLabel, "design",
+                           "Rendered candidates: \(controls(in: keyboard.view).filter { $0.accessibilityIdentifier?.hasPrefix("candidate.") == true }.map { "\($0.accessibilityIdentifier ?? "")=\($0.accessibilityLabel ?? "")" })")
+            XCTAssertTrue(control("candidate.english", in: keyboard)?.accessibilityTraits.contains(.selected) == true)
+            XCTAssertNotNil(proxy.editor.markedTextRange)
+            try tap("space", in: keyboard)
+            try await waitUntil { proxy.editor.text == "design " && proxy.editor.markedTextRange == nil }
+            try type("zoucha ", in: keyboard)
+            try await waitUntil { proxy.editor.text == "design 走查" && proxy.editor.markedTextRange == nil }
+            try type("layout ", in: keyboard)
+            try await waitUntil { proxy.editor.text == "design 走查layout " && proxy.editor.markedTextRange == nil }
+            XCTAssertEqual(control("keyboard.key.language", in: keyboard)?.accessibilityLabel, "Chinese")
+            XCTAssertEqual(KeyboardLanguage.load(), .chinese)
         }
     }
 
@@ -142,13 +200,15 @@ final class KeyboardLanguageTests: XCTestCase {
             XCTAssertNil(control("candidate.0", in: keyboard))
             try tap("language", in: keyboard)
             let key = try XCTUnwrap(control("keyboard.key.language", in: keyboard) as? KeyControl)
-            XCTAssertEqual(key.label.text, "中英")
+            XCTAssertNil(key.label.text)
+            XCTAssertNotNil(key.icon.image)
             XCTAssertEqual(key.accessibilityLabel, "Mixed Chinese and English")
             try type("haode ", in: keyboard)
             try await waitUntil { proxy.editor.text == "haode hello 好的" }
             XCTAssertNil(control("candidate.english", in: keyboard))
             keyboard.applyKeyboardPreferences(KeyboardPreferences())
-            XCTAssertEqual(key.label.text, "中")
+            XCTAssertNil(key.label.text)
+            XCTAssertEqual(key.accessibilityLabel, "Chinese")
             XCTAssertEqual(KeyboardLanguage.load(), .chinese)
         }
     }
@@ -190,7 +250,7 @@ final class KeyboardLanguageTests: XCTestCase {
             try type("haode", in: keyboard)
             try await waitUntil { control("candidate.0", in: keyboard)?.accessibilityLabel == "好的" }
             XCTAssertNil(control("candidate.english", in: keyboard))
-            XCTAssertEqual((control("keyboard.key.language", in: keyboard) as? KeyControl)?.label.text, "中")
+            XCTAssertEqual(control("keyboard.key.language", in: keyboard)?.accessibilityLabel, "Chinese")
             try tap("space", in: keyboard)
             try await waitUntil { proxy.editor.text == "Can 好的" }
         }

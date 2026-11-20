@@ -24,6 +24,7 @@ final class DictationBridgeAudioReader: DictationAudioSource, @unchecked Sendabl
     private let holdStartedAt: Date
     private let excluded: Set<UUID>
     private let followsLaterSessions: Bool
+    private let gain: VoiceInputGain
     private let onSamples: (@Sendable ([Float]) -> Void)?
     private let queue = DispatchQueue(label: "com.vvhisper.dictation.bridgeAudio")
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: DictationAudioFile.sampleRate,
@@ -44,11 +45,12 @@ final class DictationBridgeAudioReader: DictationAudioSource, @unchecked Sendabl
     /// continues the same hold, so `followsLaterSessions` lets it take the session that press
     /// starts; other holds take exactly one session.
     init(path: String, holdStartedAt: Date, excluding: Set<UUID>, followsLaterSessions: Bool,
-         onSamples: (@Sendable ([Float]) -> Void)? = nil) {
+         gain: VoiceInputGain = VoiceInputGain(), onSamples: (@Sendable ([Float]) -> Void)? = nil) {
         self.path = path
         self.holdStartedAt = holdStartedAt
         self.excluded = excluding
         self.followsLaterSessions = followsLaterSessions
+        self.gain = gain
         self.onSamples = onSamples
     }
 
@@ -78,7 +80,7 @@ final class DictationBridgeAudioReader: DictationAudioSource, @unchecked Sendabl
             poll()
             timer?.cancel()
             timer = nil
-            if !sessions.isEmpty { samples.append(contentsOf: flush()) }
+            if !sessions.isEmpty { samples.append(contentsOf: gain.apply(flush())) }
             try? file?.close()
             file = nil
             return DictationAudio(samples: samples)
@@ -133,7 +135,7 @@ final class DictationBridgeAudioReader: DictationAudioSource, @unchecked Sendabl
         let usable = data.count / DictationAudioFile.bytesPerSample * DictationAudioFile.bytesPerSample
         offset += UInt64(usable)
         let decoded = DictationAudioFile.samples(in: data.prefix(usable))
-        let chunk = resample(decoded)
+        let chunk = gain.apply(resample(decoded))
         guard !chunk.isEmpty else { return }
         onSamples?(chunk)
         guard Double(samples.count) < DictationRecorder.maximumDuration * DictationAudio.sampleRate else { return }

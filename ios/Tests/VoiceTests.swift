@@ -2,10 +2,18 @@ import XCTest
 @testable import vvhisper
 
 final class VoiceTests: XCTestCase {
+    func testTranslationCommandRoundTripAndLegacyCompatibility() throws {
+        let command = VoiceCommand(id: UUID(), phase: .finish, updatedAt: Date(), translate: true)
+        let encoded = try JSONEncoder().encode(command)
+        XCTAssertEqual(try JSONDecoder().decode(VoiceCommand.self, from: encoded), command)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "translate")
+        XCTAssertNil(try JSONDecoder().decode(VoiceCommand.self, from: JSONSerialization.data(withJSONObject: legacy)).translate)
+    }
     func testHapticStrengthHasOffAndClampedSteppedValues() {
         XCTAssertEqual(KeyboardPreferences.normalizedStrength(-1), 0)
         XCTAssertEqual(KeyboardPreferences.normalizedStrength(0), 0)
-        XCTAssertEqual(KeyboardPreferences.normalizedStrength(0.46), 0.45)
+        XCTAssertEqual(KeyboardPreferences.normalizedStrength(0.46), 0.46)
         XCTAssertEqual(KeyboardPreferences.normalizedStrength(2), 1)
         XCTAssertEqual(KeyboardPreferences.normalizedStrength(.nan), 0.45)
     }

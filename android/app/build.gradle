@@ -1,0 +1,49 @@
+plugins { id 'com.android.application' version '8.7.3' }
+
+def rime = file('../../ios/Typing/Resources/Rime')
+def dictionaries = layout.buildDirectory.dir('generated/dictionaries')
+tasks.register('prepareDictionaries', Exec) {
+    inputs.files(fileTree(rime) {
+        include 'cn_dicts/*.dict.yaml', 'EnglishWords.txt', '*LICENSE.txt', 'dictionary-provenance.json'
+    })
+    inputs.file('../scripts/dictionary.py')
+    outputs.dir(dictionaries)
+    commandLine 'python3', '../scripts/dictionary.py', rime, dictionaries.get().asFile
+}
+
+def emojiAssets = layout.buildDirectory.dir('generated/emoji')
+tasks.register('prepareEmoji', Copy) {
+    from('../../ios/Shared') { include 'EmojiCatalog.json', 'Unicode-Emoji-LICENSE.txt' }
+    into emojiAssets
+}
+
+android {
+    testOptions { unitTests.includeAndroidResources = true }
+    namespace 'app.vvhisper.keyboard'
+    compileSdk 35
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    defaultConfig {
+        applicationId 'app.vvhisper.keyboard'
+        minSdk 29
+        targetSdk 35
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        versionCode 1
+        versionName '0.1.0'
+    }
+    sourceSets.main.assets.srcDir(dictionaries)
+    sourceSets.main.assets.srcDir(emojiAssets)
+}
+tasks.named('preBuild').configure { dependsOn 'prepareDictionaries', 'prepareEmoji' }
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.test:core:1.6.1' 
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:2.0.0')
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'androidx.autofill:autofill:1.1.0'
+}
