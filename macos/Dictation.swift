@@ -56,6 +56,18 @@ struct DictationSettings: Equatable, Sendable {
         static let hotkeyMicrophoneName = "dictationHotkeyMicrophoneName"
     }
 
+    /// The visible field accepts modern API keys. An App ID retained from the old
+    /// console must not turn a replacement key into an Access Token request. Leave
+    /// existing legacy credentials alone until the user explicitly saves a new key.
+    @discardableResult
+    mutating func saveAPIKey(_ key: String, for provider: DictationProvider,
+                            write: (String, DictationProvider) -> Bool = { DictationKeychain.setKey($0, for: $1) }) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard provider.needsAPIKey, !trimmed.isEmpty, write(trimmed, provider) else { return false }
+        if provider == .seedASR { seedAppID = "" }
+        return true
+    }
+
     static func load(from defaults: UserDefaults = .standard) -> DictationSettings {
         var settings = DictationSettings()
         settings.sentencePunctuation = defaults.object(forKey: DictationSentencePunctuation.preferenceKey) as? Bool ?? true

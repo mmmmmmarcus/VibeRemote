@@ -20,6 +20,9 @@ final class ConfigurationSync: ObservableObject {
     private var applying = false
     private var generation = UUID()
     var didApply: (() -> Void)?
+    /// Credential-dependent local settings change only after every write succeeds,
+    /// never during a transaction that might roll the credentials back.
+    var didReplaceKeys: ((Set<Role>) -> Void)?
 
     init(defaults: UserDefaults, read: @escaping (Role) throws -> String?,
          write: @escaping (Role, String?) throws -> Void) {
@@ -130,6 +133,11 @@ final class ConfigurationSync: ObservableObject {
             applying = false
             throw rollbackFailed ? ConfigurationError.rollback : ConfigurationError.storage
         }
-        applying = false; didApply?()
+        let replacedKeys = Set(zip(values, originals).compactMap { next, previous in
+            next.0.isKey && next.1 != previous.1 ? next.0 : nil
+        })
+        applying = false
+        if !replacedKeys.isEmpty { didReplaceKeys?(replacedKeys) }
+        didApply?()
     }
 }

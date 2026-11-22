@@ -99,6 +99,51 @@ final class DictationTests: XCTestCase {
         }
     }
 
+    func testReplacingSeedKeyClearsLegacyAuthForAllRecognitionRoutes() throws {
+        let suite = "DictationAuthTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var settings = DictationSettings()
+        settings.seedAppID = "old-app"
+        settings.save(to: defaults)
+        settings = DictationSettings.load(from: defaults)
+        XCTAssertEqual(settings.seedAppID, "old-app", "loading must preserve existing legacy tokens")
+        XCTAssertTrue(settings.saveAPIKey(" new-api-key\n", for: .seedASR) { key, provider in
+            XCTAssertEqual(key, "new-api-key")
+            XCTAssertEqual(provider, .seedASR)
+            return true
+        })
+        settings.save(to: defaults)
+        settings = DictationSettings.load(from: defaults)
+        XCTAssertEqual(settings.seedAppID, "")
+        let requests = [
+            SeedASRDictationEngine.request(audio: DictationAudio(samples: [0]), accessKey: "new-api-key",
+                                          appID: settings.seedAppID, resourceID: settings.seedResourceID),
+            SeedStreamingSession.request(accessKey: "new-api-key", appID: settings.seedAppID,
+                                         resourceID: settings.seedStreamResourceID),
+            SeedStreamingSession.request(accessKey: "new-api-key", appID: settings.seedAppID,
+                                         resourceID: settings.seedStreamResourceID, endpoint: SeedStreamFrame.nostreamEndpoint),
+        ]
+        for request in requests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Api-Key"), "new-api-key")
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Api-App-Key"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Api-Access-Key"))
+        }
+    }
+
+    func testFailedEmptyAndUnrelatedKeySavesPreserveLegacyAuth() {
+        var settings = DictationSettings()
+        settings.seedAppID = "old-app"
+        XCTAssertFalse(settings.saveAPIKey("new-key", for: .seedASR) { _, _ in false })
+        XCTAssertEqual(settings.seedAppID, "old-app")
+        XCTAssertFalse(settings.saveAPIKey(" \n ", for: .seedASR) { _, _ in
+            XCTFail("An empty draft must not delete a saved key"); return true
+        })
+        XCTAssertEqual(settings.seedAppID, "old-app")
+        XCTAssertTrue(settings.saveAPIKey("openai-key", for: .openAI) { _, _ in true })
+        XCTAssertEqual(settings.seedAppID, "old-app")
+    }
+
     func testSettingsRoundTripAndFallBackToDefaults() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "DictationTests-\(UUID().uuidString)"))
         XCTAssertEqual(DictationSettings.load(from: defaults), DictationSettings())

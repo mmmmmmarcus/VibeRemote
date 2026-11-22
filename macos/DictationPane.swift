@@ -14,6 +14,7 @@ final class DictationSettingsStore: ObservableObject {
         didSet { if settings != oldValue { settings.save() } }
     }
     @Published private(set) var savedKeys: Set<DictationProvider> = DictationSettingsStore.loadSavedKeys()
+    @Published private(set) var keySaveError: String?
     @Published private(set) var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     @Published private(set) var whisperProgress: Double?
     @Published private(set) var whisperError: String?
@@ -33,9 +34,14 @@ final class DictationSettingsStore: ObservableObject {
         return WhisperModelCatalog.installedFolder(for: settings.whisperModel) != nil
     }
 
-    func saveKey(_ key: String, for provider: DictationProvider) {
-        DictationKeychain.setKey(key, for: provider)
+    func saveKey(_ key: String, for provider: DictationProvider) -> Bool {
+        guard settings.saveAPIKey(key, for: provider) else {
+            keySaveError = "Could not save the API key in Keychain. Try again."
+            return false
+        }
+        keySaveError = nil
         savedKeys = Self.loadSavedKeys()
+        return true
     }
 
     func refresh() {
@@ -293,7 +299,7 @@ struct DictationPane: View {
                 .fixedSize()
             }
         case .seedASR:
-            keyRow(provider: .seedASR, prompt: "API key or Access Token")
+            keyRow(provider: .seedASR, prompt: "API key")
             SettingsRow(title: "Streaming Output") {
                 Toggle("", isOn: $store.settings.seedStreaming)
                     .labelsHidden()
@@ -315,7 +321,7 @@ struct DictationPane: View {
 
     private func keyRow(provider: DictationProvider, prompt: String) -> some View {
         let saved = store.savedKeys.contains(provider)
-        return SettingsRow(title: "API Key") {
+        return SettingsRow(title: "API Key", subtitle: store.keySaveError) {
             HStack(spacing: SettingsMetrics.md) {
                 SecureField("", text: $keyDraft, prompt: Text(saved ? "Replace key" : prompt))
                     .textFieldStyle(.roundedBorder)
@@ -328,8 +334,7 @@ struct DictationPane: View {
 
     private func saveKey(_ provider: DictationProvider) {
         guard !keyDraft.isEmpty else { return }
-        store.saveKey(keyDraft, for: provider)
-        keyDraft = ""
+        if store.saveKey(keyDraft, for: provider) { keyDraft = "" }
     }
 
     /// A saved model missing from the list (renamed, or set elsewhere) stays selectable.

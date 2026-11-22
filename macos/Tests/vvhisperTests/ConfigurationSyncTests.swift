@@ -87,6 +87,24 @@ final class ConfigurationSyncTests: XCTestCase {
     }
     #if os(macOS)
     @MainActor
+    func testCredentialSideEffectsOnlyFollowCommittedKeyReplacements() throws {
+        let f = Fixture()
+        f.local = [.seedASR: "legacy-token", .polishing: "old-ark"]
+        var replaced: [Set<ConfigurationSync.Role>] = []
+        f.sync.didReplaceKeys = { replaced.append($0) }
+        try f.sync.apply(.init(settings: .init(polishDictation: false)))
+        XCTAssertTrue(replaced.isEmpty)
+        f.failNextPolishing = true
+        XCTAssertThrowsError(try f.sync.apply(document))
+        XCTAssertTrue(replaced.isEmpty, "rollback must preserve the legacy App ID with its token")
+        XCTAssertEqual(f.local[.seedASR], "legacy-token")
+        try f.sync.apply(document)
+        XCTAssertEqual(replaced, [Set([.seedASR, .polishing])])
+        try f.sync.apply(document)
+        XCTAssertEqual(replaced.count, 1, "unchanged credentials must not reset local authentication")
+    }
+
+    @MainActor
     func testLinkedFileLifecycleKeepsExistingKeysAndDisconnectPreservesFile() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

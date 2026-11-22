@@ -21,6 +21,13 @@ enum MacConfiguration {
                 UserDefaults.standard.set(value == "true", forKey: role == .polishDictation ? "dictationPolish" : "dictationSentencePunctuation")
             }
         })
+        value.didReplaceKeys = { roles in
+            guard roles.contains(.seedASR) else { return }
+            // Portable credentials contain API keys, not the old App ID/token pair.
+            var settings = DictationSettings.load()
+            settings.seedAppID = ""
+            settings.save()
+        }
         value.didApply = {
             DictationSettingsStore.shared.settings = DictationSettings.load()
             DictationSettingsStore.shared.refresh()
