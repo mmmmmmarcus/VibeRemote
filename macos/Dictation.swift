@@ -132,7 +132,10 @@ enum DictationKeychain {
 
     static func polishKey() -> String? { key(service: "com.viberemote.dictation.ark") }
 
-    private static func key(service: String) -> String? {
+    private static func key(service: String) -> String? { try? configurationKey(service: service) }
+
+    /// Sync/import must distinguish a missing key from a denied or locked read.
+    static func configurationKey(service: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -141,8 +144,10 @@ enum DictationKeychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data, let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = item as? Data,
+              let key = String(data: data, encoding: .utf8), !key.isEmpty else { throw ConfigurationError.storage }
         return key
     }
 
@@ -163,9 +168,14 @@ enum DictationKeychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(match as CFDictionary)
         let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return true }
+        guard !trimmed.isEmpty else {
+            let status = SecItemDelete(match as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let status = SecItemUpdate(match as CFDictionary, [kSecValueData as String: Data(trimmed.utf8)] as CFDictionary)
+        if status == errSecSuccess { return true }
+        guard status == errSecItemNotFound else { return false }
         var add = match
         add[kSecValueData as String] = Data(trimmed.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
@@ -805,6 +815,7 @@ final class DictationController: ObservableObject {
     /// `followsLaterSessions`: a first-generation remote, whose tail re-press continues the hold.
     func begin(source: Source = .remote, followsLaterSessions: Bool = false, remoteGeneration: RemoteGeneration = .unknown) {
         guard recorder == nil else { return }
+        DictationNoticePresenter.shared.dismiss()
         let settings = DictationSettings.load()
         // The remote's voice comes straight from the voice helper; only the Mac's own
         // microphone needs Microphone access.
@@ -851,6 +862,10 @@ final class DictationController: ObservableObject {
             } else {
                 target.kind = .pending
             }
+        }
+        if target.kind == .editor && !AXIsProcessTrusted() {
+            fail("Accessibility permission is required to insert dictation text.")
+            return
         }
         let live = settings.provider == .seedASR && settings.seedStreaming ? startStream(settings) : nil
         switch target.kind {
@@ -1135,7 +1150,10 @@ final class DictationController: ObservableObject {
                            Self.hintSummary(settings, editorText: editorText)))
             if hold == holdCount { indicator.hide() }
             guard !text.isEmpty else {
-                if hold == holdCount { phase = .finished("No speech recognized.") }
+                if hold == holdCount {
+                    phase = .finished("No speech recognized.")
+                    DictationNoticePresenter.shared.show(.noSpeech)
+                }
                 return
             }
             Self.settle(target, live: nil)
@@ -1145,12 +1163,17 @@ final class DictationController: ObservableObject {
                 return
             }
             guard destination?.isCurrent == true else {
-                if hold == holdCount { phase = .finished("Stopped typing because focus changed while processing dictation.") }
+                if hold == holdCount { fail("The input field lost focus while processing dictation.") }
+                return
+            }
+            guard AXIsProcessTrusted() else {
+                if hold == holdCount { fail("Accessibility permission is required to insert dictation text.") }
                 return
             }
             await DictationTyper.type(text)
             guard !Task.isCancelled else { return }
             if hold == holdCount {
+                if polish.notice != nil { DictationNoticePresenter.shared.show(.polishing) }
                 phase = .finished(String(format: "Typed %d characters with %@ in %.1f s.",
                                          text.count, settings.provider.title, elapsed) + (polish.notice.map { " " + $0 } ?? ""))
             }
@@ -1231,9 +1254,14 @@ final class DictationController: ObservableObject {
             phase = .finished(final.isEmpty ? "No speech recognized." : "Sent \(final.count) characters to Computer Use.")
         } else if let stopped {
             phase = .finished("Stopped typing because \(stopped).")
+            if !stopped.contains("you edited") {
+                DictationNoticePresenter.shared.show(.failure(stopped))
+            }
         } else if final.isEmpty {
             phase = .finished("No speech recognized.")
+            DictationNoticePresenter.shared.show(.noSpeech)
         } else {
+            if polish.notice != nil { DictationNoticePresenter.shared.show(.polishing) }
             phase = .finished(String(format: "Typed %d characters as you spoke; settled %.1f s after release.",
                                      final.count, elapsed) + (polish.notice.map { " " + $0 } ?? ""))
         }
@@ -1263,6 +1291,7 @@ final class DictationController: ObservableObject {
     private func fail(_ message: String) {
         indicator.hide()
         phase = .failed(message)
+        DictationNoticePresenter.shared.show(.failure(message))
         NSSound.beep()
     }
 

@@ -506,6 +506,7 @@ final class DictationTypewriter {
     private var timer: Timer?
     private var settleTicks = 0
     private var caretWaits = 0
+    private var finalConfirmationWaits = 0
     private var focus: Focus?
     private var lastElementCheck: TimeInterval = 0
     /// The final replacement's selection, written and awaiting confirmation.
@@ -572,13 +573,29 @@ final class DictationTypewriter {
     private func tick() {
         timer = nil
         guard !isDone else { return }
+        guard AXIsProcessTrusted() else { stop("Accessibility permission is missing"); return }
         if let previous {
             guard previous.isDone else { schedule(0.03); return }
             self.previous = nil
         }
         let plan = DictationTypewriterPlan.edit(displayed: displayed, target: target)
         if plan.delete == 0, plan.insert.isEmpty {
-            if finishing { complete() }
+            if finishing {
+                // Keyboard-event posting has no delivery acknowledgement. Where the
+                // editor exposes text and selection, verify its final text before success.
+                if !displayed.isEmpty, let focus, let element = focus.element,
+                   let selection = Self.selection(element), let value = Self.value(element) {
+                    let confirmed = selection.length == 0 &&
+                        DictationTypewriterPlan.reanchor(value: value, caret: selection.location, displayed: displayed) != nil
+                    if !confirmed {
+                        finalConfirmationWaits += 1
+                        if finalConfirmationWaits <= 10 { schedule(0.03); return }
+                        stop("the input field did not confirm the dictated text")
+                        return
+                    }
+                }
+                complete()
+            }
             return
         }
         if let pending = replacing, let focus, let element = focus.element {

@@ -71,7 +71,7 @@ let package = Package(
                 "THIRD_PARTY_NOTICES.md",
             ],
             sources: [
-                "main.swift", "AppUpdater.swift", "OnboardingWindowController.swift",
+                "main.swift", "DictationNotice.swift", "AppUpdater.swift", "OnboardingWindowController.swift",
                 "RemoteInputPolicy.swift", "ButtonProfiles.swift", "RemoteCaretController.swift",
                 "BluetoothAccessManager.swift", "SoundcoreManager.swift", "SoundcoreProtocol.swift", "SoundcoreAudio.swift",
                 "SiriRemoteApp.swift",
@@ -87,7 +87,7 @@ let package = Package(
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
                 "SystemVolume.swift", "AgentLocalActions.swift", "AgentDecision.swift", "AgentConversationModel.swift", "AgentConversationAliases.swift", "AgentConversationSections.swift", "AgentConversationTraversal.swift", "AgentConversationAttributes.swift", "AgentConversationActions.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
-                "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDraftUnderline.swift", "DictationPolisher.swift", "DictationSentencePunctuation.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
+                "SharedConfiguration/PortableConfiguration.swift", "SharedConfiguration/EncryptedConfiguration.swift", "SharedConfiguration/ConfigurationFile.swift", "SharedConfiguration/ConfigurationSync.swift", "ConfigurationTransfer.swift", "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDraftUnderline.swift", "DictationPolisher.swift", "DictationSentencePunctuation.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
             ],
             resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],

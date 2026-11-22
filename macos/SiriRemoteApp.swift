@@ -117,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await DictationRecorder.verifySelectedMicrophone() }
         }
         
+        DictationNoticePresenter.shared.openSettings = { [weak self] in
+            self?.menuBarManager?.showSettings()
+        }
+
         // Create menu bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let statusItem = statusItem else {
@@ -308,6 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return false }
             return self.handleInterceptedMediaKey(keyType, isPressed: isPressed, remoteSource: remoteSource)
         }
+        MacConfiguration.sync.start()
         AppUpdater.shared.start()
         refreshInputMonitoringAccess()
         refreshAccessibilityAccess()

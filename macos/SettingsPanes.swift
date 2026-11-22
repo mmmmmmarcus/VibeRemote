@@ -1314,6 +1314,7 @@ private struct AboutPane: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, SettingsMetrics.md)
             }
+            ConfigurationTransferSection()
             AboutPermissions(actions: actions)
             Section("Siri Remote Microphone") {
                 SettingsRow(title: "Audio Capture Tool", subtitle: "Siri audio requires Apple’s PacketLogger from Additional Tools for Xcode.") {
