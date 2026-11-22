@@ -262,6 +262,10 @@ struct SettingsDiagnostics: Equatable {
 /// Everything a pane can ask the app to do. The menu manager owns the work; Settings
 /// only forwards the user's choice.
 struct SettingsActions {
+    var choosePacketLogger: () -> Void = {}
+    var requestInputAccess: () -> Void = {}
+    var requestControlAccess: () -> Void = {}
+    var requestBluetoothAccess: () -> Void = {}
     var installAudioDriver: () -> Void = {}
     /// Registers the helper, or opens Login Items when it is already waiting for approval.
     var setUpHelper: () -> Void = {}

@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import Speech
 import SwiftUI
 import RemoteAudioProtocol
 
@@ -69,7 +71,7 @@ struct SettingsRootView: View {
                 case .agent: AgentPane(generation: model.snapshot.generation,
                                        openPanel: actions.openAgentPanel)
                 case .soundcore: SoundcorePane()
-                case .about: AboutPane(updater: updater, actions: actions)
+                case .about: AboutPane(updater: updater, model: model, actions: actions)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1277,6 +1279,7 @@ private struct TextCursorGuide: View {
 /// (user's request), after a stay here since 2026-11-11.
 private struct AboutPane: View {
     @ObservedObject var updater: AppUpdater
+    @ObservedObject var model: RemoteSettingsModel
     let actions: SettingsActions
 
     private static let repository = URL(string: "https://github.com/mmmmmmarcus/VibeRemote")!
@@ -1311,6 +1314,20 @@ private struct AboutPane: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, SettingsMetrics.md)
             }
+            AboutPermissions(actions: actions)
+            Section("Siri Remote Microphone") {
+                SettingsRow(title: "Audio Capture Tool", subtitle: "Siri audio requires Apple’s PacketLogger from Additional Tools for Xcode.") {
+                    Button("Choose PacketLogger…", action: actions.choosePacketLogger)
+                }
+                SettingsRow(title: "Microphone Bridge", subtitle: model.diagnostics.attention) {
+                    Text(model.diagnostics.bridgeRunning ? "Running" : "Stopped")
+                        .foregroundStyle(model.diagnostics.bridgeRunning ? Color.green : Color.orange)
+                    Button(model.diagnostics.bridgeRunning ? "Restart…" : "Start…", action: actions.restartBridge)
+                }
+                SettingsRow(title: "Helper", subtitle: model.diagnostics.helper) {
+                    Button("Set Up / Repair…", action: actions.setUpHelper)
+                }
+            }
             Section("Software") {
                 SettingsRow(title: "Software Update", subtitle: updater.updateAvailable ? "An update is available." : nil,
                             statusDot: updater.updateAvailable ? .accentColor : nil) {
@@ -1334,6 +1351,73 @@ private struct AboutPane: View {
                 }
             }
         }
+    }
+}
+
+/// Reads permission state only; prompts happen exclusively on a button press.
+private struct AboutPermissions: View {
+    let actions: SettingsActions
+    @State private var input = false
+    @State private var accessibility = false
+    @State private var bluetooth = BluetoothAccessState.notDetermined
+    @State private var microphone = AVAuthorizationStatus.notDetermined
+    @State private var speech = SFSpeechRecognizerAuthorizationStatus.notDetermined
+    @State private var screen = false
+
+    private func refresh() {
+        input = CGPreflightListenEventAccess()
+        accessibility = AXIsProcessTrusted()
+        bluetooth = BluetoothAccessManager.currentState
+        microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+        speech = SFSpeechRecognizer.authorizationStatus()
+        screen = CGPreflightScreenCaptureAccess()
+    }
+
+    private func settings(_ pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_" + pane) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func row(_ title: String, detail: String, status: String, granted: Bool,
+                     pane: String, request: @escaping () -> Void) -> some View {
+        SettingsRow(title: title, subtitle: detail) {
+            Text(status).foregroundStyle(granted ? Color.green : Color.orange)
+            Button(granted ? "Settings…" : "Review…") {
+                if granted { settings(pane) } else { request() }
+            }
+            .accessibilityIdentifier("settings.permissions." + pane)
+        }
+    }
+
+    var body: some View {
+        Section("Permissions") {
+            row("Input Monitoring", detail: "Siri Remote buttons and the dictation hotkey.",
+                status: input ? "Granted" : "Not Granted", granted: input, pane: "ListenEvent",
+                request: actions.requestInputAccess)
+            row("Accessibility", detail: "Insert dictated text and control the text cursor.",
+                status: accessibility ? "Granted" : "Not Granted", granted: accessibility,
+                pane: "Accessibility", request: actions.requestControlAccess)
+            row("Bluetooth", detail: "Connect to remote microphones and read device status.",
+                status: bluetooth == .allowed ? "Granted" : bluetooth == .restricted ? "Restricted" : bluetooth == .notDetermined ? "Not Requested" : "Denied",
+                granted: bluetooth == .allowed, pane: "Bluetooth", request: actions.requestBluetoothAccess)
+            row("Microphone", detail: "Capture audio from Mac microphones.",
+                status: microphone == .authorized ? "Granted" : microphone == .restricted ? "Restricted" : microphone == .notDetermined ? "Not Requested" : "Denied",
+                granted: microphone == .authorized, pane: "Microphone", request: DictationSettingsStore.shared.requestMicrophone)
+            row("Speech Recognition", detail: "Only needed for Apple Speech recognition.",
+                status: speech == .authorized ? "Granted" : speech == .restricted ? "Restricted" : speech == .notDetermined ? "Not Requested" : "Denied",
+                granted: speech == .authorized, pane: "SpeechRecognition", request: {
+                    if speech == .notDetermined { SFSpeechRecognizer.requestAuthorization { _ in } }
+                    else { settings("SpeechRecognition") }
+                })
+            row("Screen Recording", detail: "Only needed for Computer Use screenshots.",
+                status: screen ? "Granted" : "Not Granted", granted: screen, pane: "ScreenCapture", request: {
+                    if !CGRequestScreenCaptureAccess() { settings("ScreenCapture") }
+                })
+        }
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in refresh() }
     }
 }
 

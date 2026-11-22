@@ -2051,6 +2051,12 @@ final class MicrophoneBridgeManager: @unchecked Sendable {
         }
         if lastDirectGATTLine?.contains("waiting for Bluetooth permission") == true {
             issues.append("Bluetooth audio permission is required. Choose Allow Bluetooth Audio in the main menu.")
+        } else if MicrophoneBridgeEngine.usesPacketLogger {
+            if !packetLoggerAlive || packetLoggerDisconnected {
+                issues.append("Siri Remote audio capture is unavailable. Start the microphone bridge or review its setup error.")
+            } else if helperAlive && oldAudioFrameCount == 0 && newVoiceFrameCount == 0 {
+                issues.append("No Siri Remote audio frames have arrived. Hold the Siri button and speak, then refresh diagnostics.")
+            }
         } else if helperAlive && directHIDReportCount == 0 {
             issues.append("No Direct HID audio reports have arrived. Hold the Siri button and speak, then refresh diagnostics.")
         }

@@ -1945,3 +1945,17 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(RemoteInputHandler.identifyButton(page: 0x0C, usage: 0x77))
     }
 }
+
+final class BluetoothConnectionEdgesTests: XCTestCase {
+    func testRepeatedConnectionsDoNotRestartCaptureButReconnectDoes() {
+        var edges = BluetoothConnectionEdges()
+        edges.seed(["existing"])
+        XCTAssertFalse(edges.connect("existing"))
+        XCTAssertTrue(edges.connect("Soundcore"))
+        XCTAssertFalse(edges.connect("soundcore"))
+        XCTAssertTrue(edges.connect("Siri"))
+        edges.disconnect("SOUNDCORE")
+        XCTAssertTrue(edges.connect("soundcore"))
+        XCTAssertFalse(edges.connect("siri"))
+    }
+}

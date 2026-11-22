@@ -1,3 +1,16 @@
+/// IOBluetooth may replay connect notifications without a disconnect edge.
+struct BluetoothConnectionEdges {
+    private var connected: Set<String> = []
+    mutating func seed(_ addresses: Set<String>) { connected = addresses }
+    mutating func connect(_ address: String?) -> Bool {
+        guard let address else { return true }
+        return connected.insert(address.lowercased()).inserted
+    }
+    mutating func disconnect(_ address: String?) {
+        if let address { connected.remove(address.lowercased()) }
+    }
+}
+
 //
 //  SiriRemoteApp.swift
 //  vvhisper
@@ -79,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Keyed by lowercased address so a reconnect replaces its own stale observer.
     private var bluetoothDisconnectNotifications: [String: IOBluetoothUserNotification] = [:]
     private var bluetoothBridgeRecoveryTimer: Timer?
+    private var bluetoothConnectionEdges = BluetoothConnectionEdges()
     private var initialBluetoothConnections: Set<String> = []
     private var initialBluetoothConnectionTimer: Timer?
     private var pendingIdleDisconnects: Set<String> = []
@@ -379,6 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard device.isConnected() else { return nil }
             return device.addressString?.lowercased()
         })
+        bluetoothConnectionEdges.seed(Set(initialBluetoothConnections.map { $0.lowercased() }))
         initialBluetoothConnectionTimer?.invalidate()
         initialBluetoothConnectionTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -461,6 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleBluetoothDeviceDisconnected(deviceDescription: String, address: String?) {
         guard !didCleanUp else { return }
+        bluetoothConnectionEdges.disconnect(address)
         remoteConnectionRecoveryProbe.invalidate()
         caretController.reset()
         if let address {
@@ -476,6 +492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleBluetoothDeviceConnected(deviceDescription: String, address: String?) {
         guard !didCleanUp else { return }
+        guard bluetoothConnectionEdges.connect(address) else { return }
         remoteConnectionRecoveryProbe.invalidate()
         recoverMissingRemoteInterfaces()
         if let address,

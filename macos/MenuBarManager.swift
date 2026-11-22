@@ -581,6 +581,10 @@ final class MenuBarManager: NSObject, NSMenuDelegate {
                 resetSiriAction: { [weak self] in self?.restoreEditingProfile() },
                 setIdleTimeout: { [weak self] timeout in self?.setRemoteIdleTimeout(timeout) },
                 actions: SettingsActions(
+                    choosePacketLogger: { [weak self] in self?.microphoneBridgeManager.promptForPacketLogger() },
+                    requestInputAccess: { [weak self] in self?.requestInputAccessHandler?() },
+                    requestControlAccess: { [weak self] in self?.requestControlAccessHandler?() },
+                    requestBluetoothAccess: { [weak self] in self?.requestBluetoothAccessHandler?() },
                     installAudioDriver: { [weak self] in self?.installAudioDriver() },
                     setUpHelper: { [weak self] in self?.setUpPrivilegedHelper() },
                     setButtonAction: { [weak self] button, action in self?.setButtonAction(action, for: button) },
