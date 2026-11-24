@@ -15,7 +15,7 @@ final class MainSettingsViewController: UITableViewController {
 
     init(loadPreferences: @escaping () -> KeyboardPreferences = { .load() },
          savePreferences: @escaping (KeyboardPreferences) throws -> Void = { try $0.save() },
-         outputDefaults: UserDefaults = .standard) {
+         outputDefaults: UserDefaults = VoiceConfiguration.defaults) {
         self.loadPreferences = loadPreferences; self.savePreferences = savePreferences
         self.outputDefaults = outputDefaults
         preferences = loadPreferences()
@@ -65,14 +65,14 @@ final class MainSettingsViewController: UITableViewController {
 
     override func numberOfSections(in tableView: UITableView) -> Int { 4 }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? 5 : section == 2 ? 3 : section == 3 ? 1 : 3
+        section == 0 ? 4 : section == 2 ? 3 : section == 3 ? 1 : 3
     }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         ["Voice Input", "Keyboard", "Haptics", "Experimental"][section]
     }
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch section {
-        case 0: return "Voice input starts automatically and turns off \(preferences.voiceSessionTitle) after microphone activation, including during dictation. Only speech during a dictation hold is sent for transcription."
+        case 0: return "The microphone starts when you hold a letter key or Dictate, and stops when you release. Dictation works directly in the keyboard."
         case 1: return "Add vvhisper in Settings → General → Keyboard, then allow Full Access for dictation. Use the language key to switch typing languages."
         case 2: return "Strength controls force. Sharpness changes the tap from soft to crisp. Use − and + for 1% adjustments. Set Strength to Off for no haptics."
         default: return "Chinese mode already suggests recognizable English words. Turn this on to also favor capitalized words and unfinished English spelling."
@@ -100,21 +100,11 @@ final class MainSettingsViewController: UITableViewController {
             cell.selectionStyle = .none
             cell.accessibilityIdentifier = "voice-status"
         case (0, 1):
-            content.text = "Seed API Key"
-            content.secondaryText = SeedKeychain.read() == nil ? "Not set" : "Saved"
-            content.image = UIImage(systemName: "key.fill")
-            cell.accessibilityIdentifier = "settings.api-key"
-        case (0, 2):
-            content.text = "Keep Dictation Ready"
-            content.secondaryText = preferences.voiceSessionTitle
-            content.image = UIImage(systemName: "timer")
-            cell.accessibilityIdentifier = "settings.voice-duration"
-        case (0, 3):
             content.text = "Polish Dictation"
-            content.secondaryText = !DictationPolishSettings.load().enabled ? "Off" : ArkPolishKeychain.read() == nil ? "Add API Key" : "On"
+            content.secondaryText = DictationPolishSettings.load().enabled ? "On" : "Off"
             content.image = UIImage(systemName: "text.badge.checkmark")
             cell.accessibilityIdentifier = "settings.polishing"
-        case (0, 4):
+        case (0, 2):
             content = .subtitleCell()
             content.text = "Sentence Punctuation"
             content.secondaryText = "Ending punctuation for one short dictated sentence. Longer passages stay unchanged."
@@ -122,6 +112,10 @@ final class MainSettingsViewController: UITableViewController {
             cell.accessoryType = .none; cell.accessoryView = sentencePunctuationSwitch
             cell.selectionStyle = .none
             cell.accessibilityIdentifier = "settings.sentence-punctuation"
+        case (0, 3):
+            content.text = "Sync and Transfer"
+            content.image = UIImage(systemName: "icloud")
+            cell.accessibilityIdentifier = "settings.sync-transfer"
         case (1, 0):
             content.text = "Try Keyboard"
             content.image = UIImage(systemName: "character.cursor.ibeam")
@@ -153,13 +147,8 @@ final class MainSettingsViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         switch (indexPath.section, indexPath.row) {
-        case (0, 1): navigationController?.pushViewController(SeedKeyViewController(), animated: true)
-        case (0, 2):
-            let picker = VoiceDurationViewController(minutes: preferences.voiceSessionMinutes) { [weak self] minutes in
-                self?.setVoiceSessionMinutes(minutes) == true
-            }
-            navigationController?.pushViewController(picker, animated: true)
-        case (0, 3): navigationController?.pushViewController(PolishSettingsViewController(), animated: true)
+        case (0, 3): navigationController?.pushViewController(ConfigurationTransferViewController(style: .insetGrouped), animated: true)
+        case (0, 1): navigationController?.pushViewController(PolishSettingsViewController(), animated: true)
         case (1, 0): navigationController?.pushViewController(KeyboardTestViewController(), animated: true)
         case (1, 1): UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case (1, 2): navigationController?.pushViewController(TypingSettingsViewController(load: loadPreferences, save: savePreferences), animated: true)
@@ -174,16 +163,6 @@ final class MainSettingsViewController: UITableViewController {
     }
     @objc private func setSentencePunctuation() {
         DictationOutputSettings(sentencePunctuation: sentencePunctuationSwitch.isOn).save(outputDefaults)
-    }
-    @discardableResult func setVoiceSessionMinutes(_ minutes: Int) -> Bool {
-        var updated = preferences
-        updated.voiceSessionMinutes = KeyboardPreferences.normalizedSessionMinutes(minutes)
-        do { try savePreferences(updated) }
-        catch { return false }
-        preferences = updated
-        VoiceHost.shared.updateSessionDuration(minutes: updated.voiceSessionMinutes)
-        tableView.reloadSections(IndexSet(integer: 0), with: .none)
-        return true
     }
     @discardableResult func setHaptics(strength: Double? = nil, sharpness: Double? = nil) -> Bool {
         let previous = preferences
@@ -217,41 +196,6 @@ final class MainSettingsViewController: UITableViewController {
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
         }
-    }
-}
-
-private final class VoiceDurationViewController: UITableViewController {
-    private var minutes: Int
-    private let save: (Int) -> Bool
-    init(minutes: Int, save: @escaping (Int) -> Bool) {
-        self.minutes = minutes; self.save = save
-        super.init(style: .insetGrouped)
-        title = "Keep Dictation Ready"
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { KeyboardPreferences.voiceSessionChoices.count }
-    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        "Measured from microphone activation. Changing this also updates the current session. Once it expires, hold a letter key to prepare voice input again."
-    }
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let value = KeyboardPreferences.voiceSessionChoices[indexPath.row]
-        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-        var content = cell.defaultContentConfiguration()
-        content.text = KeyboardPreferences(voiceSessionMinutes: value).voiceSessionTitle
-        cell.contentConfiguration = content
-        cell.accessoryType = value == minutes ? .checkmark : .none
-        cell.accessibilityIdentifier = "voice-duration.\(value)"
-        return cell
-    }
-    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
-        let value = KeyboardPreferences.voiceSessionChoices[indexPath.row]
-        guard save(value) else {
-            let alert = UIAlertController(title: "Couldn’t Save Setting", message: "Please try again.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default)); present(alert, animated: true)
-            return
-        }
-        minutes = value; tableView.reloadData()
     }
 }
 

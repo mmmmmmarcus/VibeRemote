@@ -24,8 +24,11 @@ struct VoiceLevel: Codable, Equatable {
             let value = min(1, max(-1, Double(sample)))
             energy += value * value
         }
-        guard energy > 0 else { return 0 }
-        let decibels = 10 * log10(energy / Double(samples.count))
+        return normalizedRMS(sqrt(energy / Double(samples.count)))
+    }
+    static func normalizedRMS(_ rms: Double) -> Double {
+        guard rms.isFinite, rms > 0 else { return 0 }
+        let decibels = 20 * log10(min(1, rms))
         return min(1, max(0, (decibels + 55) / 40))
     }
 }

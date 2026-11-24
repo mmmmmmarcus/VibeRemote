@@ -15,7 +15,10 @@ final class KeyboardViewController: UIInputViewController {
     private(set) var testingTapFeedbackCount = 0
     override var textDocumentProxy: UITextDocumentProxy { testingDocumentProxy ?? super.textDocumentProxy }
 #endif
-    private let rows = UIStackView()
+    private let webCapture = WebAudioCapture()
+    private lazy var voiceSession = KeyboardVoiceSession(capture: webCapture)
+    private var rows = UIStackView()
+    private var modeSourceRows: UIStackView?
     private let touchSurface = KeyboardTouchSurface()
     private let keyPreview = KeyPreviewView()
     private weak var previewKey: KeyControl?
@@ -42,11 +45,7 @@ final class KeyboardViewController: UIInputViewController {
     private var candidateFetchPending = false
     private var nextCandidateOffset = 0
     private var hasMoreCandidates = false
-    private let gesturePill = GesturePill()
-    private var shortcutsExpanded = false
-    private var shortcutToggle: UIButton?
     private var shortcutButtons: [UIButton] = []
-    private var pillDestination: KeyboardTextDestination?
     private let doubleSpace = DoubleSpacePeriod()
     private var endCursor: CursorDragSession?
     private var endCursorSteps = 0
@@ -65,10 +64,11 @@ final class KeyboardViewController: UIInputViewController {
     private var modeChordActive = false
     private var modeChordTaps: [String] = []
     private var modeChordDestination: KeyboardTextDestination?
-    private var modeAnimator: UIViewPropertyAnimator?
-    private var modeSnapshot: UIView?
-    private var modeAnimationGeneration = 0
-    var isModeAnimating: Bool { modeAnimator != nil }
+    private var modeTransition: KeyboardModeTransition?
+    private var preparingModeTransition = false
+    private var modeChordFromMini = false
+    var isModeAnimating: Bool { modeTransition != nil }
+    var modeTransitionProgress: CGFloat? { modeTransition?.progress }
     #if KEYBOARD_TESTING
     var testingReduceMotion: Bool?
     #endif
@@ -98,6 +98,13 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var bilingualProvider = BilingualCandidates()
     private var visibleCandidates: [PinyinCandidates.Candidate] = []
     private var language = KeyboardLanguage.load()
+    // UIKit owns long-press recognition and the enabled-keyboard menu. Its
+    // short-tap advance is replaced by our existing Chinese/English action.
+    private var handlingLocalLanguageTap = false
+    override func advanceToNextInputMode() {
+        if handlingLocalLanguageTap { return }
+        super.advanceToNextInputMode()
+    }
     private var usesPinyin: Bool { language == .chinese && pinyinAvailable }
     private var mixedTypingEnabled = false
     private var compositionUsesMixedTyping = false
@@ -141,6 +148,7 @@ final class KeyboardViewController: UIInputViewController {
     private weak var dictationTargetKey: KeyControl?
     private var keys: [KeyControl] = []
     private var deleteDestination: KeyboardTextDestination?
+    private var deleteExpansion: DeleteKeyExpansion?
     private var clearText: ClearTextSession?
     private var lastShift = Date.distantPast
     private var started = false
@@ -154,7 +162,7 @@ final class KeyboardViewController: UIInputViewController {
         let modeGesture = KeyboardModeGesture(target: nil, action: nil)
         modeGesture.onPair = { [weak self] points in self?.beginModeChord(at: points) }
         modeGesture.onChange = { [weak self] separationChange in self?.updateModeChord(separationChange) }
-        modeGesture.onFinish = { [weak self] direction, taps in self?.finishModeChord(direction: direction, replayTaps: taps) }
+        modeGesture.onFinish = { [weak self] direction, taps, velocity in self?.finishModeChord(direction: direction, replayTaps: taps, velocity: velocity) }
         view.addGestureRecognizer(modeGesture)
         view.accessibilityCustomActions = [
             UIAccessibilityCustomAction(name: "Mini keyboard") { [weak self] _ in self?.setMiniMode(true); return true },
@@ -196,7 +204,7 @@ final class KeyboardViewController: UIInputViewController {
         touchSurface.addSubview(rows)
         for item in [helperScroll, touchSurface, candidatePanel, status] { view.addSubview(item) }
         emojiPanel.isHidden = true; view.addSubview(emojiPanel)
-        emojiPanel.onClose = { [weak self] in self?.setEmojiVisible(false) }
+        emojiPanel.onClose = { [weak self] in self?.playTapFeedback(); self?.setEmojiVisible(false) }
         emojiPanel.onPress = { [weak self] in
             guard let self else { return }
             self.emojiPressDestination = KeyboardTextDestination(self.textDocumentProxy)
@@ -208,18 +216,7 @@ final class KeyboardViewController: UIInputViewController {
             self.insertingTypedText = true; self.textDocumentProxy.insertText(text); self.insertingTypedText = false
             self.playTapFeedback()
         }
-        emojiPanel.onSystemKeyboard = { [weak self] button, event in self?.handleInputModeList(from: button, with: event) }
         configureInputHelpers()
-        view.addSubview(gesturePill)
-        gesturePill.onBegin = { [weak self] in
-            guard let self else { return }
-            self.currentKey?.cancelPress(); self.pillDestination = KeyboardTextDestination(self.textDocumentProxy)
-        }
-        gesturePill.onAction = { [weak self] action in
-            guard let self, self.pillDestination == KeyboardTextDestination(self.textDocumentProxy),
-                  self.command == nil, !self.gesturePill.isHidden else { return }
-            self.pillDestination = nil; self.tap(action.rawValue)
-        }
         NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.changedNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.removedNotification, object: nil)
         let link = UIHostingController(rootView: VoiceLaunchLink(
@@ -251,6 +248,9 @@ final class KeyboardViewController: UIInputViewController {
         let savedMiniMode = KeyboardLayoutMode.load() == .mini
         if isMiniMode != savedMiniMode { setMiniMode(savedMiniMode, animated: false) }
         keyboardVisible = true
+        #if !KEYBOARD_TESTING
+        if hasFullAccess { webCapture.attach(to: view) }
+        #endif
         refreshCopiedCodes()
         refreshKeyboardAppearance()
         refreshKeyboardPreferences()
@@ -259,10 +259,11 @@ final class KeyboardViewController: UIInputViewController {
         poll()
     }
     override func viewWillDisappear(_ animated: Bool) {
+        hideDeleteExpansion(animated: false)
         // The remote document may already be gone, including its nominally nonnull UUID.
         // Teardown must only discard local state, never message the detached proxy.
         documentDetached = true
-        endCursor = nil; doubleSpace.reset(); shortcutsExpanded = false
+        endCursor = nil; doubleSpace.reset()
         tapFeedback.stop(); wordEdits.clear(); typingAssistance.clear(); editingSwipeDestination = nil
         stopModeAnimation()
         hideKeyPreview()
@@ -273,6 +274,7 @@ final class KeyboardViewController: UIInputViewController {
         clearText = nil; deleteDestination = nil
         // A touch cannot survive an app switch. Arming never resumes an old hold.
         cancelHold() // Preserve visible speech when the keyboard disappears.
+        voiceSession.cancel(); webCapture.detach()
         currentKey?.cancelPress(); currentKey = nil
         activationRequest = nil; offersHostLaunch = false
         resetComposition(); timer?.invalidate(); timer = nil; super.viewWillDisappear(animated)
@@ -321,8 +323,8 @@ final class KeyboardViewController: UIInputViewController {
         landscape = testingLandscape ?? landscape
 #endif
         if abs(width - layoutWidth) > 0.5 || landscape != layoutLandscape {
-            stopModeAnimation()
             layoutWidth = width; layoutLandscape = landscape
+            stopModeAnimation()
             metrics = KeyboardMetrics(width: width, landscape: landscape, mini: isMiniMode, tablet: tabletLayout)
             keyboardHeight.constant = metrics.contentHeight
             buildKeys()
@@ -336,9 +338,8 @@ final class KeyboardViewController: UIInputViewController {
         candidatePanel.headerHeight = headerHeight
         let expanded = candidatePanel.isExpanded && !candidatePanel.isHidden
         let panelHeight = expanded ? metrics.candidateHeight + 3 * (metrics.keyHeight + metrics.rowGap) - metrics.rowGap / 2 - 1 : headerHeight
-        candidatePanel.frame = CGRect(x: 0, y: 1, width: expanded ? width : max(0, width - 78), height: panelHeight)
-        helperScroll.frame = CGRect(x: 4, y: 1, width: shortcutsExpanded ? max(0, width - 82) : 48, height: max(0, headerHeight - 6))
-        gesturePill.frame = CGRect(x: width - 76, y: 1, width: 72, height: max(0, headerHeight - 6))
+        candidatePanel.frame = CGRect(x: 0, y: 1, width: width, height: panelHeight)
+        helperScroll.frame = CGRect(x: 4, y: 1, width: max(0, width - 8), height: max(0, headerHeight - 6))
         for (index, row) in rows.arrangedSubviews.enumerated() {
             row.alpha = expanded && index < 3 ? 0 : 1
             row.accessibilityElementsHidden = expanded && index < 3
@@ -358,83 +359,96 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         pendingMiniMode = nil
-        guard isMiniMode != enabled else { return }
-        let snapshot = animated && view.window != nil ? view.snapshotView(afterScreenUpdates: false) : nil
-        let oldHeight = view.bounds.height
         stopModeAnimation()
-        pasteGeneration += 1
-        clearText = nil; deleteDestination = nil
-        isMiniMode = enabled; page = 0
-        (enabled ? KeyboardLayoutMode.mini : .full).save()
-        metrics = KeyboardMetrics(width: layoutWidth > 0 ? layoutWidth : 466, landscape: layoutLandscape, mini: enabled, tablet: tabletLayout)
-        keyboardHeight.constant = metrics.contentHeight
-        buildKeys(); view.setNeedsLayout()
-        if animated { playTapFeedback() }
-        animateModeChange(snapshot: snapshot, oldHeight: oldHeight, shrinking: enabled)
+        guard isMiniMode != enabled else { return }
+        if animated, view.window != nil {
+            prepareModeTransition(toMini: enabled)
+            modeTransition?.settle(toMini: enabled)
+            playTapFeedback()
+        } else { applyMode(enabled); (enabled ? KeyboardLayoutMode.mini : .full).save() }
     }
-
-    private var modeContentViews: [UIView] { [touchSurface, candidatePanel, helperScroll, gesturePill, status] }
+    private var modeContentViews: [UIView] { [touchSurface, candidatePanel, helperScroll, status] }
+    private func applyMode(_ mini: Bool, page targetPage: Int = 0, resizeHost: Bool = true) {
+        pasteGeneration += 1; clearText = nil; deleteDestination = nil
+        isMiniMode = mini; page = targetPage
+        metrics = KeyboardMetrics(width: layoutWidth > 0 ? layoutWidth : 466, landscape: layoutLandscape, mini: mini, tablet: tabletLayout)
+        if resizeHost { keyboardHeight.constant = metrics.contentHeight }
+        preparingModeTransition = true; buildKeys(); preparingModeTransition = false
+        view.setNeedsLayout(); view.superview?.layoutIfNeeded(); view.layoutIfNeeded(); rows.layoutIfNeeded()
+    }
+    private func modeAppearance() -> KeyboardModeAppearance {
+        var items: [KeyboardModeAppearance.Item] = [], used = Set<String>()
+        for (index, key) in keys.enumerated() {
+            let shared = key.value == "space" ? "dictate" : ["123", "ABC"].contains(key.value) ? "expand" : key.value
+            let id = ["dictate", "expand", "delete", "return"].contains(shared) && used.insert(shared).inserted ? shared : "key.\(index)"
+            let snapshot = ModeKeyFace(key: key)
+            items.append(.init(id: id, view: snapshot, frame: key.convert(key.bounds, to: view)))
+        }
+        for (index, control) in touchSurface.controls.enumerated() where !(control is KeyControl) {
+            if let snapshot = control.snapshotView(afterScreenUpdates: true) {
+                items.append(.init(id: "accessory.\(index)", view: snapshot, frame: control.convert(control.bounds, to: view)))
+            }
+        }
+        for (index, content) in [candidatePanel, helperScroll].enumerated() where !content.isHidden {
+            if let snapshot = content.snapshotView(afterScreenUpdates: true) { items.append(.init(id: "header.\(index)", view: snapshot, frame: content.frame)) }
+        }
+        return KeyboardModeAppearance(height: metrics.contentHeight, items: items)
+    }
+    private func prepareModeTransition(toMini mini: Bool) {
+        guard modeTransition == nil else { return }
+        let fromMini = isMiniMode, originalPage = page
+        view.layoutIfNeeded(); rows.layoutIfNeeded()
+        let source = modeAppearance()
+        // Keep the touched views in their original hierarchy until both fingers
+        // finish; removing them here makes UIKit cancel the interactive pinch.
+        modeSourceRows = rows
+        rows = UIStackView(); rows.axis = .vertical
+        touchSurface.addSubview(rows)
+        applyMode(mini, resizeHost: false)
+        let target = modeAppearance()
+        let transition = KeyboardModeTransition(fromMini: fromMini, originalPage: originalPage,
+            full: fromMini ? target : source, mini: fromMini ? source : target, reduced: reduceModeMotion,
+            onHeight: { [weak self] height in
+                guard let self else { return }
+                self.keyboardHeight.constant = height
+                self.view.superview?.layoutIfNeeded()
+            }, onCompletion: { [weak self] mini in self?.finishModeTransition(mini) })
+        modeTransition = transition
+        for content in modeContentViews { content.alpha = 0.001 }
+        view.addSubview(transition.overlay)
+        transition.render(fromMini ? 1 : 0)
+    }
+    private func finishModeTransition(_ mini: Bool) {
+        guard let transition = modeTransition else { return }
+        modeTransition = nil; transition.stop()
+        modeSourceRows?.removeFromSuperview(); modeSourceRows = nil
+        applyMode(mini, page: mini == transition.fromMini ? transition.originalPage : 0)
+        for content in modeContentViews { content.alpha = 1; content.isUserInteractionEnabled = true }
+        (mini ? KeyboardLayoutMode.mini : .full).save()
+    }
     private func stopModeAnimation() {
-        modeAnimationGeneration += 1
-        modeAnimator?.stopAnimation(true); modeAnimator = nil
-        modeSnapshot?.removeFromSuperview(); modeSnapshot = nil
-        for content in modeContentViews {
-            content.layer.removeAllAnimations(); content.transform = .identity; content.alpha = 1
-        }
+        guard let transition = modeTransition else { return }
+        modeTransition = nil; transition.stop()
+        modeSourceRows?.removeFromSuperview(); modeSourceRows = nil
+        // Dismissal/rotation/new input abandon the incomplete gesture, not the saved mode.
+        applyMode(transition.fromMini, page: transition.originalPage)
+        for content in modeContentViews { content.alpha = 1; content.isUserInteractionEnabled = true }
     }
-    private func animateModeChange(snapshot: UIView?, oldHeight: CGFloat, shrinking: Bool) {
-        guard let snapshot else { return }
-        let reduced = reduceModeMotion
-        snapshot.isUserInteractionEnabled = false; snapshot.accessibilityElementsHidden = true
-        snapshot.accessibilityIdentifier = "keyboard.mode-transition"
-        snapshot.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: oldHeight)
-        let overlay = UIView(frame: view.bounds)
-        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        overlay.clipsToBounds = true; overlay.isUserInteractionEnabled = false
-        overlay.accessibilityElementsHidden = true
-        overlay.addSubview(snapshot); view.addSubview(overlay); modeSnapshot = overlay
-        for content in modeContentViews { content.alpha = reduced ? 0 : 0.4 }
-        let targetY = metrics.contentHeight - oldHeight
-        if reduced {
-            view.superview?.layoutIfNeeded(); view.layoutIfNeeded()
-            snapshot.frame.origin.y = targetY
-        }
-        let generation = modeAnimationGeneration
-        let animator = UIViewPropertyAnimator(duration: reduced ? 0.12 : 0.24, dampingRatio: 1)
-        animator.isUserInteractionEnabled = true
-        animator.addAnimations { [weak self, weak snapshot] in
-            guard let self else { return }
-            self.view.superview?.layoutIfNeeded(); self.view.layoutIfNeeded()
-            snapshot?.frame.origin.y = targetY
-            snapshot?.alpha = 0
-            if !reduced { snapshot?.transform = CGAffineTransform(scaleX: shrinking ? 0.97 : 1.03, y: shrinking ? 0.97 : 1.03) }
-            for content in self.modeContentViews { content.alpha = 1 }
-        }
-        animator.addCompletion { [weak self] _ in
-            guard let self, self.modeAnimationGeneration == generation else { return }
-            self.modeSnapshot?.removeFromSuperview(); self.modeSnapshot = nil; self.modeAnimator = nil
-        }
-        modeAnimator = animator
-        animator.startAnimation()
-    }
-
     func updateModeChord(_ separationChange: CGFloat) {
-        guard modeChordActive, !reduceModeMotion, separationChange.isFinite else { return }
-        let allowed = isMiniMode ? max(0, separationChange) : min(0, separationChange)
-        let scale = 1 + max(-0.04, min(0.04, allowed / 500))
-        for content in modeContentViews { content.transform = CGAffineTransform(scaleX: scale, y: scale) }
-    }
-    private func settleModePreview() {
-        UIView.animate(withDuration: reduceModeMotion ? 0 : 0.18, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
-            for content in self.modeContentViews { content.transform = .identity }
-        }
+        guard modeChordActive, separationChange.isFinite else { return }
+        let amount = modeChordFromMini ? separationChange : -separationChange
+        guard modeTransition != nil || amount > 3 else { return }
+        guard !typingPending, deferredTaps.isEmpty, pinyin.input.isEmpty else { return }
+        if modeTransition == nil { prepareModeTransition(toMini: !modeChordFromMini) }
+        let travel = min(1, max(0, amount / 80))
+        modeTransition?.render(modeChordFromMini ? 1-travel : travel)
     }
 
     func beginModeChord(at points: [CGPoint]) {
         guard !modeChordActive else { return }
         wordEdits.clear(); editingSwipeDestination = nil
         stopModeAnimation()
-        modeChordActive = true; pasteGeneration += 1
+        modeChordActive = true; modeChordFromMini = isMiniMode; pasteGeneration += 1
         modeChordDestination = KeyboardTextDestination(textDocumentProxy)
         modeChordTaps = []
         let wasEditingSwipe = currentKey?.isEditingSwipe == true
@@ -460,21 +474,35 @@ final class KeyboardViewController: UIInputViewController {
         for key in keys { key.cancelPress() }
         currentKey = nil; hideKeyPreview(); hideSymbolAlternatives()
     }
-    func finishModeChord(direction: KeyboardModePinch.Direction?, replayTaps: Bool) {
+    func finishModeChord(direction: KeyboardModePinch.Direction?, replayTaps: Bool, velocity: CGFloat = 0) {
         guard modeChordActive else { return }
         let values = modeChordTaps
         let matches = !documentDetached && modeChordDestination == KeyboardTextDestination(textDocumentProxy)
         modeChordActive = false; modeChordTaps = []; modeChordDestination = nil
-        if let direction { setMiniMode(direction == .inward) }
+        if modeTransition != nil, replayTaps, matches, direction == nil {
+            // Tiny two-thumb drift is still typing, even if it briefly previewed
+            // the mode timeline. Restore the source before replaying its letters.
+            stopModeAnimation()
+            for value in values { tap(value) }
+            return
+        }
+        if let transition = modeTransition {
+            let allowed = direction == (modeChordFromMini ? .outward : .inward)
+            let travelled = modeChordFromMini ? 1-transition.progress : transition.progress
+            let directedVelocity = modeChordFromMini ? velocity : -velocity
+            let commit = matches && allowed && travelled + directedVelocity * 0.10 / 80 >= 0.28
+            transition.settle(toMini: commit ? !modeChordFromMini : modeChordFromMini)
+            if commit { playTapFeedback() }
+        } else if let direction, matches { setMiniMode(direction == .inward) }
         else if replayTaps, matches { for value in values { tap(value) } }
-        if modeAnimator == nil { settleModePreview() }
     }
 
     private func buildKeys() {
+        hideDeleteExpansion(animated: false)
         stopQuietKeys(animated: false)
         candidatePanel.setExpanded(false)
         wordEdits.clear(); editingSwipeDestination = nil
-        finishModeChord(direction: nil, replayTaps: false)
+        if !preparingModeTransition { finishModeChord(direction: nil, replayTaps: false) }
         hideKeyPreview()
         hideSymbolAlternatives()
         if command != nil { cancelHold() } // Rotation also invalidates a released hold awaiting polish.
@@ -547,10 +575,6 @@ final class KeyboardViewController: UIInputViewController {
             at.widthAnchor.constraint(equalToConstant: 32).isActive = true; bottom.addArrangedSubview(at)
         }
         bottom.addArrangedSubview(makeKey("space"))
-        if language == .chinese {
-            let period = makeKey("。"); period.widthAnchor.constraint(equalToConstant: 34).isActive = true
-            bottom.addArrangedSubview(period)
-        }
         if metrics.inlineAccessories { bottom.addArrangedSubview(makeAccessoryReturn()) }
         else if metrics.belowAccessories {
             let accessories = UIStackView(); accessories.axis = .horizontal
@@ -665,9 +689,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func makeSwitcher() -> UIButton {
-        // Emoji stays inside our extension. The panel includes a system globe.
+        // Emoji stays inside our extension; Language holds own the system picker.
         let button = KeyboardSwitcherButton(type: .custom)
         button.touchSurface = touchSurface
+        button.quietFeedback.frame = button.bounds
+        button.quietFeedback.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        button.addSubview(button.quietFeedback)
         touchSurface.controls.append(button)
         // Use the square glyph, not the tall Figma side-accessory artboard.
         let icon = UIImageView(image: UIImage(named: "KeyboardSwitcher")?.withRenderingMode(.alwaysTemplate))
@@ -689,7 +716,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         button.accessibilityIdentifier = "keyboard.key.globe"
         button.accessibilityLabel = "Emoji"
-        button.accessibilityHint = "Open emoji. The panel also has a system keyboard switcher."
+        button.accessibilityHint = "Open emoji. Hold Language to switch keyboards."
         button.widthAnchor.constraint(equalToConstant: metrics.switcherWidth).isActive = true
         button.addAction(UIAction { [weak self] _ in
             self?.clearText = nil
@@ -724,28 +751,26 @@ final class KeyboardViewController: UIInputViewController {
         refreshCopiedCodeIndicator()
         let voiceVisible = command != nil || activationRequest != nil || Date() < errorUntil
         setRecordingAppearance(command?.phase == .recording, voiceVisible: voiceVisible)
-        if !visibleCandidates.isEmpty { shortcutsExpanded = false }
-        candidatePanel.isHidden = showingEmoji || isMiniMode || voiceVisible || shortcutsExpanded || visibleCandidates.isEmpty
+        candidatePanel.isHidden = showingEmoji || isMiniMode || voiceVisible || visibleCandidates.isEmpty
         if candidatePanel.isHidden { candidatePanel.setExpanded(false) }
         let hidePills = showingEmoji || isMiniMode || cursorKey != nil || voiceVisible || candidatePanel.isExpanded
-        helperScroll.isHidden = hidePills || !candidatePanel.isHidden
-        gesturePill.isHidden = hidePills
-        for button in shortcutButtons where button !== codeButton { button.isHidden = !shortcutsExpanded }
+        helperScroll.isHidden = hidePills || page == 0 || !candidatePanel.isHidden
+        for button in shortcutButtons where button !== codeButton { button.isHidden = false }
         refreshCopiedCodeIndicator()
-        shortcutToggle?.accessibilityValue = shortcutsExpanded ? "Expanded" : "Collapsed"
         view.setNeedsLayout()
         status.textColor = .label
-        let ready = hasFullAccess && VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true
+        let ready = hasFullAccess && voiceReady
         launchLink?.view.isHidden = ready || !voiceVisible || command != nil || activationRequest != nil || !offersHostLaunch
     }
     func setRecordingAppearance(_ recording: Bool, voiceVisible: Bool) {
         if recording { hideKeyPreview() }
         status.isHidden = showingEmoji || isMiniMode || recording || command != nil || !voiceVisible
+        for button in touchSurface.controls.compactMap({ $0 as? KeyboardSwitcherButton }) { button.setDictating(recording) }
         for key in keys {
             if recording { key.alpha = 1 }
             key.label.isHidden = cursorDrag != nil
             key.setLegendHidden(recording)
-            key.quietFeedback.setRecording(recording, dimBase: key.value.count == 1 || ["space", "dictate"].contains(key.value), mini: key.value == "dictate")
+            key.quietFeedback.setRecording(recording, dimBase: key.value.count == 1 || ["space", "dictate", "shift", "emoji"].contains(key.value), mini: key.value == "dictate")
             if key.value == "space" {
                 key.icon.image = cursorKey === key && cursorDrag != nil ? UIImage(systemName: "arrow.left.and.right") : key.restingIcon
             }
@@ -851,8 +876,9 @@ final class KeyboardViewController: UIInputViewController {
         key.onPress = { [weak self, weak key] in
             guard let self, let key, self.keys.contains(where: { $0 === key }) else { return false }
             guard !self.modeChordActive else { return false }
-            if self.modeAnimator != nil { self.stopModeAnimation() }
+            if self.modeTransition != nil { return false }
             self.pasteGeneration += 1
+            self.hideDeleteExpansion(animated: false)
             self.clearText = nil
             // A released hold may still be awaiting refinement/polish. Relinquish
             // its marked range before this finger can edit, not on key release.
@@ -866,14 +892,14 @@ final class KeyboardViewController: UIInputViewController {
                 else { current.cancelPress() } // Never submit or change layouts from another finger's press.
             }
             // The preceding action may have invalidated this key's layout.
-            guard self.keys.contains(where: { $0 === key }) else { return false }
+            guard self.keys.contains(where: { $0 === key }), self.modeTransition == nil else { return false }
             self.currentKey = key
-            if self.shortcutsExpanded { self.shortcutsExpanded = false; self.updateHeader() }
             self.endCursor = nil
             self.editingSwipeDestination = KeyboardTextDestination(self.textDocumentProxy)
             if key.isDeleteKey {
                 self.cancelHold()
                 self.deleteDestination = KeyboardTextDestination(self.textDocumentProxy)
+                if !key.isGapPress { self.prepareDeleteExpansion(for: key) }
             } else if key.value == "space", !key.isGapPress {
                 self.cancelHold() // A cursor touch must not race a late dictation replacement.
             }
@@ -890,10 +916,24 @@ final class KeyboardViewController: UIInputViewController {
         }
         if value != "dictate" { key.onPressFeedback = { [weak self] in self?.playTapFeedback() } }
         if value == "language" {
-            key.onSystemKeyboard = { [weak self] sender, event in self?.handleInputModeList(from: sender, with: event) }
+            key.onSystemKeyboard = { [weak self] sender, event in
+                guard let self else { return }
+                self.handlingLocalLanguageTap = !sender.systemKeyboardHoldReached
+                self.handleInputModeList(from: sender, with: event)
+                self.handlingLocalLanguageTap = false
+            }
             key.onHold = { [weak key] in key?.beginSystemKeyboardSelection() }
             key.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Next keyboard") { [weak self] _ in
                 self?.advanceToNextInputMode(); return true
+            }]
+        } else if value == "return" {
+            key.accessibilityHint = "Hold to insert a line break without sending."
+            key.onHold = { [weak self] in
+                guard let self, !self.documentDetached, self.editingSwipeDestination == KeyboardTextDestination(self.textDocumentProxy) else { return }
+                self.tap(KeyboardEditSwipe.lineBreak.rawValue)
+            }
+            key.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Insert line break") { [weak self] _ in
+                self?.tap(KeyboardEditSwipe.lineBreak.rawValue); return true
             }]
         } else if value == "space" {
             key.accessibilityHint = "Hold, then drag to move the cursor."
@@ -902,9 +942,18 @@ final class KeyboardViewController: UIInputViewController {
                 self.beginCursorDrag(from: key)
             }
         } else if key.isDeleteKey {
-            key.accessibilityHint = "Hold to keep deleting. Hold and swipe left to clear the field."
+            key.accessibilityHint = "Hold to keep deleting. Slide left to the broom to clear the field."
+            key.onDeleteHold = { [weak self] origin in
+                guard let self else { return }
+                self.deleteExpansion?.show(in: self.view, originX: origin.x)
+            }
+            key.onDeleteMove = { [weak self] point in self?.deleteExpansion?.track(point) }
+            key.onDeleteEnd = { [weak self] animated in self?.hideDeleteExpansion(animated: animated) }
             key.onDeleteRepeat = { [weak self] in self?.repeatDelete() }
-            key.onClearAll = { [weak self] in self?.clearAllText() }
+            key.onClearAll = { [weak self] in
+                guard let self else { return }
+                if self.clearAllText() { self.deleteExpansion?.confirmClear() }
+            }
         } else if value == "dictate" || (page == 0 && ordinary && value.first?.isASCII == true && value.first?.isLetter == true) {
             key.accessibilityHint = "Hold to dictate. Slide to Delete to cancel, Return to send, or release over Language to translate."
             key.onHold = { [weak self] in self?.beginHold() }
@@ -931,7 +980,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         key.onHoldMove = { [weak self, weak key] point in
             guard let self, let key else { return false }
-            if key.value == "language", !key.isGapPress { return true }
+            if ["language", "return"].contains(key.value), !key.isGapPress { return true }
             if key.value == "space", !key.isGapPress {
                 guard self.cursorKey === key else { return false }
                 return self.cursorDrag?.move(to: point, in: self.textDocumentProxy) ?? true
@@ -1081,6 +1130,26 @@ final class KeyboardViewController: UIInputViewController {
         playTapFeedback(); tap("delete")
     }
 
+    private func prepareDeleteExpansion(for key: KeyControl) {
+        key.deleteClearTargetX = nil
+        let cap = key.convert(key.bounds, to: view)
+        let neighbor = keys.filter { other in
+            guard other !== key, other.isEnabled, !other.isHidden else { return false }
+            let box = other.convert(other.bounds, to: view)
+            return box.width > 0 && abs(box.midY - cap.midY) < 1 && box.maxX <= cap.minX && cap.minX - box.maxX < 40
+        }.max { $0.convert($0.bounds, to: view).maxX < $1.convert($1.bounds, to: view).maxX }
+        guard let neighbor else { return }
+        let expansion = DeleteKeyExpansion(source: key, neighbor: neighbor, container: view)
+        guard view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(expansion.geometry.frame) else { return }
+        deleteExpansion = expansion
+        key.deleteClearTargetX = expansion.geometry.clearTargetX
+    }
+
+    private func hideDeleteExpansion(animated: Bool) {
+        deleteExpansion?.dismiss(animated: animated)
+        deleteExpansion = nil
+    }
+
     private func miniDeleteDestinationIsValid() -> Bool {
         let current = KeyboardTextDestination(textDocumentProxy)
         let valid = wordEdits.hasTrackedContext ? wordEdits.observe(textDocumentProxy) : deleteDestination == current
@@ -1089,14 +1158,15 @@ final class KeyboardViewController: UIInputViewController {
         return valid
     }
 
-    private func clearAllText() {
-        guard deleteDestination == KeyboardTextDestination(textDocumentProxy) else { return }
+    private func clearAllText() -> Bool {
+        guard deleteDestination == KeyboardTextDestination(textDocumentProxy) else { return false }
         resetComposition() // Invalidate outstanding candidate edits before clearing.
         deleteDestination = nil
         playTapFeedback()
         let session = ClearTextSession(proxy: textDocumentProxy)
         clearText = session
         continueClearing(session)
+        return true
     }
 
     private func continueClearing(_ session: ClearTextSession) {
@@ -1115,6 +1185,13 @@ final class KeyboardViewController: UIInputViewController {
         testingTapFeedbackCount += 1
         #endif
         tapFeedback.tap()
+    }
+
+    private func playHoldFeedback() {
+        #if KEYBOARD_TESTING
+        testingTapFeedbackCount += 1
+        #endif
+        tapFeedback.tap(confirmation: true)
     }
 
     private func refreshKeyboardPreferences() {
@@ -1177,7 +1254,9 @@ final class KeyboardViewController: UIInputViewController {
             }
             insertingTypedText = false
             if miniDelete { deleteDestination = KeyboardTextDestination(textDocumentProxy) }
-            if changed && !miniDelete { playTapFeedback() }
+            if changed && !miniDelete {
+                if editing == .lineBreak { playHoldFeedback() } else { playTapFeedback() }
+            }
             updateHeader(); return
         }
         switch value {
@@ -1452,19 +1531,6 @@ final class KeyboardViewController: UIInputViewController {
             inputHelpers.addArrangedSubview(button)
             return button
         }
-        shortcutToggle = button("Shortcuts", image: UIImage(systemName: "square.grid.2x2"), identifier: "keyboard.shortcut-pill") { [weak self] in
-            guard let self else { return }
-            self.shortcutsExpanded.toggle(); self.playTapFeedback()
-            self.updateHeader()
-            UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2) { self.view.layoutIfNeeded() }
-        }
-        shortcutToggle?.configuration?.background.backgroundColor = .tertiarySystemFill
-        shortcutToggle?.configuration?.background.cornerRadius = 18
-        button("Paste", image: UIImage(systemName: "document.on.clipboard"), identifier: "keyboard.paste") { [weak self] in
-            guard let self, let request = self.beginPaste(codeOnly: self.textDocumentProxy.textContentType == .oneTimeCode),
-                  let text = UIPasteboard.general.string else { return }
-            self.completePaste(text, request: request)
-        }
         let history = button("Clipboard History", image: UIImage(systemName: "clock.arrow.circlepath"), identifier: "keyboard.clipboard-history") {}
         history.showsMenuAsPrimaryAction = true
         history.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
@@ -1483,8 +1549,7 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
         button("Open Messages", image: UIImage(systemName: "message"), identifier: "keyboard.open-messages") { [weak self] in self?.openShortcut("sms:", name: "Messages") }
-        button("Open Phone", image: UIImage(systemName: "phone"), identifier: "keyboard.open-phone") { [weak self] in self?.openShortcut("tel:", name: "Phone") }
-        shortcutButtons = inputHelpers.arrangedSubviews.compactMap { $0 as? UIButton }.filter { $0 !== shortcutToggle }
+        shortcutButtons = inputHelpers.arrangedSubviews.compactMap { $0 as? UIButton }
     }
 
     func clipboardHistoryMenu() -> [UIMenuElement] {
@@ -1515,16 +1580,16 @@ final class KeyboardViewController: UIInputViewController {
         #if KEYBOARD_TESTING
         if testingDocumentProxy != nil { return } // Unit tests never inspect the real clipboard.
         #endif
-        guard keyboardVisible, hasFullAccess, !helperScroll.isHidden, currentKey?.isPressed != true else { return }
+        guard keyboardVisible, hasFullAccess, command == nil, currentKey?.isPressed != true else { return }
         copiedCodes.onObservedText = { [weak self] text in self?.clipboardHistory.record(text) }
         copiedCodes.refresh()
         refreshCopiedCodeIndicator()
     }
     func refreshCopiedCodeIndicator() {
         #if KEYBOARD_TESTING
-        if testingDocumentProxy != nil { codeButton?.isHidden = !shortcutsExpanded || !copiedCodes.isAvailable; return }
+        if testingDocumentProxy != nil { codeButton?.isHidden = page == 0 || !copiedCodes.isAvailable; return }
         #endif
-        codeButton?.isHidden = !shortcutsExpanded || !keyboardVisible || !hasFullAccess || !copiedCodes.isAvailable
+        codeButton?.isHidden = page == 0 || !keyboardVisible || !hasFullAccess || !copiedCodes.isAvailable
     }
     func pasteCopiedCode() {
         guard let request = beginPaste(codeOnly: true) else { return }
@@ -1622,13 +1687,13 @@ final class KeyboardViewController: UIInputViewController {
 #if KEYBOARD_TESTING
         if testingVoiceAvailable { return true }
 #endif
-        return VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true
+        return VoiceConfiguration.microphoneAllowed
     }
     private func writeVoiceCommand(_ command: VoiceCommand) throws {
 #if KEYBOARD_TESTING
         if testingVoiceAvailable { testingVoiceCommands.append(command); return }
 #endif
-        try VoiceIPC.write(command, to: "command.json")
+        voiceSession.command(command)
     }
 
     private func beginHold() {
@@ -1640,7 +1705,10 @@ final class KeyboardViewController: UIInputViewController {
         }
         guard command == nil else { showError("Please wait for your previous dictation."); return }
         guard voiceAccessAllowed else { showError("Enable Allow Full Access for vvhisper in Settings."); return }
-        guard voiceReady else { openHost(); return }
+        guard voiceReady else { showError("Open vvhisper once to allow microphone access.", offerHostLaunch: true); return }
+        #if !KEYBOARD_TESTING
+        webCapture.attach(to: view)
+        #endif
         let command = VoiceCommand(id: UUID(), phase: .recording, updatedAt: Date())
         let text = DictationTextSession(id: command.id, proxy: textDocumentProxy)
         do {
@@ -1651,7 +1719,7 @@ final class KeyboardViewController: UIInputViewController {
             let meterTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, self.command?.id == command.id, self.command?.phase == .recording else { return }
-                    self.receiveVoiceLevel(VoiceIPC.read(VoiceLevel.filename, as: VoiceLevel.self))
+                    self.receiveVoiceLevel(self.voiceSession.level)
                 }
             }
             levelTimer = meterTimer; RunLoop.main.add(meterTimer, forMode: .common)
@@ -1711,6 +1779,10 @@ final class KeyboardViewController: UIInputViewController {
     func receiveVoiceLevel(_ sample: VoiceLevel?, at now: Date = Date()) {
         guard command?.phase == .recording, sameDestination else { return }
         quietKeys.advance(sample, at: now, reducedMotion: UIAccessibility.isReduceMotionEnabled)
+        for button in touchSurface.controls.compactMap({ $0 as? KeyboardSwitcherButton }) {
+            let x = button.convert(CGPoint(x: button.bounds.midX, y: button.bounds.midY), to: view).x
+            button.quietFeedback.setLevel(quietKeys.level, position: Double(x / max(1, view.bounds.width)))
+        }
         for key in keys {
             let x = key.convert(CGPoint(x: key.bounds.midX, y: key.bounds.midY), to: view).x
             key.quietFeedback.setLevel(quietKeys.level, position: Double(x / max(1, view.bounds.width)))
@@ -1719,6 +1791,7 @@ final class KeyboardViewController: UIInputViewController {
     private func stopQuietKeys(animated: Bool) {
         levelTimer?.invalidate(); levelTimer = nil
         quietKeys.reset()
+        for button in touchSurface.controls.compactMap({ $0 as? KeyboardSwitcherButton }) { button.setDictating(false, animated: animated) }
         for key in keys {
             key.quietFeedback.reset(animated: animated)
             key.setLegendHidden(false, animated: animated)
@@ -1744,7 +1817,7 @@ final class KeyboardViewController: UIInputViewController {
         defer { updateHeader() }
         if typingDocument != nil, !sameTypingDestination { resetComposition() }
         if let request = activationRequest {
-            if VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true {
+            if voiceReady {
                 activationRequest = nil
                 showError("Ready — hold a letter key to speak.")
             } else if !request.isFresh() {
@@ -1757,14 +1830,15 @@ final class KeyboardViewController: UIInputViewController {
             guard sameDestination else { cancelHold(); showError("Text field changed. Dictation cancelled."); return }
             if command.phase == .recording {
                 command.updatedAt = Date(); self.command = command; try? writeVoiceCommand(command) }
-            if let reply = VoiceIPC.read("reply.json", as: VoiceReply.self), receiveVoiceReply(reply) {
-                VoiceIPC.remove("reply.json")
+            voiceSession.tick()
+            if let reply = voiceSession.reply, receiveVoiceReply(reply) {
+                voiceSession.acknowledge(reply)
                 return
             }
             if let releaseTime, Date().timeIntervalSince(releaseTime) > VoiceReply.finalWait { cancelHold(); showError("Recognition timed out. Try again.") }
-            else if !voiceReady { cancelHold(); showError("Voice session ended. Hold a letter key to get ready again.", offerHostLaunch: true) }
+            else if !voiceAccessAllowed { cancelHold(); showError("Enable Full Access for dictation.") }
         } else if Date() > errorUntil {
-            status.text = hasFullAccess && VoiceIPC.read("ready.json", as: VoiceReadiness.self)?.isFresh == true ? "Hold a letter key to speak" : "Open vvhisper"
+            status.text = hasFullAccess && voiceReady ? "Hold a letter key to speak" : "Open vvhisper"
         }
     }
     private func showError(_ message: String, offerHostLaunch: Bool = false) {
@@ -1931,14 +2005,18 @@ final class KeyControl: UIControl {
     var onRelease: (() -> Void)?
     var onCancel: (() -> Void)?
     var onDeleteRepeat: (() -> Void)?
+    var onDeleteHold: ((CGPoint) -> Void)?
+    var onDeleteMove: ((CGPoint) -> Void)?
+    var onDeleteEnd: ((Bool) -> Void)?
+    var deleteClearTargetX: CGFloat?
     var onClearAll: (() -> Void)?
     var onSystemKeyboard: ((KeyControl, UIEvent) -> Void)?
     private var trackingEvent: UIEvent?
     private var systemKeyboardActive = false
+    private(set) var systemKeyboardHoldReached = false
     func beginSystemKeyboardSelection() {
-        guard !isGapPress, let trackingEvent, onSystemKeyboard != nil else { return }
-        systemKeyboardActive = true
-        onSystemKeyboard?(self, trackingEvent)
+        guard !isGapPress, trackingEvent != nil, onSystemKeyboard != nil else { return }
+        systemKeyboardHoldReached = true
     }
     var isDeleteKey = false
     private(set) var isPressed = false
@@ -1976,9 +2054,11 @@ final class KeyControl: UIControl {
         if animated && window != nil && !UIAccessibility.isReduceMotionEnabled {
             UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
                 self.label.alpha = hidden ? 0 : 1
+                if ["shift", "emoji"].contains(self.value) { self.icon.alpha = hidden ? 0 : 1 }
             }
         } else {
             label.layer.removeAllAnimations(); label.alpha = hidden ? 0 : 1
+            if ["shift", "emoji"].contains(value) { icon.layer.removeAllAnimations(); icon.alpha = hidden ? 0 : 1 }
         }
     }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -1986,8 +2066,12 @@ final class KeyControl: UIControl {
         return touchSurface.target(at: convert(point, to: touchSurface)) === self
     }
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-        trackingEvent = event; systemKeyboardActive = false
+        trackingEvent = event; systemKeyboardActive = false; systemKeyboardHoldReached = false
         guard press(at: ProcessInfo.processInfo.systemUptime, point: touch.location(in: self)) else { return false }
+        if !isGapPress, onSystemKeyboard != nil, let event {
+            systemKeyboardActive = true
+            onSystemKeyboard?(self, event)
+        }
         guard usesDeleteGesture || holdAction != nil else { return true }
         let generation = pressGeneration
         timer = Timer.scheduledTimer(withTimeInterval: usesDeleteGesture ? 0.02 : holdDelay, repeats: usesDeleteGesture) { [weak self] _ in
@@ -2019,7 +2103,7 @@ final class KeyControl: UIControl {
         guard onPress?() != false else { return false }
         pressOrigin = point; pressPoint = point; alpha = 0.55; isPressed = true
         onPressFeedback?()
-        if usesDeleteGesture { deleteGesture.press(at: time, point: point) }
+        if usesDeleteGesture { deleteGesture.press(at: time, point: point, clearTargetX: deleteClearTargetX) }
         else { gate.press(at: time - (HoldGate.threshold - holdDelay)) }
         onPreviewChange?(true)
         return true
@@ -2027,7 +2111,11 @@ final class KeyControl: UIControl {
     func advancePress(to time: TimeInterval) {
         guard isPressed, !isEditingSwipe, !holdSuppressedByMovement else { return }
         if usesDeleteGesture {
-            if deleteGesture.advance(to: time) == .delete { onDeleteRepeat?() }
+            let wasHolding = deleteGesture.isHolding
+            if deleteGesture.advance(to: time) == .delete {
+                if !wasHolding { onDeleteHold?(pressOrigin) }
+                onDeleteRepeat?()
+            }
         } else if let holdAction, gate.advance(to: time) {
             onPreviewChange?(false)
             holdAction()
@@ -2055,7 +2143,11 @@ final class KeyControl: UIControl {
             if abs(point.y - pressOrigin.y) > 40 || point.x > bounds.maxX + 30 {
                 cancelPress(); return false
             }
-            if deleteGesture.move(to: point, at: time) == .clearAll {
+            let wasHolding = deleteGesture.isHolding
+            let action = deleteGesture.move(to: point, at: time)
+            if !wasHolding, deleteGesture.isHolding { onDeleteHold?(pressOrigin) }
+            if deleteGesture.isHolding { onDeleteMove?(point) }
+            if action == .clearAll {
                 stopTimer(); onClearAll?()
             }
         } else if gate.isHolding, let onHoldMove {
@@ -2077,6 +2169,7 @@ final class KeyControl: UIControl {
             return
         }
         if usesDeleteGesture {
+            onDeleteEnd?(true)
             if deleteGesture.release() == .delete { onTap?() }
             onRelease?()
         } else {
@@ -2093,6 +2186,7 @@ final class KeyControl: UIControl {
         trackingEvent = nil; systemKeyboardActive = false
         guard isPressed else { return }
         onPreviewChange?(false)
+        onDeleteEnd?(false)
         stopTimer(); alpha = 1; isPressed = false; isEditingSwipe = false; gate.cancel(); deleteGesture.cancel(); onCancel?()
     }
     override func accessibilityActivate() -> Bool { onPressFeedback?(); onTap?(); return true }

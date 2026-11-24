@@ -12,9 +12,17 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
 
 public final class SetupActivity extends Activity {
+    private ConfigurationTransfer configurationTransfer;
     private LinearLayout form;
     private Button enable, microphone;
-    private EditText seed, arkKey;
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state); configurationTransfer.saveState(state);
+    }
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        configurationTransfer.result(request, result, data);
+    }
 
     private int dp(int n) {
         return Math.round(n * getResources().getDisplayMetrics().density);
@@ -23,6 +31,7 @@ public final class SetupActivity extends Activity {
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        configurationTransfer = new ConfigurationTransfer(this, state);
         ScrollView scroll = new ScrollView(this);
         form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -35,6 +44,9 @@ public final class SetupActivity extends Activity {
                     v.setPadding(0, i.getSystemWindowInsetTop(), 0, i.getSystemWindowInsetBottom());
                     return i.consumeSystemWindowInsets();
                 });
+        heading("Sync and Transfer");
+        button("Export encrypted JSON (settings)", v -> configurationTransfer.exportFile(false));
+        button("Import encrypted JSON", v -> configurationTransfer.importFile());
         heading("Keyboard");
         enable =
                 button(
@@ -59,24 +71,6 @@ public final class SetupActivity extends Activity {
                         | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         form.addView(test);
         heading("Dictation");
-        TextView info = new TextView(this);
-        info.setText(
-                "Uses Android speech recognition by default. Save a Seed API key to stream"
-                        + " microphone audio to Volcengine instead. Clear the key to switch back.");
-        form.addView(info);
-        seed = new EditText(this);
-        seed.setSingleLine();
-        seed.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        seed.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
-        form.addView(seed);
-        button(
-                "Save Seed key",
-                v -> {
-                    String value = seed.getText().toString().trim();
-                    if (value.isEmpty()) return;
-                    save(value);
-                });
-        button("Clear Seed key", v -> save(""));
         android.content.SharedPreferences prefs = getSharedPreferences("keyboard", 0);
         for (String[] setting : new String[][] {{"autoCorrection", "Auto-Correction"}, {"smartSpacing", "Smart Spacing"}, {"mixedTyping", "More English Suggestions (experimental)"}}) {
             Switch toggle = new Switch(this); toggle.setText(setting[1]);
@@ -94,20 +88,6 @@ public final class SetupActivity extends Activity {
         polish.setChecked(prefs.getBoolean("polish", true));
         polish.setOnCheckedChangeListener((v, checked) -> prefs.edit().putBoolean("polish", checked).apply());
         form.addView(polish);
-        TextView detail = new TextView(this);
-        detail.setText("Add your Volcengine Ark API Key to send the final transcript for grammar and spelling edits.");
-        form.addView(detail);
-        arkKey = new EditText(this);
-        arkKey.setSingleLine();
-        arkKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        arkKey.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
-        arkKey.setSaveEnabled(false);
-        form.addView(arkKey);
-        button("Save Volcengine Ark API Key", v -> {
-            String value = arkKey.getText().toString().trim();
-            if (!value.isEmpty()) saveArkKey(value);
-        });
-        button("Clear Volcengine Ark API Key", v -> saveArkKey(""));
         heading("Key feedback");
         Switch custom = new Switch(this);
         custom.setText("Customize haptics");
@@ -155,26 +135,6 @@ public final class SetupActivity extends Activity {
                 });
     }
 
-    private void save(String value) {
-        try {
-            ProviderKey.SEED.save(this, value);
-            seed.setText("");
-            update();
-        } catch (Exception e) {
-            Toast.makeText(this, "Could not update the key", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void saveArkKey(String value) {
-        try {
-            ProviderKey.ARK.save(this, value);
-            arkKey.setText("");
-            update();
-        } catch (Exception e) {
-            Toast.makeText(this, "Could not update the key", Toast.LENGTH_SHORT).show();
-        }
-    }
-
     private void heading(String title) {
         TextView view = new TextView(this);
         view.setText(title);
@@ -202,12 +162,7 @@ public final class SetupActivity extends Activity {
                         == PackageManager.PERMISSION_GRANTED;
         microphone.setText(granted ? "Microphone allowed" : "Allow microphone");
         microphone.setEnabled(!granted);
-        arkKey.setHint(getSharedPreferences("ark", 0).contains("value")
-                ? "Replace saved Volcengine Ark API Key" : "Volcengine Ark API Key");
-        seed.setHint(
-                getSharedPreferences("seed", 0).contains("value")
-                        ? "Replace saved Seed API key"
-                        : "Seed API key");
+
     }
 
     @Override

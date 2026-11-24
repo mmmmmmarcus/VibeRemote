@@ -57,3 +57,6 @@ ios/.derived/
 
 # Rebuilt by ios/scripts/compile-rime.py
 /ios/Typing/Resources/Rime/build/
+
+# Personal-build credentials, generated locally (never publish private app archives)
+/macos/Resources/PrivateCredentials/credentials.json

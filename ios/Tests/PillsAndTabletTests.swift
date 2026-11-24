@@ -59,29 +59,31 @@ import UIKit
         }
         XCTAssertFalse(KeyboardMetrics(width: 375, tablet: true).tablet)
     }
-    func testPillsAreOnOppositeEdgesAndExpandedShortcutsStayInBounds() throws {
-        let saved = UserDefaults.standard.object(forKey: KeyboardLayoutMode.preferenceKey)
-        KeyboardLayoutMode.full.save()
-        defer { UserDefaults.standard.set(saved, forKey: KeyboardLayoutMode.preferenceKey) }
+    func testShortcutsOnlyAppearOnSymbolsWithNoMenuOrGesturePill() async throws {
+        let saved = KeyboardLayoutMode.load(); KeyboardLayoutMode.full.save()
+        defer { saved.save() }
         let keyboard = KeyboardViewController(); keyboard.testingTablet = false; keyboard.testingLandscape = false
         keyboard.testingDocumentProxy = TextViewProxy("", selection: .init(location: 0, length: 0)); keyboard.loadViewIfNeeded()
         defer { keyboard.viewWillDisappear(false) }
+        await withCheckedContinuation { c in PinyinEngine.shared.perform(.prepare) { _ in c.resume() } }
         for width: CGFloat in [375, 466, 655] {
             keyboard.view.frame = CGRect(x: 0, y: 0, width: width, height: KeyboardMetrics(width: width).contentHeight)
             keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
-            let toggle = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.shortcut-pill" } as? UIButton)
-            let pill = try XCTUnwrap(descendants(keyboard.view).first { $0 is GesturePill })
-            XCTAssertLessThan(toggle.convert(toggle.bounds, to: keyboard.view).maxX, 60)
-            XCTAssertGreaterThan(pill.frame.minX, width - 80)
-            toggle.sendActions(for: .touchUpInside); keyboard.view.layoutIfNeeded()
-            for id in ["keyboard.paste", "keyboard.clipboard-history", "keyboard.open-1password", "keyboard.open-messages", "keyboard.open-phone"] {
-                let button = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == id })
-                XCTAssertFalse(button.isHidden)
-                XCTAssertEqual(button.bounds.width, 44)
-                let scroller = try XCTUnwrap(button.superview?.superview as? UIScrollView)
-                XCTAssertLessThanOrEqual(scroller.convert(scroller.bounds, to: keyboard.view).maxX, pill.frame.minX)
+            let helpers = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.input-helpers" })
+            XCTAssertTrue(helpers.isHidden)
+            for id in ["keyboard.shortcut-pill", "keyboard.paste", "keyboard.open-phone"] {
+                XCTAssertNil(descendants(keyboard.view).first { $0.accessibilityIdentifier == id })
             }
-            toggle.sendActions(for: .touchUpInside); keyboard.view.layoutIfNeeded()
+            XCTAssertFalse(descendants(keyboard.view).contains { $0 is GesturePill })
+            let symbol = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? KeyControl }.first { $0.value == "123" })
+            _ = symbol.accessibilityActivate(); keyboard.view.layoutIfNeeded()
+            XCTAssertFalse(helpers.isHidden)
+            for id in ["keyboard.clipboard-history", "keyboard.open-1password", "keyboard.open-messages"] {
+                let button = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == id })
+                XCTAssertFalse(button.isHidden); XCTAssertEqual(button.bounds.width, 44)
+                XCTAssertLessThanOrEqual(button.convert(button.bounds, to: keyboard.view).maxX, width)
+            }
+            _ = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? KeyControl }.first { $0.value == "ABC" }).accessibilityActivate()
         }
     }
 }

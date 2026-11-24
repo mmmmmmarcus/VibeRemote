@@ -854,14 +854,14 @@ enum SeedStreamVerifier {
         // Started after the first packets, as in a hold that waits for the editor context, so the
         // session's buffering of early audio is exercised too.
         let startSecond = {
-            second?.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
+            second?.start(SeedStreamingSession.request(accessKey: key, appID: "",
                                                        resourceID: settings.seedStreamResourceID,
                                                        endpoint: SeedStreamFrame.nostreamEndpoint),
-                          appID: settings.seedAppID, context: context, removeFillers: settings.seedRemoveFillers,
+                          appID: "", context: context, removeFillers: settings.seedRemoveFillers,
                           sentenceSilence: sentenceSilence)
         }
-        session.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
-                                                   resourceID: settings.seedStreamResourceID), appID: settings.seedAppID,
+        session.start(SeedStreamingSession.request(accessKey: key, appID: "",
+                                                   resourceID: settings.seedStreamResourceID), appID: "",
                       context: CommandLine.arguments.contains("--stream-hotwords") ? context : nil,
                       removeFillers: settings.seedRemoveFillers, sentenceSilence: sentenceSilence)
         let packet = SeedStreamFrame.audioPacketBytes / 2
@@ -907,7 +907,7 @@ enum SeedStreamVerifier {
         let flashStarted = ProcessInfo.processInfo.systemUptime
         // The refinement after release, with the same hotwords and editor context.
         let refined = DispatchSemaphore(value: 0)
-        let engine = SeedASRDictationEngine(accessKey: key, appID: settings.seedAppID,
+        let engine = SeedASRDictationEngine(accessKey: key, appID: "",
                                             resourceID: settings.seedResourceID, context: context,
                                             removeFillers: settings.seedRemoveFillers,
                                             sentenceSilence: sentenceSilence)

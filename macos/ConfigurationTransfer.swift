@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 @MainActor
 enum MacConfiguration {
     static let sync: ConfigurationSync = {
-        let value = ConfigurationSync(defaults: .standard, read: { role in
+        let value = ConfigurationSync(defaults: .standard, transfersCredentials: false, read: { role in
             switch role {
             case .seedASR: return try DictationKeychain.configurationKey(service: "com.viberemote.dictation.seedasr")
             case .polishing: return try DictationKeychain.configurationKey(service: "com.viberemote.dictation.ark")
@@ -31,7 +31,6 @@ enum MacConfiguration {
 
 struct ConfigurationTransferSection: View {
     @ObservedObject private var sync = MacConfiguration.sync
-    @State private var includeKeys = false
     @State private var working = false
     @State private var message: String?
     var body: some View {
@@ -53,9 +52,8 @@ struct ConfigurationTransferSection: View {
                     Button("Keep File Values") { sync.refresh(resolution: .file) }
                 }.disabled(working || sync.busy)
             }
-            Text("Choose the same encrypted file in iCloud Drive on each device. Syncs ASR and polishing keys, Polish Dictation and Sentence Punctuation. Keep a copy of your password; it cannot be recovered.")
+            Text("Choose the same encrypted file in iCloud Drive on each device. Syncs Polish Dictation and Sentence Punctuation. Keep a copy of your password; it cannot be recovered.")
                 .font(.caption).foregroundStyle(.secondary)
-            Toggle("Include API keys in encrypted export", isOn: $includeKeys)
             HStack {
                 Button("Export Encrypted JSON…") { exportFile(link: false) }
                 Button("Import Encrypted JSON…") { openFile(link: false) }
@@ -94,7 +92,7 @@ struct ConfigurationTransferSection: View {
         Task {
             defer { working = false }
             do {
-                let document = try sync.document(includeKeys: link || includeKeys)
+                let document = try sync.document(includeKeys: false)
                 try await Task.detached {
                     let data = try EncryptedConfiguration.seal(document, password: password)
                     try ConfigurationFile.write(data, to: url, expected: nil)
@@ -120,7 +118,7 @@ struct ConfigurationTransferSection: View {
                         try EncryptedConfiguration.open(ConfigurationFile.read(url), password: password)
                     }.value
                     let alert = NSAlert(); alert.messageText = "Import configuration?"
-                    alert.informativeText = "Replace only settings and keys included in this encrypted file? Omitted keys and device settings stay unchanged."
+                    alert.informativeText = "Replace the included polishing and punctuation settings? Credentials and device settings stay unchanged."
                     alert.addButton(withTitle: "Import"); alert.addButton(withTitle: "Cancel")
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
                     try sync.apply(document); sync.refresh(); message = "Configuration imported."
@@ -129,6 +127,6 @@ struct ConfigurationTransferSection: View {
         }
     }
     private func safeError(_ error: Error) -> String {
-        (error as? ConfigurationError)?.localizedDescription ?? "Couldn’t access the configuration file. Local keys are unchanged."
+        (error as? ConfigurationError)?.localizedDescription ?? "Couldn’t access the configuration file. Local settings are unchanged."
     }
 }

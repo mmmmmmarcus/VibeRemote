@@ -1959,3 +1959,31 @@ final class BluetoothConnectionEdgesTests: XCTestCase {
         XCTAssertFalse(edges.connect("siri"))
     }
 }
+
+final class PrivateCredentialTests: XCTestCase {
+    func testPrivateCredentialsRejectMalformedValues() {
+        for invalid in [nil, "", "key with spaces", "key\n", String(repeating: "x", count: 8193)] as [String?] {
+            XCTAssertNil(PrivateCredentials.validKey(invalid))
+        }
+        XCTAssertEqual(PrivateCredentials.validKey("fixture-key"), "fixture-key")
+    }
+
+    @MainActor func testPrivateSettingsTransferNeverReadsOrWritesKeys() throws {
+        let name = "PrivateTransfer-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        var values: [ConfigurationSync.Role: String] = [.polishDictation: "true", .sentencePunctuation: "false"]
+        let sync = ConfigurationSync(defaults: defaults, transfersCredentials: false, read: { role in
+            XCTAssertFalse(role.isKey)
+            return values[role]
+        }, write: { role, value in
+            XCTAssertFalse(role.isKey)
+            values[role] = value
+        })
+        XCTAssertNil(try sync.document(includeKeys: true).credentials)
+        try sync.apply(.init(settings: .init(polishDictation: false, sentencePunctuation: true),
+                             credentials: .init(seedASR: "old-file-key", polishing: "old-file-key")))
+        XCTAssertEqual(values[.polishDictation], "false")
+        XCTAssertEqual(values[.sentencePunctuation], "true")
+    }
+}

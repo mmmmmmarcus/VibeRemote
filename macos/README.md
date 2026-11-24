@@ -1,5 +1,11 @@
 # vvhisper
 
+> Personal-build update (2026-11-24): credentials are bundled at build time; no API-key
+> setup or backend is required. Settings transfer now carries preferences only.
+> Older credential setup instructions below are historical. See the repository's
+> `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
+
+
 vvhisper is an experimental macOS menu-bar app becoming a general voice interface for
 the Mac: dictate text into apps and give Computer Use spoken tasks. The baseline is the
 Mac’s built-in microphone and keyboard, without a dedicated accessory. Siri Remote and

@@ -129,6 +129,20 @@ import UIKit
         }
     }
 
+    func testSmallTwoThumbDriftReplaysLettersAfterCancellingPreview() async throws {
+        try await withKeyboard { keyboard, proxy in
+            let a = try key("a", keyboard), b = try key("b", keyboard)
+            press(a)
+            keyboard.beginModeChord(at: [center(a, in: keyboard), center(b, in: keyboard)])
+            keyboard.updateModeChord(-6)
+            XCTAssertNotNil(keyboard.modeTransitionProgress)
+            keyboard.finishModeChord(direction: nil, replayTaps: true)
+            XCTAssertFalse(keyboard.isModeAnimating); XCTAssertFalse(keyboard.isMiniMode)
+            XCTAssertEqual(proxy.editor.text, "ab")
+            XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
+        }
+    }
+
     func testMiniDictationWaitsForSecondFingerThenSupportsCancelAndFinish() async throws {
         try await withKeyboard { keyboard, _ in
             keyboard.setMiniMode(true); layout(keyboard, width: 466, landscape: false)
@@ -230,21 +244,51 @@ import UIKit
             let a = try key("a", keyboard), b = try key("b", keyboard)
             let original = center(a, in: keyboard)
             keyboard.beginModeChord(at: [original, center(b, in: keyboard)])
-            keyboard.updateModeChord(-10)
-            let previewed = center(a, in: keyboard)
-            XCTAssertGreaterThan(previewed.x, original.x) // Left keys move inward with the fingers.
-            keyboard.viewDidLayoutSubviews() // Layout must preserve the pinch preview.
-            XCTAssertEqual(center(a, in: keyboard).x, previewed.x, accuracy: 0.01)
-            XCTAssertEqual(center(a, in: keyboard).y, previewed.y, accuracy: 0.01)
-            keyboard.finishModeChord(direction: .inward, replayTaps: false)
-            XCTAssertTrue(keyboard.isModeAnimating); XCTAssertTrue(keyboard.isMiniMode)
-            layout(keyboard, width: 466, landscape: false)
-            let dictate = try key("dictate", keyboard), space = try key("expand", keyboard)
-            keyboard.beginModeChord(at: [center(dictate, in: keyboard), center(space, in: keyboard)])
-            keyboard.updateModeChord(18)
-            keyboard.finishModeChord(direction: .outward, replayTaps: false)
-            XCTAssertFalse(keyboard.isMiniMode); XCTAssertTrue(keyboard.isModeAnimating)
+            let canvasHeight = keyboard.view.bounds.height
+            var motionFrames: [UIImage] = []
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+            for distance: CGFloat in [4, 20, 40, 60, 80] {
+                keyboard.updateModeChord(-distance)
+                keyboard.view.layoutIfNeeded()
+                let image = UIGraphicsImageRenderer(size: keyboard.view.bounds.size, format: format).image { context in
+                    UIColor(white: 0.83, alpha: 1).setFill(); context.fill(keyboard.view.bounds)
+                    keyboard.view.layer.render(in: context.cgContext)
+                }
+                motionFrames.append(image)
+            }
+            let sheet = UIGraphicsImageRenderer(size: CGSize(width: 466 * 5, height: canvasHeight), format: format).image { _ in
+                for (index, image) in motionFrames.enumerated() { image.draw(at: CGPoint(x: index * 466, y: 0)) }
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("vvhisper-mode-motion.png")
+            try sheet.pngData()!.write(to: url); print("Mode motion artifact: \(url.path)")
+            keyboard.updateModeChord(-40)
+            XCTAssertEqual(keyboard.view.bounds.height, canvasHeight, accuracy: 0.01, "Remote host height stays stable while fingers move")
+            let overlay = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.mode-transition" })
+            XCTAssertGreaterThan(overlay.frame.minY, 0)
+            XCTAssertEqual(overlay.frame.maxY, canvasHeight, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(keyboard.modeTransitionProgress), 0.5, accuracy: 0.001)
+            XCTAssertEqual(KeyboardLayoutMode.load(), .full)
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(try XCTUnwrap(keyboard.modeTransitionProgress), 0.5, accuracy: 0.001, "Holding still must not autoplay")
+            keyboard.updateModeChord(-16)
+            XCTAssertEqual(try XCTUnwrap(keyboard.modeTransitionProgress), 0.2, accuracy: 0.001)
+            keyboard.finishModeChord(direction: nil, replayTaps: false)
             await waitUntil { !keyboard.isModeAnimating }
+            XCTAssertFalse(keyboard.isMiniMode); XCTAssertEqual(KeyboardLayoutMode.load(), .full)
+            let nextA = try key("a", keyboard), nextB = try key("b", keyboard)
+            keyboard.beginModeChord(at: [center(nextA, in: keyboard), center(nextB, in: keyboard)])
+            keyboard.updateModeChord(-48)
+            keyboard.finishModeChord(direction: .inward, replayTaps: false)
+            await waitUntil { !keyboard.isModeAnimating }
+            XCTAssertTrue(keyboard.isMiniMode); XCTAssertEqual(KeyboardLayoutMode.load(), .mini)
+            layout(keyboard, width: 466, landscape: false)
+            let dictate = try key("dictate", keyboard), expand = try key("expand", keyboard)
+            keyboard.beginModeChord(at: [center(dictate, in: keyboard), center(expand, in: keyboard)])
+            keyboard.updateModeChord(48)
+            XCTAssertEqual(try XCTUnwrap(keyboard.modeTransitionProgress), 0.4, accuracy: 0.001)
+            keyboard.finishModeChord(direction: .outward, replayTaps: false)
+            await waitUntil { !keyboard.isModeAnimating }
+            XCTAssertFalse(keyboard.isMiniMode); XCTAssertEqual(KeyboardLayoutMode.load(), .full)
             XCTAssertFalse(descendants(keyboard.view).contains { $0.accessibilityIdentifier == "keyboard.mode-transition" })
             XCTAssertEqual(proxy.editor.text, ""); XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
             keyboard.setMiniMode(true); XCTAssertTrue(keyboard.isModeAnimating)
@@ -265,12 +309,15 @@ import UIKit
             let a = try key("a", keyboard), b = try key("b", keyboard), original = center(a, in: keyboard)
             keyboard.beginModeChord(at: [original, center(b, in: keyboard)])
             keyboard.updateModeChord(-20)
-            XCTAssertEqual(center(a, in: keyboard), original)
+            let face = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.mode-face.a" })
+            let faceCenter = face.convert(CGPoint(x: face.bounds.midX, y: face.bounds.midY), to: keyboard.view)
+            XCTAssertEqual(faceCenter.x, original.x, accuracy: 0.001)
+            XCTAssertEqual(faceCenter.y, original.y, accuracy: 0.001)
             keyboard.finishModeChord(direction: .inward, replayTaps: false)
             let snapshot = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.mode-transition" })
             XCTAssertEqual(snapshot.transform, .identity); XCTAssertFalse(snapshot.isUserInteractionEnabled)
-            XCTAssertEqual(snapshot.superview?.clipsToBounds, true)
-            XCTAssertEqual(snapshot.superview?.isUserInteractionEnabled, false)
+            XCTAssertTrue(snapshot.clipsToBounds)
+            XCTAssertEqual(KeyboardLayoutMode.load(), .full)
             await waitUntil { !keyboard.isModeAnimating }
         }
     }

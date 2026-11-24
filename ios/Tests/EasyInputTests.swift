@@ -42,6 +42,37 @@ final class VerificationCodeTests: XCTestCase {
         }
         try await body(keyboard, proxy)
     }
+    func testChineseSpaceReclaimsPeriodWidthAndReturnHoldNeverSends() async throws {
+        try await withKeyboard(language: .chinese) { keyboard, proxy in
+            XCTAssertFalse(descendants(keyboard.view).compactMap { $0 as? KeyControl }.contains { $0.value == "。" })
+            let chineseWidth = try key("space", keyboard).bounds.width
+            _ = try key("language", keyboard).accessibilityActivate(); keyboard.view.layoutIfNeeded()
+            XCTAssertEqual(try key("space", keyboard).bounds.width, chineseWidth, accuracy: 0.01)
+            for mini in [false, true] {
+                keyboard.setMiniMode(mini, animated: false); keyboard.view.layoutIfNeeded()
+                proxy.returnKeyType = .send
+                let enter = try key("return", keyboard)
+                let feedbackBefore = keyboard.testingTapFeedbackCount
+                XCTAssertTrue(enter.press(at: 10, point: CGPoint(x: enter.bounds.midX, y: enter.bounds.midY)))
+                enter.advancePress(to: 10.7); enter.advancePress(to: 12); enter.releasePress()
+                XCTAssertEqual(keyboard.testingTapFeedbackCount, feedbackBefore + 2, "Touch-down and line-break activation are separate detents")
+                XCTAssertEqual(proxy.editor.text, mini ? "\u{2028}\u{2028}" : "\u{2028}")
+                XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
+            }
+        }
+    }
+    func testEmojiEntryAndBackEachProduceOneHaptic() async throws {
+        try await withKeyboard { keyboard, _ in
+            let before = keyboard.testingTapFeedbackCount
+            let emoji = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? KeyboardSwitcherButton }.first)
+            emoji.sendActions(for: .touchUpInside)
+            XCTAssertEqual(keyboard.testingTapFeedbackCount, before + 1)
+            let back = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "emoji.close" } as? UIButton)
+            back.sendActions(for: .touchUpInside)
+            XCTAssertEqual(keyboard.testingTapFeedbackCount, before + 2)
+            XCTAssertFalse(try key("a", keyboard).isHidden)
+        }
+    }
     func testChinesePunctuationCapsInsertChineseAndKeepLatinAlternatives() async throws {
         try await withKeyboard(language: .chinese) { keyboard, proxy in
             for value in ["，", "。", "？", "！", "：", "；", "（", "）", "「", "」", "、"] {
@@ -73,14 +104,11 @@ final class VerificationCodeTests: XCTestCase {
     func testHelpersOnlyOccupyEmptyCandidateStrip() async throws {
         try await withKeyboard(language: .chinese) { keyboard, _ in
             let helpers = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.input-helpers" })
+            XCTAssertTrue(helpers.isHidden)
+            _ = try key("123", keyboard).accessibilityActivate(); keyboard.view.layoutIfNeeded()
             XCTAssertFalse(helpers.isHidden)
-            (descendants(helpers).first { $0.accessibilityIdentifier == "keyboard.shortcut-pill" } as? UIButton)?.sendActions(for: .touchUpInside)
-            keyboard.view.layoutIfNeeded()
-            for id in ["keyboard.paste", "keyboard.paste-code", "keyboard.open-1password"] {
-                XCTAssertNotNil(descendants(helpers).first { $0.accessibilityIdentifier == id })
-            }
             let password = try XCTUnwrap(descendants(helpers).first { $0.accessibilityIdentifier == "keyboard.open-1password" } as? UIButton)
-            let paste = try XCTUnwrap(descendants(helpers).first { $0.accessibilityIdentifier == "keyboard.paste" } as? UIButton)
+            let paste = try XCTUnwrap(descendants(helpers).first { $0.accessibilityIdentifier == "keyboard.clipboard-history" } as? UIButton)
             XCTAssertNil(paste.configuration?.title); XCTAssertNotNil(paste.configuration?.image)
             XCTAssertEqual(paste.configuration?.background.backgroundColor, .clear)
             XCTAssertNil(password.configuration?.title); XCTAssertNotNil(password.configuration?.image)
@@ -89,8 +117,9 @@ final class VerificationCodeTests: XCTestCase {
             XCTAssertEqual(password.configuration?.image?.size, paste.configuration?.image?.size)
             XCTAssertLessThan(password.convert(password.bounds, to: helpers).midX, helpers.bounds.width)
             XCTAssertTrue(try XCTUnwrap(descendants(helpers).first { $0.accessibilityIdentifier == "keyboard.paste-code" }).isHidden)
+            _ = try key("ABC", keyboard).accessibilityActivate()
             _ = try key("n", keyboard).accessibilityActivate()
-            XCTAssertFalse(helpers.isHidden); XCTAssertNil(keyboard.beginPaste(codeOnly: false))
+            XCTAssertTrue(helpers.isHidden); XCTAssertNil(keyboard.beginPaste(codeOnly: false))
         }
     }
     func testPasteGuardsFieldChangesTypingAndDuplicateCallbacks() async throws {
@@ -113,7 +142,7 @@ final class VerificationCodeTests: XCTestCase {
     }
     func testNewCopiedCodeIconPastesOnceAndHidesAfterUseOrClipboardChange() async throws {
         try await withKeyboard { keyboard, proxy in
-            (descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.shortcut-pill" } as? UIButton)?.sendActions(for: .touchUpInside)
+            _ = try key("123", keyboard).accessibilityActivate()
             let board = TestCodeClipboard()
             keyboard.copiedCodes = CopiedCodeMonitor(clipboard: board, defaults: nil, bootTime: { 100 })
             let button = try XCTUnwrap(descendants(keyboard.view).first { $0.accessibilityIdentifier == "keyboard.paste-code" } as? UIButton)

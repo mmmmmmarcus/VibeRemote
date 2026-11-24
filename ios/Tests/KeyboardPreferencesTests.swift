@@ -53,17 +53,20 @@ final class KeyboardPreferencesTests: XCTestCase {
         XCTAssertTrue(lifetime.hasExpired(at: start.addingTimeInterval(61)))
     }
 
-    @MainActor func testDurationSettingSavesReloadsAndRollsBackFailedWrite() throws {
-        var stored = KeyboardPreferences(hapticStrength: 0.8, mixedTypingEnabled: true)
-        let settings = MainSettingsViewController(loadPreferences: { stored }, savePreferences: { stored = $0 })
+    @MainActor func testVoiceSettingsRemoveIdleTimerWithoutChangingLegacyPreferences() {
+        let stored = KeyboardPreferences(hapticStrength: 0.8, mixedTypingEnabled: true, voiceSessionMinutes: 5)
+        let settings = MainSettingsViewController(loadPreferences: { stored }, savePreferences: { _ in XCTFail("Reading settings must not overwrite preferences") })
         settings.loadViewIfNeeded()
-        XCTAssertTrue(settings.setVoiceSessionMinutes(5))
-        XCTAssertEqual(stored, KeyboardPreferences(hapticStrength: 0.8, mixedTypingEnabled: true, voiceSessionMinutes: 5))
-        let failing = MainSettingsViewController(loadPreferences: { stored }, savePreferences: { _ in throw CocoaError(.fileWriteNoPermission) })
-        failing.loadViewIfNeeded()
-        XCTAssertFalse(failing.setVoiceSessionMinutes(1))
-        let cell = failing.tableView(failing.tableView, cellForRowAt: IndexPath(row: 2, section: 0))
-        XCTAssertEqual((cell.contentConfiguration as? UIListContentConfiguration)?.secondaryText, "5 minutes")
+        XCTAssertEqual(settings.tableView(settings.tableView, numberOfRowsInSection: 0), 4) // Settings transfer remains; API key setup is removed.
+        let cell = settings.tableView(settings.tableView, cellForRowAt: IndexPath(row: 1, section: 0))
+        XCTAssertEqual(cell.accessibilityIdentifier, "settings.polishing")
+        for row in 0..<4 {
+            let visible = settings.tableView(settings.tableView, cellForRowAt: IndexPath(row: row, section: 0))
+            XCTAssertNotEqual(visible.accessibilityIdentifier, "settings.api-key")
+        }
+        let polish = PolishSettingsViewController(); polish.loadViewIfNeeded()
+        XCTAssertEqual(polish.tableView(polish.tableView, numberOfRowsInSection: 0), 2)
+        XCTAssertEqual(stored.voiceSessionMinutes, 5)
     }
     func testExperimentDefaultsOffAndMigratesExistingHapticSetting() throws {
         XCTAssertFalse(KeyboardPreferences().mixedTypingEnabled)

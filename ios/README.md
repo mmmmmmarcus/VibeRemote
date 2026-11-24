@@ -1,5 +1,137 @@
 # vvhisper for iOS and iPadOS — local prototype
 
+> Personal-build update (2026-11-24): credentials are bundled at build time; no API-key
+> setup or backend is required. Settings transfer now carries preferences only.
+> Older credential setup instructions below are historical. See the repository's
+> `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
+
+
+## Extended Delete — 2026-11-22
+
+Holding Delete expands its surface left over M and reveals a broom at the left
+edge. Sliding to the broom clears the field once; release restores the normal
+keys. Quick taps and held repeats keep their existing behavior, including word
+deletion in mini mode. Dictation cancellation remains a separate gesture.
+
+Geometry comes from the actual neighboring key, including Duo's folded/unfolded
+portrait/landscape and split layouts. Symbol pages borrow the adjacent symbol;
+mini borrows only the right edge of Dictate; iPad uses the adjacent number-row key.
+The overlay changes paint only, preserving all key hit targets. It restores on
+interruption, rotation, mode changes, field changes and keyboard dismissal.
+
+Apple's installed catalog has no built-in broom. `DeleteBroom.symbolset` contains
+original broom artwork in Apple's custom SF Symbols format, compiled and validated
+by the asset catalog. It supports monochrome tinting and light/dark appearance;
+the motion uses a 180 ms reveal and 120 ms dismissal, respecting Reduce Motion.
+
+Validation: all 280 unit/integration checks passed. The new cases cover clear-once
+behavior at the visible broom, release without clearing, field/rotation/dismissal
+cleanup, preserved M hit targets, gap dictation and dictation slide-cancel. Native
+light/dark contact sheets were inspected for Duo folded and unfolded portrait and
+landscape, including mini mode (`build/verification/delete-expansion.png`). Symbol
+pages and iPad sizes also pass geometry and editing checks.
+The installed-extension simulator touch test passed: a real held drag from Delete
+through M clears the synthetic field, then M inserts normally and a Delete tap
+removes one character. This is simulator evidence, not a physical-device check.
+The personal-signed build passed strict signature verification and was installed
+on the Duo without erasing data. Physical automation is still blocked by the
+Wi-Fi XCTest IDE-channel failure (exit 74); on-device gesture feel remains manual.
+
+## Motion and tactile feedback refinements — 2026-11-22
+
+Full/mini transitions now keep a stable full-height canvas while the key faces
+move with the pinch, committing the final host height after a 120–200 ms settle.
+This avoids per-frame remote-host height updates and the initial target-height
+jump. Emoji Back has tap feedback; Enter gives normal touch-down feedback and a
+stronger, sharper confirmation when the hold inserts a line break. Shift and
+Emoji icons fade with the letters during dictation and return after release.
+
+Translation's purple target confirms gesture selection. The former generic
+“Translation failed” represented an unsuccessful HTTP response or rejected
+response format, not a failed gesture. Notices now distinguish authentication,
+model access, rate limits/quota, server errors and invalid responses; transport
+failures and timeouts are also explicit. Original recognized text is retained.
+No exact cause of the reported live failure has been established yet; synthetic
+tests verify that release translation reaches Ark even with normal polish off.
+
+Three interactive Delete-hint proposals are in
+`Design/Prototypes/delete-gesture-hints.html`; they do not change the keyboard's
+current Delete behavior. The recommended option reveals a leftward cue beside
+Delete only after a hold.
+
+Validation: 270 unit/integration checks passed, plus a new Emoji entry/Back haptic
+check and a rerun of the interactive motion test with five captured intermediate
+frames. Three installed-extension simulator touch tests passed: Emoji round trips,
+pinch/reopen/typing, and symbol shortcuts/Return hold. Physical haptic feel and
+live translation remain unverified while the Duo's Wi-Fi XCTest channel fails
+with exit 74; this is not evidence of an unanswered permission prompt.
+The personal-signed build passed strict signature verification and was installed
+on the Duo without uninstalling or erasing app data.
+
+## Language-key keyboard picker — 2026-11-22
+
+Tap Language to switch Chinese/English; hold it to open Apple's list of enabled
+keyboards. Fixed the old delayed-event path that switched straight to the next
+keyboard after a hold. UIKit now receives the original direct-touch sequence from
+the beginning; its short-tap advance is suppressed only during the local language
+key event. Gap dictation and release-over-Language translation remain separate.
+
+The installed-extension simulator touch test verified two short taps, the native
+picker appearing on hold, and choosing English (US) to activate Apple's keyboard.
+All 17 dictation-gesture regressions passed. Device automation remains blocked by
+runner error 74, so this is not a physical gesture verification.
+
+## Keyboard refinements — 2026-11-22
+
+Chinese letters give the old period key's width to Space; periods remain in the
+symbol palette and double-Space shortcut. The shortcut pill/menu and gesture pill
+are removed. Symbol pages show Clipboard History, newly copied Code when available,
+1Password and Messages directly in the candidate strip. Phone and standalone Paste
+are removed. Holding Enter inserts a line break without invoking Send/Search.
+
+Full ↔ mini pinch motion follows finger separation continuously, including reversal,
+and settles after release. Only the completed mode is remembered. Shared key faces
+keep their legends at native size, and Reduce Motion uses a fade. Emoji has one
+pill-backed Back button and a gradient at its bottom edge; hold Language on the
+letter keyboard to open the system input-method picker.
+
+This section supersedes the older pill, period-key and mode-animation notes below.
+
+Validation: 266 unit/integration checks passed, then all 14 motion tests passed
+after adding two-thumb-drift replay coverage. Three installed-extension simulator
+touch tests passed: emoji round trips, pinch/reopen/typing, and symbol shortcuts
+plus Return hold. The emoji mask/back-button screenshot was visually checked.
+The personal-signed build was installed on the Duo without uninstalling or erasing
+data. Physical regression remains pending while the Duo automation runner fails before
+establishing its IDE channel (exit 74); simulator evidence is not physical QA.
+
+## Direct keyboard dictation — 2026-11-22
+
+The keyboard now captures speech on demand through a bundled, nonpersistent WebKit
+view and runs Seed streaming/refinement and Ark polishing in the extension. Open
+vvhisper once after upgrading to migrate existing keys and grant microphone access;
+then holds work without opening the main app. Full Access remains required.
+
+The app no longer keeps an idle microphone or background audio session. The old
+Keep Dictation Ready setting and automatic app-return experiment are removed.
+No credentials or text enter the WebKit page: it sends UUID-tagged PCM and RMS to
+native code. Native Keychain sharing preserves the separate Seed/Ark credentials.
+Existing text ownership, cancellation, translation and submit gestures remain.
+
+WebKit capture is platform-dependent behavior, not an Apple-guaranteed keyboard
+capability. This section supersedes historical activation/return/readiness notes
+below. Validation on 2026-11-22: 265 simulator tests passed, the bundled JavaScript
+lifecycle checks passed, and the signed build was installed on the Duo without
+uninstalling. The user subsequently confirmed that direct dictation works on the Duo without
+opening the host. This is user verification; media-route and termination tests
+still need separate physical checks.
+Capture lifecycle tests: `node scripts/test-web-capture.mjs`; Swift session tests:
+`KeyboardVoiceSessionTests` in the existing iOS test scheme.
+
+Technique reference: [ios-keyboard-dictation](https://github.com/stephancill/ios-keyboard-dictation/tree/c86b6cf54fae774a3c98ecedc163e204923db9e5),
+with MIT attribution in `Dictation/WebAudioCapture-NOTICE.txt`.
+
+
 ### Media mixing, editing pills and iPad layout — 2026-11-20
 
 The ready microphone now uses normal audio mode with mixing and Bluetooth stereo

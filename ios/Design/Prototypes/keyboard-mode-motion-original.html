@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vvhisper · Full ↔ Mini</title>
+<style>
+:root{color-scheme:light;--page:#f6f5f2;--ink:#20201f;--muted:#777770;--card:#fff;--border:#deded8;--screen:#f7f7f9;--cap:#fff;--bed:#e0e1e6;--sub:#eeeef1;--accent:#49624d}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1240px;margin:auto;padding:44px 32px 34px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:28px}.eyebrow{font-size:11px;letter-spacing:.14em;font-weight:650;color:var(--muted);text-transform:uppercase}h1{font-size:38px;font-weight:600;letter-spacing:-1.7px;line-height:1.15;margin:12px 0}header p{color:var(--muted);max-width:650px;margin:0}button,input,select{font:inherit}button{border:1px solid var(--border);background:var(--card);color:var(--ink);border-radius:100px;padding:9px 16px;cursor:pointer;transition:transform 120ms}button:active{transform:scale(.97)}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #738e7b;outline-offset:3px}.primary{color:var(--card);background:var(--ink);border-color:var(--ink)}.toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:30px 0 24px}.toolbar label{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:9px}.toolbar select{background:transparent;color:var(--ink);border:0;padding:8px}.scrub{flex:1;min-width:230px;margin-left:auto}.scrub input{width:100%;min-width:90px;accent-color:var(--ink);cursor:ew-resize}.scrub span{white-space:nowrap}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}.card{min-width:0}.card-head{display:flex;align-items:center;gap:8px;height:28px;margin-bottom:12px}.card-head h2{font-size:16px;margin:0;font-weight:600;letter-spacing:-.25px}.num{font-size:11px;color:var(--muted);margin-right:4px}.tag{margin-left:auto;color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:.06em;background:#e4ebe1;padding:3px 8px;border-radius:100px}.phone{position:relative;aspect-ratio:360/486;width:100%;overflow:hidden;border-radius:24px;background:var(--screen);border:1px solid var(--border);box-shadow:0 7px 22px #00000005}.scene{position:absolute;width:360px;height:486px;transform-origin:top left}.screen-header{position:absolute;left:20px;right:20px;top:23px;display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:14px}.screen-header small{font-weight:400;color:var(--muted);font-size:11px}.message{position:absolute;top:84px;left:20px;max-width:255px;background:var(--card);padding:13px 17px;border-radius:17px;font-size:15px;color:var(--muted)}.composer{position:absolute;left:12px;right:12px;height:44px;border-radius:22px;background:var(--card);border:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-size:14px;will-change:transform}.caret{display:inline-block;width:1.5px;height:17px;vertical-align:-3px;background:var(--ink);margin-left:3px}.send{width:26px;height:26px;background:var(--ink);color:var(--card);border-radius:50%;display:grid;place-items:center;font-size:18px}.bed{position:absolute;bottom:0;left:0;right:0;background:var(--bed);overflow:hidden;border-top:1px solid #00000006}.canvas{position:absolute;bottom:0;left:0;width:360px;height:280px;overflow:visible}.keycap{fill:var(--cap)}.keytext{fill:var(--ink);font-size:22px;font-weight:400;font-family:inherit;dominant-baseline:central;text-anchor:middle}.glyph{color:var(--ink)}.candidate{fill:var(--muted);font-family:inherit;font-size:15px;text-anchor:middle;dominant-baseline:central}.card-info{display:flex;justify-content:space-between;align-items:center;margin:15px 0 8px;gap:10px}.card-info small{color:var(--muted);font-variant-numeric:tabular-nums;font-size:12px}.card-info button{font-size:12px;padding:7px 13px}.description{font-size:13px;color:var(--muted);margin:0;line-height:1.65}.notes{display:grid;grid-template-columns:1.15fr 1fr;gap:60px;margin-top:34px;padding-top:24px;border-top:1px solid var(--border)}.notes h3{font-size:14px;margin:0 0 8px;font-weight:600}.notes p{font-size:13px;color:var(--muted);margin:0;line-height:1.7}.foot{margin-top:24px;color:var(--muted);font-size:11px}body.dark{color-scheme:dark;--page:#171718;--ink:#f2f1ed;--muted:#a09f9b;--card:#29292b;--border:#3a3a3d;--screen:#202022;--cap:#505053;--bed:#303034;--sub:#3b3b40;--accent:#b7cab4}.dark .tag{background:#354536}.dark .primary{color:#171718}.dark .send{color:#171718}
+@media(max-width:900px){main{padding:28px 22px}.cards{gap:18px;grid-template-columns:repeat(3,minmax(265px,1fr));overflow-x:auto;padding-bottom:10px}.notes{gap:24px}h1{font-size:32px}.tag{font-size:9px}}
+@media(max-width:560px){header{display:block}header>button{margin-top:18px}.notes{grid-template-columns:1fr}.scrub{width:100%;flex:auto;margin:4px 0}.cards{grid-template-columns:repeat(3,300px)}main{padding:24px 16px}}
+</style>
+<main>
+<header><div><div class="eyebrow">vvhisper / motion study 06</div><h1>Less keyboard. Same place.</h1><p>Three ways to move between typing and dictation. Keep your place, keep the controls familiar, and get out of the way.</p></div><button id="theme" aria-pressed="false">Dark appearance</button></header>
+<div class="toolbar"><button class="primary" id="toggle">Collapse all</button><button id="replay">Replay round trip</button><label>Speed <select id="speed" aria-label="Playback speed"><option value="1">Actual</option><option value="3">3× slower</option></select></label><label class="scrub"><span>Full</span><input id="scrub" type="range" min="0" max="100" value="0" aria-label="Preview pinch progress"><span>Mini</span></label></div>
+<div class="cards" id="cards"></div>
+<div class="notes"><section><h3>My pick: 01, anchored collapse.</h3><p>One continuous surface, no bounce, no shrinking letters. The upper rows tuck away while the bottom controls settle into one row. The editor follows the keyboard edge on the same beat.</p></section><section><h3>Make the pinch feel connected.</h3><p>Drag the progress slider to inspect the gesture. In the app, your fingers would drive this progress; release would finish or reverse it. Tap a button again mid-transition to try an interruption.</p></section></div>
+<div class="foot">Interactive motion proposal · Approximate phone geometry · Native iOS keyboard-height synchronization still needs device validation · Respects Reduce Motion</div>
+</main>
+<script>
+const NS='http://www.w3.org/2000/svg';
+const icons={mic:'<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 11v1a6 6 0 0 0 12 0v-1M12 18v4M8 22h8"/>',del:'<path d="M9 5h12v14H9l-7-7zM12 9l6 6m0-6-6 6"/>',enter:'<path d="M19 4v9H4m5-5-5 5 5 5"/>',expand:'<path d="M4 9V4h5m-5 0 6 6m10 5v5h-5m5 0-6-6"/>',shift:'<path d="m3 11 9-9 9 9h-5v10H8V11z"/>',emoji:'<circle cx="12" cy="12" r="9"/><path d="M7 14q5 7 10 0M8 9h.1M16 9h.1"/>',book:'<path d="M5 3h14v18H5zM8 17h8M8 3v14"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',gesture:'<path d="M12 2v20M2 12h20m-13-7 3-3 3 3m-10 4-3 3 3 3m10 4-3 3-3-3m10-10 3 3-3 3"/>'};
+function svg(tag,attrs={}){let e=document.createElementNS(NS,tag);for(let k in attrs)e.setAttribute(k,attrs[k]);return e}
+function icon(name,x,y,size=22){let e=svg('svg',{x,y,width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.7,'stroke-linecap':'round','stroke-linejoin':'round',class:'glyph'});e.innerHTML=icons[name];return e}
+const clamp=(x)=>Math.max(0,Math.min(1,x)),mix=(a,b,p)=>a+(b-a)*p,smooth=(x)=>{x=clamp(x);return x*x*(3-2*x)};
+const configs=[{name:'Anchored collapse',ms:220,desc:'The quiet option. Upper rows retract; the bottom edge stays planted. The wide Space key becomes Dictate.'},{name:'Soft morph',ms:260,desc:'A little more character. The letter keys move inward toward the dictation key, then dissolve as it takes shape.'},{name:'Quick fade',ms:150,desc:'The least motion. A brief fade hides the layout swap while the keyboard and editor resize together.'}];
+const states=[];let reduced=matchMedia('(prefers-reduced-motion: reduce)').matches,roundTrip=0;
+function addKey(canvas,box,label,mini=null){let g=svg('g'),r=svg('rect',{class:'keycap',rx:8});g.append(r);let normal=svg('g'),next=svg('g');g.append(normal,next);canvas.append(g);function legend(group,value){if(icons[value])group.append(icon(value,0,0));else{let t=svg('text',{class:'keytext'});t.textContent=value;group.append(t)}}legend(normal,label);if(mini)legend(next,mini.label);return{g,r,normal,next,box,label,mini}}
+configs.forEach((cfg,index)=>{
+ let article=document.createElement('article');article.className='card';article.innerHTML=`<div class="card-head"><span class="num">0${index+1}</span><h2>${cfg.name}</h2>${index===0?'<span class="tag">Recommended</span>':''}</div><div class="phone"><div class="scene"><div class="screen-header"><span>‹ &nbsp; Notes</span><small>vvhisper</small></div><div class="message">Make room for the next thought.</div><div class="composer"><span>Let's try this<span class="caret"></span></span><span class="send">↑</span></div><div class="bed"><svg class="canvas" viewBox="0 0 360 280"></svg></div></div></div><div class="card-info"><small>${cfg.ms} ms · no overshoot</small><button aria-label="Toggle ${cfg.name}">Try mini</button></div><p class="description">${cfg.desc}</p>`;document.querySelector('#cards').append(article);
+ let canvas=article.querySelector('.canvas'),keys=[];
+ 'qwertyuiop'.split('').forEach((v,i)=>keys.push(addKey(canvas,[5+i*35.2,47,32,46],v)));
+ 'asdfghjkl'.split('').forEach((v,i)=>keys.push(addKey(canvas,[22+i*35.2,103,32,46],v)));
+ keys.push(addKey(canvas,[5,159,42,46],'shift'));
+ 'zxcvbnm'.split('').forEach((v,i)=>keys.push(addKey(canvas,[53+i*36.2,159,32,46],v)));
+ keys.push(addKey(canvas,[312,159,43,46],'del',{box:[258,216,44,48],label:'del'}));
+ keys.push(addKey(canvas,[5,216,43,48],'123',{box:[8,216,44,48],label:'expand'}));
+ keys.push(addKey(canvas,[54,216,32,48],'book'));keys.push(addKey(canvas,[92,216,32,48],'emoji'));
+ keys.push(addKey(canvas,[130,216,152,48],'',{box:[58,216,194,48],label:'mic'}));
+ keys.push(addKey(canvas,[288,216,67,48],'enter',{box:[308,216,44,48],label:'enter'}));
+ let strip=svg('g');strip.append(icon('grid',14,12,18),icon('gesture',322,12,18));let line=svg('text',{x:180,y:22,class:'candidate'});line.textContent='';strip.append(line);canvas.append(strip);
+ let s={...cfg,index,article,keys,strip,bed:article.querySelector('.bed'),composer:article.querySelector('.composer'),button:article.querySelector('.card-info button'),p:0,target:0,raf:0};states.push(s);s.button.onclick=()=>{clearTimeout(roundTrip);animate(s,s.target?0:1)};
+ new ResizeObserver(()=>{article.querySelector('.scene').style.transform=`scale(${article.querySelector('.phone').clientWidth/360})`}).observe(article.querySelector('.phone'));draw(s,0);
+});
+function placeLegend(group,label,w,h){let node=group.firstChild;if(!node)return;if(icons[label]){node.setAttribute('x',(w-22)/2);node.setAttribute('y',(h-22)/2)}else{node.setAttribute('x',w/2);node.setAttribute('y',h/2);node.style.fontSize=label==='123'?'16px':'22px'}}
+function draw(s,p){
+ s.p=p;let layoutP=reduced?(p<.5?0:1):p,top=208*layoutP;
+ s.bed.style.height=`${280-top}px`;s.composer.style.top=`${486-(280-top)-56}px`;
+ s.strip.setAttribute('opacity',1-smooth(p*2.6));s.strip.setAttribute('transform',`translate(0 ${s.index===1?top*.22:0})`);
+ s.keys.forEach(k=>{
+  let b=k.box.slice(),opacity=1,labels=p;
+  if(k.mini){
+   let t=layoutP;
+   if(s.index===2||reduced){t=p<.5?0:1;opacity=p<.5?1-smooth(p/.45):smooth((p-.55)/.45);if(k.label==='enter'){t=layoutP;opacity=1}}
+   b=b.map((v,i)=>mix(v,k.mini.box[i],t));
+   if(s.index!==2&&!reduced&&k.label==='enter'){let settle=smooth(p/.45);b[0]=mix(k.box[0],k.mini.box[0],settle);b[2]=mix(k.box[2],k.mini.box[2],settle)}
+   if(s.index!==2&&!reduced&&k.label==='del'){b[0]=mix(k.box[0],k.mini.box[0],smooth(p/.55));b[1]=mix(k.box[1],k.mini.box[1],smooth((p-.2)/.8))}
+   k.normal.setAttribute('opacity',k.label===k.mini.label?1:1-smooth((labels-.16)/.4));
+   k.next.setAttribute('opacity',k.label===k.mini.label?0:smooth((labels-.45)/.4));
+  }else{
+   if(s.index===0){b[1]+=52*layoutP;opacity=1-smooth(p*1.5)}
+   else if(s.index===1){let t=smooth(p*1.35);b[0]=mix(b[0],150+(b[0]-150)*.12,t);b[1]=mix(b[1],224,t);b[2]=mix(b[2],23,t);b[3]=mix(b[3],34,t);opacity=1-smooth((p-.1)/.62);k.normal.setAttribute('opacity',1-smooth(p*2.6))}
+   else opacity=1-smooth(p/.4);
+   if(reduced){b=k.box.slice();opacity=1-smooth(p/.4)}
+  }
+  k.g.setAttribute('transform',`translate(${b[0]} ${b[1]})`);k.g.setAttribute('opacity',opacity);k.r.setAttribute('width',b[2]);k.r.setAttribute('height',b[3]);placeLegend(k.normal,k.label,b[2],b[3]);if(k.mini)placeLegend(k.next,k.mini.label,b[2],b[3]);
+ });
+ s.button.textContent=p>.5?'Try full':'Try mini';
+}
+function animate(s,target){cancelAnimationFrame(s.raf);s.target=target;let from=s.p,start=performance.now(),duration=(reduced?120:s.ms)*Number(document.querySelector('#speed').value)*Math.max(.3,Math.abs(target-from));function frame(now){let t=clamp((now-start)/duration),e=1-Math.pow(1-t,3);draw(s,mix(from,target,e));if(t<1)s.raf=requestAnimationFrame(frame);else s.raf=0} s.raf=requestAnimationFrame(frame)}
+function toggleAll(){clearTimeout(roundTrip);let target=states[0].target?0:1;states.forEach(s=>animate(s,target));document.querySelector('#toggle').textContent=target?'Expand all':'Collapse all';document.querySelector('#scrub').value=target*100}
+document.querySelector('#toggle').onclick=toggleAll;
+document.querySelector('#replay').onclick=()=>{clearTimeout(roundTrip);states.forEach(s=>{cancelAnimationFrame(s.raf);s.target=0;draw(s,0)});requestAnimationFrame(()=>{states.forEach(s=>animate(s,1));roundTrip=setTimeout(()=>states.forEach(s=>animate(s,0)),(reduced?120:260)*Number(document.querySelector('#speed').value)+650)})};
+document.querySelector('#scrub').oninput=e=>{clearTimeout(roundTrip);let p=Number(e.target.value)/100;states.forEach(s=>{cancelAnimationFrame(s.raf);s.target=p>.5?1:0;draw(s,p)});document.querySelector('#toggle').textContent=p>.5?'Expand all':'Collapse all'};
+document.querySelector('#theme').onclick=()=>{let dark=document.body.classList.toggle('dark');document.querySelector('#theme').textContent=dark?'Light appearance':'Dark appearance';document.querySelector('#theme').setAttribute('aria-pressed',dark)};
+matchMedia('(prefers-reduced-motion: reduce)').onchange=e=>{reduced=e.matches;states.forEach(s=>{cancelAnimationFrame(s.raf);draw(s,s.target)})};
+document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(roundTrip);states.forEach(s=>{cancelAnimationFrame(s.raf);draw(s,s.target)})}});
+const params=new URLSearchParams(location.search);if(params.has('p')){let p=clamp(Number(params.get('p')));states.forEach(s=>{s.target=p;draw(s,p)});document.querySelector('#scrub').value=p*100}if(params.has('dark'))document.querySelector('#theme').click();
+window.motionStudy={states,draw,animate};
+</script>
+</html>

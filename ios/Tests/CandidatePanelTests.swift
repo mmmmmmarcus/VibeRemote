@@ -102,7 +102,7 @@ final class CandidatePanelTests: XCTestCase {
         XCTAssertTrue(shortcuts.isHidden)
         keyboard.view.layoutIfNeeded()
         XCTAssertEqual(panel.frame.minX, 0)
-        XCTAssertFalse(try XCTUnwrap(descendants(keyboard.view).first { $0 is GesturePill }).isHidden)
+        XCTAssertNil(descendants(keyboard.view).first { $0 is GesturePill })
         let first = try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "candidate.0" })
         XCTAssertTrue(first.accessibilityTraits.contains(.selected))
         func capture(_ name: String) throws {
@@ -127,7 +127,7 @@ final class CandidatePanelTests: XCTestCase {
         let a = try key("a")
         let aPoint = a.convert(CGPoint(x: a.bounds.midX, y: a.bounds.midY), to: keyboard.view)
         XCTAssertFalse(keyboard.view.hitTest(aPoint, with: nil) is KeyControl)
-        XCTAssertTrue(try XCTUnwrap(descendants(keyboard.view).first { $0 is GesturePill }).isHidden)
+        XCTAssertNil(descendants(keyboard.view).first { $0 is GesturePill })
         let space = try key("space")
         let spacePoint = space.convert(CGPoint(x: space.bounds.midX, y: space.bounds.midY), to: keyboard.view)
         XCTAssertTrue(keyboard.view.hitTest(spacePoint, with: nil) === space)
@@ -140,7 +140,7 @@ final class CandidatePanelTests: XCTestCase {
         XCTAssertEqual(proxy.editor.text, expected)
         XCTAssertFalse(panel.isExpanded)
         XCTAssertTrue(panel.isHidden)
-        XCTAssertFalse(shortcuts.isHidden, "Shortcuts return after committing the candidate")
+        XCTAssertTrue(shortcuts.isHidden, "Letter pages keep shortcuts hidden after committing")
         keyboard.view.layoutIfNeeded()
         XCTAssertTrue(keyboard.view.hitTest(aPoint, with: nil) === a)
     }

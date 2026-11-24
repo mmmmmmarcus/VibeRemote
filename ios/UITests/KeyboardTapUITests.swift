@@ -3,6 +3,35 @@ import XCTest
 /// Sends coordinates through UIKit to the installed keyboard extension. These
 /// tests deliberately do not call KeyControl.press or accessibilityActivate.
 final class KeyboardTapUITests: XCTestCase {
+    @MainActor func testHeldDeleteSweepsThroughMAndRestoresTyping() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.vvhisper.ios")
+        app.launchArguments = ["--keyboard-test"]
+        app.launch()
+        let field = app.textViews["keyboard-test-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10)); field.tap()
+        enableKeyboard(in: app)
+        if app.descendants(matching: .any)["keyboard.key.dictate"].exists {
+            app.descendants(matching: .any)["keyboard.key-surface"].pinch(withScale: 2.5, velocity: 2)
+        }
+        let language = app.descendants(matching: .any)["keyboard.key.language"]
+        if language.label != "English" { language.tap() }
+        app.buttons["keyboard-test.clear"].tap()
+        // Long enough that held repeat alone cannot empty the fixture during the swipe.
+        for letter in String(repeating: "abcdefgh", count: 3) { app.descendants(matching: .any)["keyboard.key.\(letter)"].tap() }
+        XCTAssertFalse((field.value as? String ?? "").isEmpty)
+        let delete = app.descendants(matching: .any)["keyboard.key.delete"]
+        let m = app.descendants(matching: .any)["keyboard.key.m"]
+        let origin = delete.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let broom = m.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -2, dy: 0))
+        origin.press(forDuration: 0.45, thenDragTo: broom)
+        XCTAssertTrue(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "value == ''"), evaluatedWith: field)], timeout: 4) == .completed)
+        m.tap()
+        XCTAssertTrue(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "value ==[c] 'm'"), evaluatedWith: field)], timeout: 3) == .completed)
+        delete.tap()
+        XCTAssertTrue(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "value == ''"), evaluatedWith: field)], timeout: 3) == .completed)
+    }
+
     @MainActor func testCandidatePullExpandsWithoutSelectingAndChevronCollapses() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.vvhisper.ios")
@@ -174,6 +203,65 @@ final class KeyboardTapUITests: XCTestCase {
             XCTAssertTrue(XCTWaiter.wait(for: [expectation(for: match, evaluatedWith: field)], timeout: 3) == .completed,
                           "Edge drift on \(value) must remain a tap")
         }
+    }
+
+    @MainActor func testLanguageHoldOpensNativeKeyboardPicker() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.vvhisper.ios")
+        app.launchArguments = ["--keyboard-test"]; app.launch()
+        let field = app.textViews["keyboard-test-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10)); field.tap(); enableKeyboard(in: app)
+        if app.descendants(matching: .any)["keyboard.key.dictate"].exists {
+            app.descendants(matching: .any)["keyboard.key-surface"].pinch(withScale: 2.5, velocity: 2)
+        }
+        let language = app.descendants(matching: .any)["keyboard.key.language"]
+        XCTAssertTrue(language.waitForExistence(timeout: 5))
+        let original = language.label
+        language.tap()
+        XCTAssertNotEqual(language.label, original, "Tap changes vvhisper's language without switching keyboards")
+        language.tap()
+        XCTAssertEqual(language.label, original, "A second short tap must remain inside vvhisper")
+        let tappedLanguage = language.label
+        language.press(forDuration: 1.2)
+        let attachment = XCTAttachment(screenshot: app.screenshot()); attachment.name = "Language hold native keyboard picker"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertTrue(app.staticTexts["English (US)"].exists || app.buttons["English (US)"].exists || app.buttons["Keyboard Settings…"].exists, "Holding Language should expose Apple's enabled-keyboard list")
+        XCTAssertEqual(language.label, tappedLanguage, "Hold must consume the Chinese/English tap")
+        app.cells["English (US)"].tap()
+        XCTAssertTrue(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: language)], timeout: 3) == .completed)
+        XCTAssertTrue(app.keys["A"].exists || app.keys["a"].exists, "Selecting English activates Apple's keyboard")
+    }
+
+    @MainActor func testSymbolShortcutsAndReturnHoldThroughInstalledExtension() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.vvhisper.ios")
+        app.launchArguments = ["--keyboard-test"]; app.launch()
+        let field = app.textViews["keyboard-test-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10)); field.tap(); enableKeyboard(in: app)
+        if app.descendants(matching: .any)["keyboard.key.dictate"].exists {
+            app.descendants(matching: .any)["keyboard.key-surface"].pinch(withScale: 2.5, velocity: 2)
+        }
+        let language = app.descendants(matching: .any)["keyboard.key.language"]
+        XCTAssertTrue(language.waitForExistence(timeout: 5))
+        if language.label == "English" { language.tap() }
+        XCTAssertFalse(app.descendants(matching: .any)["keyboard.key.。"].exists)
+        XCTAssertFalse(app.buttons["keyboard.open-1password"].isHittable)
+        app.descendants(matching: .any)["keyboard.key.123"].tap()
+        for id in ["keyboard.clipboard-history", "keyboard.open-1password", "keyboard.open-messages"] {
+            XCTAssertTrue(app.buttons[id].isHittable, id)
+        }
+        for id in ["keyboard.shortcut-pill", "keyboard.paste", "keyboard.open-phone"] { XCTAssertFalse(app.buttons[id].exists) }
+        XCTAssertTrue(app.descendants(matching: .any)["keyboard.key.。"].exists)
+        app.descendants(matching: .any)["keyboard.key.ABC"].tap()
+        app.buttons["keyboard-test.clear"].tap()
+        app.descendants(matching: .any)["keyboard.key.return"].press(forDuration: 0.7)
+        XCTAssertEqual(field.value as? String, "\u{2028}")
+        app.descendants(matching: .any)["keyboard.key.globe"].tap()
+        XCTAssertTrue(app.buttons["emoji.close"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["emoji.system-keyboard"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot()); attachment.name = "Emoji back pill and bottom fade"; attachment.lifetime = .keepAlways
+        add(attachment)
+        app.buttons["emoji.close"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["keyboard.key.a"].exists)
     }
 
     @MainActor func testPinchSwitchesModesWithoutTypingAndRemembersMini() throws {

@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
+python3 scripts/prepare-private-credentials.py
 
 APP_NAME="vvhisper"
 VOICE_BRIDGE_NAME="vvhisperVoiceBridge"

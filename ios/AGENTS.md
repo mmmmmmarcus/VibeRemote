@@ -1,23 +1,80 @@
 # vvhisper iOS
 
+## Private credentials (2026-11-24)
+
+User chose personal-only builds with no backend. This supersedes credential-entry
+and credential-sync instructions below. Build scripts embed ignored, locally
+generated credentials; runtime reads PrivateCredentials (Android: bundled asset).
+No key entry/removal/export controls. Seed uses its new-console key, independent
+of preserved legacy App ID preferences. Settings transfer must not read, export,
+or apply credentials. Preserve existing Keychain/Keystore entries. Never print
+or commit keys or publish these private binaries. See macos/Design/PrivateBuilds.md
+(relative to repository root) for provisioning and verification limits.
+
+
 The iOS app is a separate native UIKit host plus keyboard extension. Build with
 `./build.sh`; the checked-in XcodeGen `project.yml` generates the ignored project.
 Target arm64 iOS/iPadOS 27.0, device families 1 and 2, personal team Q9MD524YL5. Never change macOS compatibility IDs.
 
-The main app uses native grouped settings with a separate Try Keyboard page. Prepare
-voice automatically on foreground activation or after saving a Seed key; there is no
-manual voice enable/disable control. Keep the session bounded and discard idle audio.
-Keep Dictation Ready offers 1, 5, 10, 15, 30 or 60 minutes (15 by default, including
-migration). Measure expiry from microphone activation, never from the last hold.
-Changing duration updates the current deadline; if elapsed, stop immediately even
-during recording. Publish the same deadline to the keyboard's readiness file.
+Emoji Back uses the same single tap feedback as Emoji entry. Enter has two tactile
+stages: normal touch-down feedback, then a stronger/sharper confirmation when its
+hold inserts a line separator. Never pulse again on release or when insertion is
+cancelled. Both obey the user's haptic settings, including strength zero.
+Extended Delete (2026-11-22): after the direct Delete hold threshold, grow a
+visual-only surface left over its adjacent same-row key (M on phone letters).
+Keep the real key frames and hit targets unchanged. The broom center is the
+latched clear-all target; reaching it clears once, and release never deletes again.
+The current SDK has no built-in broom: `DeleteBroom.symbolset` is original artwork
+compiled as a custom SF symbol, not a system-provided icon. Keep the 180 ms reveal,
+120 ms dismissal and Reduce Motion support. Restore borrowed key paint on release,
+cancel, second-key input, field changes, rotation, mode changes and dismissal.
+Use actual geometry in continuous/split, portrait/landscape and symbol layouts;
+mini borrows only a bounded edge of Dictate, and iPad uses Delete's adjacent number
+row key. Gap dictation and dictation slide-cancel never expand Delete. Preserve
+destination guards and bounded clear-all work. The HTML is the approved reference.
 
-Use AVAudioSession .playAndRecord with .default mode, .mixWithOthers,
-.defaultToSpeaker and .allowBluetoothA2DP. Never use .measurement for the ready
-session: Apple documents reduced playback output in that mode. Do not request
-ducking, HFP, voice processing or change system volume. Empty recognition and an
-already-released short hold finish silently; real permission/network failures
-remain actionable. Physical media playback still requires device verification.
+## Configuration sync and transfer (2026-11-22)
+
+The user replaced iCloud Keychain synchronization with a password-encrypted JSON
+file selected in iCloud Drive. Mac and the iOS host remember a security-scoped
+bookmark and a local-only Keychain password; the keyboard reads existing local
+keys. Android imports/exports the same authenticated format. Keep existing key
+services and values working; no additional sync access group or Mac provisioning
+profile is required. Never put plaintext keys in defaults, files or logs.
+Settings-only export is default; including keys is explicit and encrypted.
+Only Seed/Ark keys and polishing/punctuation settings transfer. Missing values
+never erase local keys. Conflicts require a choice; offline failures preserve
+local operation. See macos/Design/ConfigurationSync.md for the shared format.
+
+## Direct keyboard dictation (2026-11-22)
+
+The user authorized WebKit capture as the primary path, superseding the older
+host-owned microphone and host-only credentials rules. The main app now grants
+microphone permission and manages settings only. No background-audio mode, idle
+microphone, readiness timer or automatic app-return mechanism remains. Preserve
+legacy preference values, but do not expose Keep Dictation Ready in Settings.
+
+A nonpersistent WKWebView, attached at 1×1 pt / alpha 0.01, loads bundled HTML only.
+Create AudioContext and getUserMedia only during an explicit hold; release, cancel,
+dismissal, interruption and the 120-second hold limit stop all media tracks. Guard
+both sides of every async startup boundary with the hold UUID. The page watches
+native heartbeats and stops after 3 seconds without one. Block network/navigation
+in the page, grant only its own main-frame microphone request, and never pass it
+credentials, transcripts or editor context. WebKit behavior is not guaranteed by
+Apple's keyboard contract; validate on physical devices after OS updates.
+
+KeyboardVoiceSession owns streaming Seed, refinement and Ark polishing in the
+extension. Audio is 16 kHz mono s16le; levels stay in memory, capped at 20 Hz.
+Keep DictationTextSession's field/selection/marked-span guards. Typing or deleting
+cancels pending polishing synchronously and late callbacks never replace edits.
+Empty recognition and holds released during startup complete silently.
+
+VoiceConfiguration stores only non-secret settings in App Group defaults. Separate
+Seed/Ark keys remain device-only native Keychain items in the explicit shared voice
+access group. The host copies and verifies existing keys once, retaining originals;
+never import a Mac key, send keys to JS, or put them in shared files. Migration failure
+must not erase an existing key or mark migration complete. Actual audio-route,
+media-output, haptic and process-termination behavior requires device verification.
 
 On iPad widths >=600 points use five continuous rows: number row with Delete,
 QWERTY with Tab, home row with a wide Return, lower letters with punctuation and
@@ -26,18 +83,13 @@ input policies. Widths below 600 fall back to phone geometry; do not force iPad
 layout onto the Duo or request unsupported floating-window behavior. Validate
 portrait, landscape and narrow windows; host and extension target both families.
 
-The host owns microphone capture and Seed credentials (Keychain). The extension
-must cancel a released hold on the next key press, before typing or deletion,
-preserving visible text and rejecting all late polish/translation replies. Send
-the cancel command to the host so its polisher stops on the next IPC tick.
-The extension never records audio or reads credentials. App Group files carry bounded, expiring
-commands/results. No audio or typed text is logged. Idle audio is discarded; only
-an explicit hold is sent to Seed. Stop capture on interruption and session expiry.
+Only audio from an explicit dictation hold is sent to Seed. Never log audio,
+transcripts, credentials or provider response bodies.
 All async responses must match the hold and focused document before inserting.
-After final Seed recognition, the host runs a separate text-only Volcengine Ark
+After final Seed recognition, the extension runs a separate text-only Volcengine Ark
 polish pass (2026-11-19). Use `doubao-seed-2-0-mini-260428` at
 `https://ark.cn-beijing.volces.com/api/v3/chat/completions` with
-`thinking: {"type":"disabled"}`. Polish Dictation defaults on; host-only settings latch
+`thinking: {"type":"disabled"}`. Polish Dictation defaults on; shared settings latch
 at hold start, with a separate device-only Ark Keychain key. Never reuse/fall back
 to ASR or legacy OpenRouter credentials or a saved OpenRouter model. The Model row
 identifies the fixed Seed 2.0 Mini model; label the key Volcengine Ark API Key.
@@ -46,6 +98,8 @@ and editing instructions, no tools/editor context. Preserve meaning, tone,
 uncertainty, negations, names, numbers and mixed languages. Require complete
 finish_reason=stop JSON with only a nonempty text field. Missing credentials,
 timeout and invalid responses keep the original recognized text with a notice.
+Distinguish authentication, model access, quota/rate limits, server failure,
+timeout and invalid responses without exposing provider bodies or transcript text.
 Use an ephemeral session with a 15 s resource deadline. Keep recognized text
 marked while awaiting polish; release never commits early. UITextDocumentProxy
 cannot force an underline in arbitrary host apps: marked-text appearance belongs
@@ -70,7 +124,7 @@ The keyboard allows 25 s after release for ASR plus polishing. Cancellation/new
 holds invalidate the polish task and late completion; the keyboard revalidates
 document, selection and context before replacing or submitting. No transcript,
 key, provider body or provider error logging. Live verification requires a key.
-Sentence Punctuation (2026-11-19) is a separate default-on host setting, latched at
+Sentence Punctuation (2026-11-19) is a separate default-on shared setting, latched at
 hold start. Apply DictationSentencePunctuation only to final text after optional
 polishing, including disabled/failed/interrupted polishing fallbacks. Never alter
 streaming text or ordinary keyboard typing. Keep its pure helper byte-identical to
@@ -90,7 +144,7 @@ press began in a gap; gap holds must not repeat Delete or invoke a function key.
 Direct holds on Space, Shift, Return, language/mode switches, numbers, punctuation
 and emoji never start it; ordinary
 function holds keep their normal tap action on release, apart from Space's cursor
-hold and Language's system keyboard picker described below. Once recording starts,
+hold, Return's line-break hold and Language's system keyboard picker described below. Once recording starts,
 track the originating finger across the keyboard. Entering the actual Delete
 keycap immediately cancels this hold, restores its displaced selection and shows
 red feedback until release. Entering Return stops recording, shows blue feedback
@@ -113,7 +167,8 @@ Full-mode dictation keeps the candidate strip quiet (2026-11-18): no particles,
 polishing animation or routine status label during recording/refinement. Keep
 functional activation/error messages. Quiet Keys uses the approved center-out
 voice-level response (2026-11-18). All text legends fade together in 120 ms at
-recording start and return on release; functional icons remain legible. Neutral
+recording start and return on release; inactive Shift and Emoji icons fade too.
+Active Delete, Return and Language icons remain legible. Neutral
 key fills respond from the center as speech grows, using a 35 ms attack,
 140 ms release and 6% normalized noise gate, followed by a 0.65-power response
 (2026-11-20: gentler than the previous square-root lift). Light appearance uses
@@ -125,13 +180,10 @@ remaining function keys. No molecules, candidate-strip effects or polishing anim
 Final text commits immediately. Cancel, errors, rotation and dismissal clear the
 feedback; old sessions cannot revive it. Reduce Motion uses a stationary low
 center indication (18% white in light mode / 12% in dark mode), with no legend transition or amplitude-driven extent changes.
-The host derives a bounded RMS scalar from the existing ASR PCM, only during a
-hold, and publishes at most 20 Hz. `level.json` contains only the hold UUID, scalar
-and timestamp, expires after 300 ms, and is removed on finish/cancel/expiry. Never
-send raw audio to the extension. Reject old IDs, out-of-order/future/invalid samples
-and changed destinations. Missing/stale readings decay to silence. Core Animation
-interpolates changed key fills; no display link, recurring idle/silence frames or
-post-release loop. Meter activity is not proof of successful transcription.
+The capture page reports RMS with each PCM chunk; native code bounds its level
+and publishes it in memory at most 20 Hz, with hold UUID and timestamp. Reject
+old IDs and stale values. Stop feedback on release/cancel/dismissal. No display
+link, idle meter timer, capture outside a hold or post-release meter loop.
 Space has a separate cursor hold (2026-11-17): after 380 ms, haptic feedback marks
 trackpad activation; a tap still inserts Space or accepts the first candidate.
 Drag distance drives public proxy caret offsets, with no release momentum. Move
@@ -220,22 +272,21 @@ to mask a missing input event. `--verify-haptics --observe-haptic-touches` obser
 24 externally driven key touches in the synthetic field instead of generating
 pulses, covering the physical two-thumb route the pulse-only check cannot test.
 
-Editing swipes live only on the right-hand gesture pill (2026-11-20). Left deletes
-one word, right restores the last swipe deletion, down inserts U+2028 LINE SEPARATOR
-without invoking Return/Send, and up moves to the end of text (user-confirmed).
-Ordinary KeyControls must have no onEditSwipe callback. Preserve Space trackpad,
-pinch mode changes, held-Delete clear-all, symbol alternatives and dictation slides.
-Capture and validate field/context at gesture start; commit Pinyin before editing.
-End-of-text walks the bounded proxy context through CursorDragSession acknowledgement
-checks, stops on unavailable context/external changes/new touches, and is capped at
-200 polling steps. Never infer wrapped-line geometry. Keep the bounded ephemeral
-word-restore stack and clear it on unrelated editing or dismissal.
+Keyboard simplification (2026-11-22): no gesture pill and no shortcut pill/menu.
+Ordinary KeyControls have no editing-swipe callback. Direct Return holds insert
+one U+2028 LINE SEPARATOR without invoking Send/Search; consume the release tap
+and validate the original field. Commit Pinyin before inserting. Ordinary Return
+and dictation-slide submission retain their existing behavior. Preserve Space
+trackpad, pinch, held-Delete clear-all, symbol alternatives and dictation slides.
+Chinese phone letters have no separate period beside Return: Space gets its width.
+Chinese punctuation pages and language-aware double-Space periods stay available.
 
-Shortcut pill (2026-11-20): left aligned, expands horizontally to Paste, a new copied
-code when available, 1Password, Messages and Phone. The right gesture pill remains
-separate; candidates occupy the space between collapsed pills. Expanded shortcuts
-replace candidates temporarily. Keep 44-point shortcut targets and horizontal scrolling
-on narrow windows. User authorized five-item local clipboard history on 2026-11-20,
+Show Clipboard History, a new copied code when available, 1Password and Messages
+directly in the candidate strip on symbol pages only, when no candidates/voice
+status take precedence. No Phone or standalone Paste shortcut. Keep 44-point
+shortcut targets and horizontal scrolling on narrow windows. Clipboard observation
+continues while the keyboard is visible, independent of shortcut visibility.
+User authorized five-item local clipboard history on 2026-11-20,
 superseding the earlier no-history choice. Retain at most five unique copied text
 items (20,000 UTF-16 units each), newest first, observed by the existing visible
 keyboard monitor or explicitly pasted. No extra background polling; no system
@@ -366,14 +417,20 @@ an 8% distance change clamped to 12–24 points. Parallel swipes, pure rotation 
 jitter do not switch. KeyControl must accept multiple touches so both fingers on
 one wide key reach the mode recognizer before either key action can run.
 Count the first finger's head start when the second lands within 250 ms; rebase
-after an older hold. Recognize once during movement, without waiting for lift;
-consume the remaining touches so release jitter cannot undo or repeat the switch.
-Start only on the key surface, excluding candidates, helpers and the native picker.
-Give the valid pinch direction a small scale preview, then a 240 ms damped resize
-and fade on mode change. New input can interrupt it; snapshots never intercept input
-and must be removed on completion, rotation or dismissal. Reduce Motion uses only
-a 120 ms fade. Mini's top inset equals its side inset, with an 8-point minimum;
-full keyboard geometry remains unchanged.
+after an older hold. The full/mini transition alone follows the fingers: use
+80 points of separation change for its reversible timeline, with no autoplay
+while held. Keep the touched view hierarchy alive until release. Settle on lift
+using distance plus 100 ms projected velocity (28% threshold), over 120–200 ms.
+Hold the remote host at full height during the transition and move bottom-anchored
+faces within that canvas; commit the destination height only on completion.
+Do not resize the host every frame or jump to target height while preparing faces.
+A cancelled gesture, field change, rotation or dismissal restores the starting
+mode; never save an intermediate mode. Shared key faces retain unscaled legends;
+Return stays bottom-anchored and Delete enters its lane after Return clears it.
+Start only on keys, excluding candidates, helpers and the native picker. Remove
+transition faces/display links on completion or interruption. Reduce Motion uses
+a fade with endpoint geometry and no sliding. Mini's top inset equals its side
+inset, with an 8-point minimum; full keyboard geometry remains unchanged.
 Persist the completed full/mini selection in extension-local KeyboardLayoutMode
 preferences, independently of Full Access. Restore before the first layout and on
 reappearance without an entrance animation or haptic. Unfinished/cancelled mode
@@ -382,12 +439,8 @@ full mode because that is the layout now in use.
 Honor the host field's keyboardAppearance independently of app appearance. Key
 fills let the system-owned tinted backdrop through, with opaque accessibility
 fallbacks; do not replace the system background with an opaque gray rectangle.
-Production builds must not use private APIs for host-app switching. On 2026-11-16,
-the user explicitly authorized a Debug-only local MVP experiment for automatic
-keyboard → host microphone activation → source-app return. Keep this isolated,
-use only a fresh destination for the current request, never a historical fallback,
-and verify private hooks/selectors are absent from Release binaries. This exception
-does not authorize other private APIs or App Store distribution.
+Do not use private APIs for host-app switching. The old Debug-only automatic
+return experiment was removed when direct capture replaced the round trip.
 Native keyboard parity is a design
 target, not a claim: Apple's keyboard implementation is not available to extensions.
 Build/test caches must be removed after work; keep the completed signed app in build/.
@@ -395,9 +448,10 @@ Build/test caches must be removed after work; keep the completed signed app in b
 Emoji panel (2026-11-20): the full-mode smiley opens our local EmojiPanel, not
 the system emoji keyboard. Bundle fully-qualified Unicode Emoji 16.0 sequences
 with Unicode's license and provenance; no network lookup. Category browsing,
-skin-tone choices and a system globe live inside the panel. The compact top row
-contains a keyboard-return icon, globe and scrolling category icons; there is no
-category title or bottom action row. Hold an emoji for skin-tone choices. Preserve
+skin-tone choices and category icons live inside the panel. The compact top row
+contains one pill-backed Back button and scrolling category icons; there is no
+category title or bottom action row. Fade the bottom 22 points of the grid with a
+viewport-pinned gradient mask and enough bottom inset to reveal the final row. Hold an emoji for skin-tone choices. Preserve
 Pinyin candidate commit before opening; emoji insert literally, without correction
 or spacing. Validate the press's field/context before insertion; scrolling never
 selects a glyph. Hide ordinary keys and the candidate/helper strip while browsing,
@@ -436,16 +490,18 @@ style. Refresh the role on text callbacks as fields change. Suppress voice-meter
 painting on action keys so contrast stays intact; dictation gesture target colors
 still take precedence and restore the action styling when cleared.
 
-When word candidates are present, hide the shortcut pill and its expanded
-shortcuts, and let the collapsed candidate strip begin at the left edge. Restore
-the shortcut pill when candidates clear. The right gesture pill remains available
-unless the candidate panel is expanded or another existing mode hides the strip.
+When word candidates are present, hide symbol shortcuts and let candidates use
+the full strip width, starting near the left edge.
 
 Language holds and emoji suggestions (2026-11-20): a direct language-key tap
-switches English/Chinese; a hold forwards the real touch event to UIKit's public
-input-mode list and consumes the local language tap. Its gap still holds to
+switches English/Chinese. Forward the real direct-touch sequence from finger-down
+to UIKit's public input-mode list; waiting until our hold timer fires makes UIKit
+interpret release as a next-keyboard tap. Suppress UIKit's advanceToNextInputMode
+only while dispatching a short local language-key event, then let the existing
+tap action switch English/Chinese. Holds keep UIKit's picker/selection behavior
+and consume the local tap. Never replay or synthesize UIEvents. Its gap still holds to
 dictate, and dictation sliding over Language still opts into translation. The
-emoji panel globe retains standard native input-mode switching. Never fabricate
+emoji panel has one Back button; hold Language after returning for native input-mode switching. Never fabricate
 touch events or enumerate private input modes.
 
 EmojiKeywords.json is a local CLDR 47 English/Chinese name-and-keyword index

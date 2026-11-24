@@ -8,12 +8,11 @@ import UIKit
     var onPress: (() -> Void)?
     var onSelect: ((String) -> Void)?
     var onClose: (() -> Void)?
-    var onSystemKeyboard: ((UIButton, UIEvent) -> Void)?
     private let grid: UICollectionView
     private let categoryScroll = UIScrollView()
     private let categories = UIStackView()
     private let back = UIButton(type: .system)
-    private let globe = UIButton(type: .system)
+    private let bottomFade = CAGradientLayer()
     private var showingEmoticons = false
     private var tone = 0
     private var category = EmojiCatalog.categories.first ?? ""
@@ -46,17 +45,18 @@ import UIKit
         grid.dataSource = self; grid.delegate = self
         grid.register(EmojiCell.self, forCellWithReuseIdentifier: "emoji")
         grid.accessibilityIdentifier = "keyboard.emoji-grid"
-        back.setImage(UIImage(systemName: "keyboard"), for: .normal); back.tintColor = .label
+        back.setImage(UIImage(systemName: "chevron.backward"), for: .normal); back.tintColor = .label
+        back.backgroundColor = .tertiarySystemFill; back.layer.cornerRadius = 18
+        grid.contentInset.bottom = 20
+        bottomFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        bottomFade.startPoint = CGPoint(x: 0.5, y: 0); bottomFade.endPoint = CGPoint(x: 0.5, y: 1)
+        grid.layer.mask = bottomFade
         back.accessibilityLabel = "Back to letters"; back.accessibilityIdentifier = "emoji.close"
         back.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
-        globe.setImage(UIImage(systemName: "globe"), for: .normal); globe.tintColor = .label
-        globe.accessibilityLabel = "Next keyboard"; globe.accessibilityIdentifier = "emoji.system-keyboard"
-        globe.addTarget(self, action: #selector(systemKeyboard(_:event:)), for: .allTouchEvents)
-        for item in [back, globe, categoryScroll, grid] { addSubview(item) }
+        for item in [back, categoryScroll, grid] { addSubview(item) }
         reload()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func systemKeyboard(_ sender: UIButton, event: UIEvent) { onSystemKeyboard?(sender, event) }
     private func reload() {
         pressed = nil
         visible = EmojiCatalog.base.filter { $0.category == category }.map { EmojiCatalog.applying(tone: tone, to: $0) }
@@ -79,14 +79,21 @@ import UIKit
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        back.frame = CGRect(x: 4, y: 2, width: 44, height: 44)
-        globe.frame = CGRect(x: 48, y: 2, width: 44, height: 44)
-        categoryScroll.frame = CGRect(x: 96, y: 2, width: max(0, bounds.width - 100), height: 44)
+        back.frame = CGRect(x: 4, y: 6, width: 44, height: 36)
+        categoryScroll.frame = CGRect(x: 56, y: 2, width: max(0, bounds.width - 60), height: 44)
         categories.frame = CGRect(x: 0, y: 0, width: max(categoryScroll.bounds.width, CGFloat(categoryButtons.count) * 47 - 3), height: 44)
         categories.distribution = .equalSpacing; categoryScroll.contentSize = categories.bounds.size
         grid.frame = CGRect(x: 0, y: 48, width: bounds.width, height: max(0, bounds.height - 48))
+        updateFade()
         grid.collectionViewLayout.invalidateLayout()
     }
+    private func updateFade() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        bottomFade.frame = grid.bounds
+        bottomFade.locations = [0, NSNumber(value: Double(max(0, 1 - 22 / max(1, grid.bounds.height)))), 1]
+        CATransaction.commit()
+    }
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { if scrollView === grid { updateFade() } }
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { visible.count }
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "emoji", for: indexPath) as! EmojiCell

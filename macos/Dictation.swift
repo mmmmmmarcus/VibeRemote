@@ -11,7 +11,7 @@ import RemoteAudioProtocol
 // held — but vvhisper records the bridge's own virtual device and runs the speech service
 // itself, so no other app or shortcut is involved. Transcripts are never logged.
 
-/// The user's dictation choices. Keys live in the Keychain, everything else in defaults.
+/// The user's dictation choices. Private credentials are bundled; preferences live in defaults.
 struct DictationSettings: Equatable, Sendable {
     var provider: DictationProvider = .apple
     var polishDictation = true
@@ -126,11 +126,11 @@ enum DictationKeychain {
     }
 
     static func key(for provider: DictationProvider) -> String? {
-        guard let service = service(for: provider) else { return nil }
-        return key(service: service)
+        guard service(for: provider) != nil else { return nil }
+        return PrivateCredentials.key(provider == .seedASR ? "seed" : "openai")
     }
 
-    static func polishKey() -> String? { key(service: "com.viberemote.dictation.ark") }
+    static func polishKey() -> String? { PrivateCredentials.key("ark") }
 
     private static func key(service: String) -> String? { try? configurationKey(service: service) }
 
@@ -836,7 +836,7 @@ final class DictationController: ObservableObject {
             SFSpeechRecognizer.requestAuthorization { _ in }
         }
         if settings.provider.needsAPIKey, DictationKeychain.key(for: settings.provider) == nil {
-            fail("Add your \(settings.provider.title) key in Settings › Dictation.")
+            fail("This build is missing the \(settings.provider.title) service configuration.")
             return
         }
         var device: AudioDeviceID?
@@ -983,9 +983,9 @@ final class DictationController: ObservableObject {
         }
         liveHold.session = session
         liveHold.typewriter.onEmit = { [weak self] in self?.followCaret() }
-        session.start(SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
+        session.start(SeedStreamingSession.request(accessKey: key, appID: "",
                                                    resourceID: settings.seedStreamResourceID),
-                      appID: settings.seedAppID, removeFillers: settings.seedRemoveFillers)
+                      appID: "", removeFillers: settings.seedRemoveFillers)
         // No hotwords on the live stream: measured 2026-11-11, they pushed the two-way recognizer
         // into Chinese and garbled more words, while the flash refinement after release did better
         // with them. The refinement replaces the streamed text, so it carries them.
@@ -998,11 +998,11 @@ final class DictationController: ObservableObject {
     /// hotwords and the text before the caret. The live stream takes neither (see `startStream`).
     private func startRefinement(_ refinement: DictationRefinementStream, settings: DictationSettings) {
         guard let key = DictationKeychain.key(for: .seedASR), let session = refinement.session else { return }
-        let request = SeedStreamingSession.request(accessKey: key, appID: settings.seedAppID,
+        let request = SeedStreamingSession.request(accessKey: key, appID: "",
                                                    resourceID: settings.seedStreamResourceID,
                                                    endpoint: SeedStreamFrame.nostreamEndpoint)
         let begin: @Sendable (String?) -> Void = { text in
-            session.start(request, appID: settings.seedAppID,
+            session.start(request, appID: "",
                           context: DictationDictionary.seedContext(settings.dictionary, editorText: text),
                           removeFillers: settings.seedRemoveFillers)
         }
@@ -1335,12 +1335,12 @@ final class DictationController: ObservableObject {
             await WhisperKitDictationEngine.shared.select(model: settings.whisperModel)
             return WhisperKitDictationEngine.shared
         case .openAI:
-            guard let key = DictationKeychain.key(for: .openAI) else { throw DictationError("Add your OpenAI key in Settings › Dictation.") }
+            guard let key = DictationKeychain.key(for: .openAI) else { throw DictationError("OpenAI is unavailable in this build.") }
             return OpenAIDictationEngine(apiKey: key, model: settings.openAIModel,
                                          prompt: DictationDictionary.openAIPrompt(settings.dictionary))
         case .seedASR:
-            guard let key = DictationKeychain.key(for: .seedASR) else { throw DictationError("Add your Seed ASR key in Settings › Dictation.") }
-            return SeedASRDictationEngine(accessKey: key, appID: settings.seedAppID, resourceID: settings.seedResourceID,
+            guard let key = DictationKeychain.key(for: .seedASR) else { throw DictationError("Speech recognition is unavailable in this build.") }
+            return SeedASRDictationEngine(accessKey: key, appID: "", resourceID: settings.seedResourceID,
                                           context: DictationDictionary.seedContext(settings.dictionary, editorText: editorText),
                                           removeFillers: settings.seedRemoveFillers)
         }

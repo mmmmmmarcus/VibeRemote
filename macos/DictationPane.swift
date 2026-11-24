@@ -4,8 +4,7 @@ import CoreAudio
 import SwiftUI
 
 /// Settings › Dictation: whether Siri runs vvhisper's own dictation, which speech service
-/// it uses, and the user's own keys for the cloud ones. Reads and writes the same defaults
-/// and Keychain items `DictationController` reads at the start of every hold.
+/// it uses. Cloud credentials are supplied by the private build.
 @MainActor
 final class DictationSettingsStore: ObservableObject {
     /// Settings and the menu edit one live value, so either surface cannot save a stale input.
@@ -13,7 +12,6 @@ final class DictationSettingsStore: ObservableObject {
     @Published var settings = DictationSettings.load() {
         didSet { if settings != oldValue { settings.save() } }
     }
-    @Published private(set) var savedKeys: Set<DictationProvider> = DictationSettingsStore.loadSavedKeys()
     @Published private(set) var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     @Published private(set) var whisperProgress: Double?
     @Published private(set) var whisperError: String?
@@ -24,23 +22,13 @@ final class DictationSettingsStore: ObservableObject {
     @Published private(set) var systemMicrophone: DictationAudioDevice.Microphone?
     private var deviceWatcher: AudioDeviceWatcher?
 
-    private static func loadSavedKeys() -> Set<DictationProvider> {
-        Set(DictationProvider.allCases.filter { $0.needsAPIKey && DictationKeychain.key(for: $0) != nil })
-    }
-
     var whisperInstalled: Bool {
         _ = whisperRevision
         return WhisperModelCatalog.installedFolder(for: settings.whisperModel) != nil
     }
 
-    func saveKey(_ key: String, for provider: DictationProvider) {
-        DictationKeychain.setKey(key, for: provider)
-        savedKeys = Self.loadSavedKeys()
-    }
-
     func refresh() {
         microphone = AVCaptureDevice.authorizationStatus(for: .audio)
-        savedKeys = Self.loadSavedKeys()
         whisperRevision += 1
         refreshMicrophones()
     }
@@ -129,9 +117,6 @@ struct DictationPane: View {
     var everywhere = false
     @ObservedObject private var store = DictationSettingsStore.shared
     @ObservedObject private var soundcore = SoundcoreManager.shared
-    @State private var keyDraft = ""
-    @State private var polishKeyDraft = ""
-    @State private var hasPolishKey = DictationKeychain.polishKey() != nil
 
     /// The remote's voice comes straight from the voice helper; only the hotkey, which records
     /// the Mac's own microphone, needs Microphone access.
@@ -190,23 +175,8 @@ struct DictationPane: View {
             Section {
                 Toggle("Polish Dictation", isOn: $store.settings.polishDictation)
                     .accessibilityIdentifier("settings.dictation.polish")
-                if store.settings.polishDictation {
-                    SettingsRow(title: "Volcengine Ark API Key") {
-                        SecureField(hasPolishKey ? "Saved — enter to replace" : "Required for polishing", text: $polishKeyDraft)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Save") {
-                            DictationKeychain.setPolishKey(polishKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines))
-                            hasPolishKey = DictationKeychain.polishKey() != nil
-                            polishKeyDraft = ""
-                        }.disabled(polishKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                    if !hasPolishKey {
-                        Text("Add an API key to enable polishing. Dictation keeps the original transcript until then.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
             } footer: {
-                Text("Correct grammar and spelling while preserving your meaning. Uses Seed 2.0 Mini with thinking disabled; requires a Volcengine Ark API key.")
+                Text("Correct grammar and spelling while preserving your meaning.")
             }
             Section {
                 SettingsRow(title: "Hotkey") {
@@ -240,7 +210,6 @@ struct DictationPane: View {
             }
         }
         .onAppear(perform: store.refresh)
-        .onChange(of: store.settings.provider) { keyDraft = "" }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
         }
@@ -282,7 +251,6 @@ struct DictationPane: View {
                 }
             }
         case .openAI:
-            keyRow(provider: .openAI, prompt: "sk-…")
             SettingsRow(title: "Model") {
                 Picker("", selection: $store.settings.openAIModel) {
                     ForEach(modelChoices(OpenAIDictationEngine.models, keeping: store.settings.openAIModel), id: \.self) {
@@ -293,7 +261,6 @@ struct DictationPane: View {
                 .fixedSize()
             }
         case .seedASR:
-            keyRow(provider: .seedASR, prompt: "API key or Access Token")
             SettingsRow(title: "Streaming Output") {
                 Toggle("", isOn: $store.settings.seedStreaming)
                     .labelsHidden()
@@ -311,25 +278,6 @@ struct DictationPane: View {
             }
 
         }
-    }
-
-    private func keyRow(provider: DictationProvider, prompt: String) -> some View {
-        let saved = store.savedKeys.contains(provider)
-        return SettingsRow(title: "API Key") {
-            HStack(spacing: SettingsMetrics.md) {
-                SecureField("", text: $keyDraft, prompt: Text(saved ? "Replace key" : prompt))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-                    .onSubmit { saveKey(provider) }
-                Button("Save") { saveKey(provider) }.disabled(keyDraft.isEmpty)
-            }
-        }
-    }
-
-    private func saveKey(_ provider: DictationProvider) {
-        guard !keyDraft.isEmpty else { return }
-        store.saveKey(keyDraft, for: provider)
-        keyDraft = ""
     }
 
     /// A saved model missing from the list (renamed, or set elsewhere) stays selectable.

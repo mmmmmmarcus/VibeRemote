@@ -1380,7 +1380,7 @@ public final class KeyboardService extends InputMethodService {
             boolean send = owner.commitText(SentencePunctuation.apply(preview, sentencePunctuation), 1) && sendAfter;
             closeVoice();
             if (prefs().getBoolean("polish", true)) message(key.isEmpty()
-                    ? "Polishing skipped. Add a Volcengine Ark key in settings."
+                    ? "Polishing is unavailable in this build."
                     : "Polishing unavailable in this editor.");
             if (send) submitDictation();
             return;

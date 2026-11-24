@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 configuration=${IOS_BUILD_CONFIGURATION:-Debug}
 case "$configuration" in Debug|Release) ;; *) echo "Unsupported iOS build configuration: $configuration" >&2; exit 1 ;; esac
+python3 ../macos/scripts/prepare-private-credentials.py
 python3 scripts/prepare-rime.py
 python3 scripts/compile-rime.py
 xcodegen generate

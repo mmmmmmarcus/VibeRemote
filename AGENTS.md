@@ -1,5 +1,17 @@
 # AGENTS.md
 
+## Private credentials (2026-11-24)
+
+User chose personal-only builds with no backend. This supersedes credential-entry
+and credential-sync instructions below. Build scripts embed ignored, locally
+generated credentials; runtime reads PrivateCredentials (Android: bundled asset).
+No key entry/removal/export controls. Seed uses its new-console key, independent
+of preserved legacy App ID preferences. Settings transfer must not read, export,
+or apply credentials. Preserve existing Keychain/Keystore entries. Never print
+or commit keys or publish these private binaries. See macos/Design/PrivateBuilds.md
+(relative to repository root) for provisioning and verification limits.
+
+
 ## Product identity (2026-11-15)
 
 The product is now **vvhisper** (lowercase, intentional double v). New app bundles and

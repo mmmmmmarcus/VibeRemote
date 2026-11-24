@@ -129,17 +129,7 @@ enum AgentKeychain {
     private static let account = "api-key"
 
     static func openRouterKey() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data, let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
-        return key
+        PrivateCredentials.key("openrouter")
     }
 
     @discardableResult
@@ -594,7 +584,7 @@ final class AgentRun {
             }
             guard !self.ended, !Task.isCancelled else { return }
             guard let apiKey = self.loadAPIKey(), !apiKey.isEmpty else {
-                self.fail("Add your OpenRouter key in Settings › Computer Use. Direct app and URL commands work without a key.")
+                self.fail("OpenRouter service is unavailable in this build. Direct app and URL commands remain available.")
                 return
             }
             self.routeName = "planner"
@@ -685,7 +675,7 @@ final class AgentRun {
         switch settings.backend {
         case .openRouter:
             guard let apiKey else {
-                fail("Add an OpenRouter API key in the agent panel first.")
+                fail("OpenRouter service is unavailable in this build.")
                 return
             }
             startOpenRouter(command: command, context: context, model: settings.openRouterModel,

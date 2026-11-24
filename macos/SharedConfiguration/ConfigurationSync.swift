@@ -10,9 +10,10 @@ final class ConfigurationSync: ObservableObject {
     private static let passwordKey = "configuration.file.passwordID.v1"
     private static let baselineKey = "configuration.file.baseline.v1"
     @Published private(set) var enabled: Bool
-    @Published private(set) var status = "No sync file linked. Existing keys stay on this device."
+    @Published private(set) var status = "No sync file linked."
     @Published private(set) var hasConflict = false
     @Published private(set) var busy = false
+    private let transfersCredentials: Bool
     private let defaults: UserDefaults
     private let readLocal: (Role) throws -> String?
     private let writeLocal: (Role, String?) throws -> Void
@@ -21,14 +22,14 @@ final class ConfigurationSync: ObservableObject {
     private var generation = UUID()
     var didApply: (() -> Void)?
 
-    init(defaults: UserDefaults, read: @escaping (Role) throws -> String?,
+    init(defaults: UserDefaults, transfersCredentials: Bool = true, read: @escaping (Role) throws -> String?,
          write: @escaping (Role, String?) throws -> Void) {
-        self.defaults = defaults; readLocal = read; writeLocal = write
+        self.defaults = defaults; self.transfersCredentials = transfersCredentials; readLocal = read; writeLocal = write
         enabled = defaults.data(forKey: Self.bookmarkKey) != nil
     }
     func start() {
         guard timer == nil else { return }
-        // Host apps only; the iOS keyboard consumes the existing local key store.
+        // Host apps only; the keyboard does not run file sync.
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -41,7 +42,7 @@ final class ConfigurationSync: ObservableObject {
         defaults.removeObject(forKey: Self.bookmarkKey)
         defaults.removeObject(forKey: Self.baselineKey)
         enabled = false; hasConflict = false
-        status = "File disconnected. Local keys and the encrypted file are unchanged."
+        status = "File disconnected. Local settings and the encrypted file are unchanged."
     }
     func connect(_ url: URL, password: String) async throws {
         guard !busy else { throw ConfigurationError.fileAccess }
@@ -84,7 +85,10 @@ final class ConfigurationSync: ObservableObject {
                     status = "Local settings changed. Will sync on the next check."; return
                 }
                 let baseline = defaults.dictionary(forKey: Self.baselineKey) as? [String: String] ?? [:]
-                let merged = try ConfigurationMerge.merge(local: local, file: snapshot.2, baseline: baseline, resolution: resolution)
+                var incoming = snapshot.2
+                if !transfersCredentials { incoming.credentials = nil }
+                var merged = try ConfigurationMerge.merge(local: local, file: incoming, baseline: baseline, resolution: resolution)
+                if !transfersCredentials { merged.credentials = snapshot.2.credentials }
                 if merged != snapshot.2 {
                     // Encrypt off main, then recheck local edits before coordinating the write.
                     let encrypted = try await Task.detached { try EncryptedConfiguration.seal(merged, password: password) }.value
@@ -99,7 +103,7 @@ final class ConfigurationSync: ObservableObject {
                 defaults.set(snapshot.3, forKey: Self.bookmarkKey)
                 defaults.set(ConfigurationMerge.hashes(merged), forKey: Self.baselineKey)
                 hasConflict = false
-                status = "File checked. Cloud delivery may take time; local keys remain available offline."
+                status = "File checked. Cloud delivery may take time."
             } catch {
                 guard generation == current else { return }
                 hasConflict = (error as? ConfigurationError) == .conflict
@@ -111,13 +115,13 @@ final class ConfigurationSync: ObservableObject {
     func document(includeKeys: Bool) throws -> PortableConfiguration {
         try PortableConfiguration(settings: .init(polishDictation: readLocal(.polishDictation) == "true",
                                               sentencePunctuation: readLocal(.sentencePunctuation) == "true"),
-                              credentials: includeKeys ? .init(seedASR: readLocal(.seedASR), polishing: readLocal(.polishing)) : nil)
+                              credentials: includeKeys && transfersCredentials ? .init(seedASR: readLocal(.seedASR), polishing: readLocal(.polishing)) : nil)
     }
     func apply(_ document: PortableConfiguration) throws {
         _ = try PortableConfiguration.decode(document.encoded())
         var values: [(Role, String?)] = []
-        if let v = document.credentials?.seedASR { values.append((.seedASR, v)) }
-        if let v = document.credentials?.polishing { values.append((.polishing, v)) }
+        if transfersCredentials, let v = document.credentials?.seedASR { values.append((.seedASR, v)) }
+        if transfersCredentials, let v = document.credentials?.polishing { values.append((.polishing, v)) }
         if let v = document.settings.polishDictation { values.append((.polishDictation, String(v))) }
         if let v = document.settings.sentencePunctuation { values.append((.sentencePunctuation, String(v))) }
         let originals = try values.map { ($0.0, try readLocal($0.0)) }
