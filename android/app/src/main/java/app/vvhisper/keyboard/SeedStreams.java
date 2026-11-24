@@ -80,7 +80,7 @@ final class SeedStreams {
                     if (polishFailed && liveDone && !latestLive.isEmpty())
                         listener.text(latestLive, true);
                     else if (polishFailed && liveFailed)
-                        listener.error("Seed unavailable. Check the API key and network.");
+                        listener.error("Recognition unavailable. Check your connection or try again later.");
                 });
     }
 

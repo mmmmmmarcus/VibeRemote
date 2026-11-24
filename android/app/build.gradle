@@ -17,6 +17,13 @@ tasks.register('prepareEmoji', Copy) {
     into emojiAssets
 }
 
+def privateCredentials = layout.buildDirectory.dir('generated/privateCredentials')
+tasks.register('preparePrivateCredentials', Exec) {
+    // Always resolve current credentials; never retain stale keys after a failed refresh.
+    commandLine 'python3', '../../macos/scripts/prepare-private-credentials.py',
+        '--output', privateCredentials.get().file('credentials.json').asFile
+}
+
 android {
     testOptions { unitTests.includeAndroidResources = true }
     namespace 'app.vvhisper.keyboard'
@@ -33,10 +40,11 @@ android {
         versionCode 1
         versionName '0.1.0'
     }
+    sourceSets.main.assets.srcDir(privateCredentials)
     sourceSets.main.assets.srcDir(dictionaries)
     sourceSets.main.assets.srcDir(emojiAssets)
 }
-tasks.named('preBuild').configure { dependsOn 'prepareDictionaries', 'prepareEmoji' }
+tasks.named('preBuild').configure { dependsOn 'prepareDictionaries', 'prepareEmoji', 'preparePrivateCredentials' }
 dependencies {
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.robolectric:robolectric:4.14.1'

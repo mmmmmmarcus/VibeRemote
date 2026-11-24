@@ -38,5 +38,11 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).KeyboardViewController</string>
 	</dict>
+	<key>VVVoiceKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)com.vvhisper.ios.voice</string>
+	<key>VVLegacyKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)com.vvhisper.ios</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>vvhisper uses the microphone only during a dictation hold. Audio is sent to Seed ASR to type what you say.</string>
 </dict>
 </plist>

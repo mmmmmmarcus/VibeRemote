@@ -87,9 +87,9 @@ let package = Package(
                 "ListEditingController.swift",
                 "MediaKeyInterceptor.swift", "PacketLoggerButtons.swift", "AdvancedMenu.swift",
                 "SystemVolume.swift", "AgentLocalActions.swift", "AgentDecision.swift", "AgentConversationModel.swift", "AgentConversationAliases.swift", "AgentConversationSections.swift", "AgentConversationTraversal.swift", "AgentConversationAttributes.swift", "AgentConversationActions.swift", "ComputerUseAgent.swift", "AgentPanel.swift", "AgentDock.swift",
-                "SharedConfiguration/PortableConfiguration.swift", "SharedConfiguration/EncryptedConfiguration.swift", "SharedConfiguration/ConfigurationFile.swift", "SharedConfiguration/ConfigurationSync.swift", "ConfigurationTransfer.swift", "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDraftUnderline.swift", "DictationPolisher.swift", "DictationSentencePunctuation.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
+                "SharedConfiguration/PrivateCredentials.swift", "SharedConfiguration/PortableConfiguration.swift", "SharedConfiguration/EncryptedConfiguration.swift", "SharedConfiguration/ConfigurationFile.swift", "SharedConfiguration/ConfigurationSync.swift", "ConfigurationTransfer.swift", "Dictation.swift", "DictationEngines.swift", "DictationPane.swift", "DictationStreaming.swift", "DictationDraftUnderline.swift", "DictationPolisher.swift", "DictationSentencePunctuation.swift", "DictationDictionary.swift", "DictationFillers.swift", "DictationHotkey.swift", "DictationBridgeAudio.swift", "AutoComputerUse.swift"
             ],
-            resources: [.copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
+            resources: [.copy("Resources/PrivateCredentials"), .copy("Resources/SiriRemote.png"), .copy("Resources/SiriRemoteFirstGeneration.png"),
                         .copy("Resources/RemoteModels"), .copy("Resources/OnboardingSky.png"), .copy("Resources/CaretBubble.png"), .copy("Resources/CaretBubble.svg")],
             linkerSettings: [
                 .linkedFramework("IOKit"),

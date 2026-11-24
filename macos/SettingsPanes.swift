@@ -1108,7 +1108,6 @@ private struct AgentPane: View {
     let generation: RemoteGeneration
     let openPanel: () -> Void
     @StateObject private var store = AgentSettingsStore()
-    @State private var keyDraft = ""
     @AppStorage(AutoComputerUse.enabledKey) private var autoComputerUse = false
 
     var body: some View {
@@ -1149,20 +1148,11 @@ private struct AgentPane: View {
                         .frame(width: 240)
                         .accessibilityIdentifier("settings.agent.decisionModel")
                 }
-                SettingsRow(title: "API Key", subtitle: store.hasOpenRouterKey ? "Saved in Keychain" : nil) {
-                    HStack(spacing: SettingsMetrics.md) {
-                        SecureField("", text: $keyDraft, prompt: Text(store.hasOpenRouterKey ? "Replace key" : "sk-or-…"))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
-                            .onSubmit(saveKey)
-                        Button("Save", action: saveKey).disabled(keyDraft.isEmpty)
-                    }
-                }
             } header: {
                 Text("OpenRouter")
             } footer: {
                 VStack(alignment: .leading, spacing: SettingsMetrics.sm) {
-                    Text("Routine actions run on your Mac. When judgment or planning is needed, both models use your OpenRouter key.")
+                    Text("Routine actions run on your Mac. When judgment or planning is needed, both models connect to OpenRouter.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1194,11 +1184,7 @@ private struct AgentPane: View {
         }
     }
 
-    private func saveKey() {
-        guard !keyDraft.isEmpty else { return }
-        store.saveOpenRouterKey(keyDraft)
-        keyDraft = ""
-    }
+
 }
 
 // MARK: - Text cursor

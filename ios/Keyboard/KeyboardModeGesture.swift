@@ -40,14 +40,16 @@ struct KeyboardModePinch {
 final class KeyboardModeGesture: UIGestureRecognizer {
     var onPair: (([CGPoint]) -> Void)?
     var onChange: ((CGFloat) -> Void)?
-    var onFinish: ((KeyboardModePinch.Direction?, Bool) -> Void)?
+    var onFinish: ((KeyboardModePinch.Direction?, Bool, CGFloat) -> Void)?
     private var fingers: [UITouch] = []
     private var origins: [CGPoint] = []
     private var locations: [CGPoint] = []
     private var pairedAt: TimeInterval = 0
     private var firstBeganAt: TimeInterval = 0
     private var paired = false
-    private var pinch = KeyboardModePinch()
+    private var lastChange: CGFloat = 0
+    private var lastMoveAt: TimeInterval = 0
+    private var velocity: CGFloat = 0
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
@@ -78,18 +80,22 @@ final class KeyboardModeGesture: UIGestureRecognizer {
             origins = KeyboardModePinch.pairOrigins(initial: origins, current: locations,
                                                     stagger: event.timestamp - firstBeganAt)
             paired = true; pairedAt = ProcessInfo.processInfo.systemUptime
+            lastMoveAt = event.timestamp; lastChange = 0; velocity = 0
             onPair?(locations)
             state = .began
         }
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         update(touches)
-        if paired, pinch.recognizedDirection == nil {
-            onChange?(KeyboardModePinch.separationChange(from: origins, to: locations) ?? 0)
-            state = .changed
-            if let direction = pinch.advance(from: origins, to: locations) { onFinish?(direction, false) }
+        if paired {
+            let change = KeyboardModePinch.separationChange(from: origins, to: locations) ?? 0
+            let dt = event.timestamp - lastMoveAt
+            if dt > 0 { velocity = (change-lastChange) / CGFloat(dt) }
+            lastMoveAt = event.timestamp; lastChange = change
+            onChange?(change); state = .changed
         }
     }
+
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         update(touches)
         if paired { finish(cancelled: false) }
@@ -105,17 +111,17 @@ final class KeyboardModeGesture: UIGestureRecognizer {
     }
     private func finish(cancelled: Bool) {
         let deltas = zip(locations, origins).map { CGPoint(x: $0.x - $1.x, y: $0.y - $1.y) }
-        let alreadyRecognized = pinch.recognizedDirection != nil
-        let direction = cancelled ? nil : pinch.advance(from: origins, to: locations)
+        let direction = cancelled ? nil : KeyboardModePinch.direction(from: origins, to: locations)
         let taps = !cancelled && direction == nil && ProcessInfo.processInfo.systemUptime - pairedAt < 0.35 && deltas.allSatisfy { hypot($0.x, $0.y) < 12 }
         paired = false
-        if !alreadyRecognized { onFinish?(direction, taps) }
+        let recentVelocity = !cancelled && ProcessInfo.processInfo.systemUptime-lastMoveAt < 0.12 ? velocity : 0
+        onFinish?(direction, taps, recentVelocity)
         state = cancelled ? .cancelled : .ended
     }
     override func reset() {
-        if paired, pinch.recognizedDirection == nil { onFinish?(nil, false) }
+        if paired { onFinish?(nil, false, 0) }
         fingers = []; origins = []; locations = []; paired = false
-        pinch = KeyboardModePinch()
+        velocity = 0; lastChange = 0
         super.reset()
     }
 }

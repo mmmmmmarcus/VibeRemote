@@ -226,6 +226,16 @@ final class SeedStreamingSession: @unchecked Sendable {
         }
     }
 
+    /// WebKit supplies native-endian Int16 PCM (little-endian on supported arm64).
+    func appendPCM16(_ pcm: Data) {
+        guard !pcm.isEmpty, pcm.count <= 16384, pcm.count.isMultiple(of: 2) else { return }
+        queue.async {
+            guard !self.finished, !self.closed else { return }
+            self.pending.append(pcm)
+            if self.started { self.flushPackets() }
+        }
+    }
+
     /// Sends what is left as the negative (last) packet; the server then sends its final result.
     func finish() {
         queue.async {

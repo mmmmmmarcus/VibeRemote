@@ -75,7 +75,7 @@ final class DictationGestureTests: XCTestCase {
                     for control in controls {
                         let letter = page == 0 && control.value.count == 1 && control.value.first?.isASCII == true && control.value.first?.isLetter == true
                         let symbol = page > 0 && !KeyboardSymbols.alternatives(for: control.value).isEmpty
-                        XCTAssertEqual(control.onHold != nil, letter || symbol || ["space", "language"].contains(control.value), control.value)
+                        XCTAssertEqual(control.onHold != nil, letter || symbol || ["space", "language", "return"].contains(control.value), control.value)
                         XCTAssertNotNil(control.onGapHold, control.value)
                         XCTAssertNotNil(control.onHoldMove, control.value)
                     }
@@ -95,7 +95,7 @@ final class DictationGestureTests: XCTestCase {
                 function.releasePress()
                 XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
                 switch value {
-                case "return": XCTAssertEqual(proxy.editor.text, "keep \n")
+                case "return": XCTAssertEqual(proxy.editor.text, "keep \u{2028}")
                 case "shift": XCTAssertEqual(try key("a", in: keyboard).label.text, "A")
                 default: XCTAssertNotNil(try key("1", in: keyboard))
                 }

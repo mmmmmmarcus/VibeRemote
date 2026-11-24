@@ -8,6 +8,7 @@ import CoreHaptics
     private var sharpness = 0.7
     private var engine: CHHapticEngine?
     private var players: KeyboardHapticPlayers?
+    private var confirmationPlayers: KeyboardHapticPlayers?
     private var retiredPlayers: [KeyboardHapticPlayers] = []
     private var fallback = UIImpactFeedbackGenerator(style: .rigid)
     private var ready = false
@@ -33,6 +34,8 @@ import CoreHaptics
         if let players { players.retire(); retiredPlayers.append(players) }
         retiredPlayers.removeAll { !$0.isPlaying }
         players = nil
+        if let confirmationPlayers { confirmationPlayers.retire(); retiredPlayers.append(confirmationPlayers) }
+        confirmationPlayers = nil
         fallback = UIImpactFeedbackGenerator(style: sharpness < 0.34 ? .soft : sharpness < 0.67 ? .light : .rigid)
         if strength == 0 { stop() }
     }
@@ -84,15 +87,15 @@ import CoreHaptics
             #endif
         }
     }
-    func tap() {
+    func tap(confirmation: Bool = false) {
         guard strength > 0 else { return }
         #if DEBUG
         verificationRequests += 1
         #endif
         if ready {
             do {
-                try preparePlayers()
-                if try players?.play() == true {
+                try preparePlayers(confirmation: confirmation)
+                if try (confirmation ? confirmationPlayers : players)?.play() == true {
                     #if DEBUG
                     verificationPlayedCustomFeedback = true
                     verificationCustomStarts += 1
@@ -110,7 +113,7 @@ import CoreHaptics
         #if DEBUG
         verificationFallbacks += 1
         #endif
-        fallback.impactOccurred(intensity: CGFloat(strength)); prepare()
+        fallback.impactOccurred(intensity: CGFloat(confirmation ? min(1, strength * 1.55) : strength)); prepare()
     }
     func stop() {
         active = false
@@ -118,16 +121,17 @@ import CoreHaptics
     }
     private func invalidateEngine() {
         generation += 1; ready = false; starting = false
-        players?.cancel()
+        players?.cancel(); confirmationPlayers?.cancel(); confirmationPlayers = nil
         retiredPlayers.forEach { $0.cancel() }; retiredPlayers.removeAll()
         players = nil
         let oldEngine = engine; engine = nil
         oldEngine?.stoppedHandler = { _ in }; oldEngine?.resetHandler = {}
         oldEngine?.stop(completionHandler: nil)
     }
-    private func preparePlayers() throws {
-        guard players == nil, let engine else { return }
-        let pattern = try Self.pattern(strength: strength, sharpness: sharpness)
+    private func preparePlayers(confirmation: Bool = false) throws {
+        guard (confirmation ? confirmationPlayers : players) == nil, let engine else { return }
+        let pattern = try Self.pattern(strength: confirmation ? min(1, strength * 1.55) : strength,
+                                       sharpness: confirmation ? min(1, sharpness + 0.18) : sharpness)
         let generation = generation
         let players = KeyboardHapticPlayers(makePlayer: {
             let player = try engine.makeAdvancedPlayer(with: pattern)
@@ -146,7 +150,7 @@ import CoreHaptics
             if errorCode != nil { self.invalidateEngine() }
         })
         try players.prepare()
-        self.players = players
+        if confirmation { confirmationPlayers = players } else { self.players = players }
     }
     static func pattern(strength: Double, sharpness: Double) throws -> CHHapticPattern {
         let event = CHHapticEvent(eventType: .hapticTransient, parameters: [

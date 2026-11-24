@@ -3,14 +3,13 @@ import UIKit
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        VVObserveKeyboardHandoff()
-        SeedKeychain.importDevelopmentConfiguration()
+        try? VoiceConfiguration.migrateHostConfiguration()
+        MobileConfiguration.sync.start()
         return true
     }
 }
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
-    private let keyboardReturn = KeyboardReturnCoordinator()
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
@@ -30,22 +29,15 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         activateVoice(from: URLContexts)
     }
     private func activateVoice(from contexts: Set<UIOpenURLContext>) {
-        guard var request = VoiceIPC.read("activation.json", as: VoiceActivationRequest.self),
-              let context = contexts.first(where: { request.accepts($0.url) }) else { return }
+        // Legacy setup URLs remain accepted; microphone capture no longer lives here.
         VoiceIPC.remove("activation.json")
-        if request.returnDestination == nil {
-            request.returnBundleIdentifier = context.options.sourceApplication
-        }
-        guard let scene = window?.windowScene else { return }
-        keyboardReturn.activate(request, in: scene)
     }
     func sceneDidBecomeActive(_ scene: UIScene) {
+        MobileConfiguration.sync.refresh()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--verify-cursor") || ProcessInfo.processInfo.arguments.contains("--verify-haptics") || ProcessInfo.processInfo.arguments.contains("--verify-dictation") { return }
         #endif
-        // Opening the app, including a keyboard handoff, prepares voice input.
-        // enable() coalesces duplicate requests and waits for microphone permission.
+        // Setup grants permission and migrates settings, without activating audio.
         VoiceHost.shared.enable()
     }
-    func sceneDidEnterBackground(_ scene: UIScene) { keyboardReturn.cancel() }
 }

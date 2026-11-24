@@ -80,20 +80,34 @@ enum DictationPolisher {
         guard (enabled || translate), !text.isEmpty else { return Result(text: text, notice: nil) }
         let operation = translate ? "Translation" : "Polishing"
         guard let key, !key.isEmpty else {
-            return Result(text: text, notice: "\(operation) skipped: add a Volcengine Ark API key in Polish Dictation settings.")
+            return Result(text: text, notice: "\(operation) skipped: service configuration is missing from this build.")
         }
         do {
             try Task.checkCancellation()
             let (data, response) = try await load(request(text, key: key, translate: translate))
             try Task.checkCancellation()
-            guard (response as? HTTPURLResponse)?.statusCode == 200,
-                  let polished = Self.response(data, original: text, translate: translate) else {
-                return Result(text: text, notice: "\(operation) failed; kept the transcript.")
+            let status = (response as? HTTPURLResponse)?.statusCode
+            guard status == 200 else {
+                let reason: String
+                switch status {
+                case 401: reason = "Ark service authentication failed."
+                case 403: reason = "Ark service access was denied."
+                case 404: reason = "Ark model is unavailable for this account."
+                case 429: reason = "Ark is rate-limited or out of quota. Try again later."
+                case .some(500...599): reason = "Ark service is temporarily unavailable."
+                case .some(let code): reason = "Ark rejected the request (HTTP \(code))."
+                case nil: reason = "No HTTP response from Ark."
+                }
+                return Result(text: text, notice: "\(operation) failed: \(reason) Kept the transcript.")
+            }
+            guard let polished = Self.response(data, original: text, translate: translate) else {
+                return Result(text: text, notice: "\(operation) failed: Ark returned an incomplete or invalid text response. Kept the transcript.")
             }
             return Result(text: polished, notice: nil)
         } catch {
             // Never log provider bodies, errors that might echo text, or the transcript.
-            return Result(text: text, notice: "\(operation) unavailable; kept the transcript.")
+            let reason = (error as? URLError)?.code == .timedOut ? "Ark did not respond within 15 seconds." : "Could not connect to Ark."
+            return Result(text: text, notice: "\(operation) unavailable: \(reason) Kept the transcript.")
         }
     }
 }

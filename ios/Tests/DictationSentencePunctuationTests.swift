@@ -47,7 +47,7 @@ final class DictationSentencePunctuationTests: XCTestCase {
         var polish = DictationPolishSettings(); polish.enabled = false; polish.save(defaults)
         let page = MainSettingsViewController(loadPreferences: { .init() }, savePreferences: { _ in }, outputDefaults: defaults)
         page.loadViewIfNeeded()
-        let cell = page.tableView(page.tableView, cellForRowAt: .init(row: 4, section: 0))
+        let cell = page.tableView(page.tableView, cellForRowAt: .init(row: 2, section: 0))
         let toggle = try XCTUnwrap(cell.accessoryView as? UISwitch)
         XCTAssertTrue(toggle.isOn); XCTAssertTrue(toggle.isEnabled)
         toggle.isOn = false; toggle.sendActions(for: .valueChanged)
@@ -55,7 +55,7 @@ final class DictationSentencePunctuationTests: XCTestCase {
         XCTAssertFalse(DictationPolishSettings.load(defaults).enabled)
         let reopened = MainSettingsViewController(loadPreferences: { .init() }, savePreferences: { _ in }, outputDefaults: defaults)
         reopened.loadViewIfNeeded()
-        let saved = reopened.tableView(reopened.tableView, cellForRowAt: .init(row: 4, section: 0))
+        let saved = reopened.tableView(reopened.tableView, cellForRowAt: .init(row: 2, section: 0))
         XCTAssertFalse(try XCTUnwrap(saved.accessoryView as? UISwitch).isOn)
     }
 

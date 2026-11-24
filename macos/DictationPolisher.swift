@@ -154,7 +154,7 @@ enum DictationPolisher {
                        load: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }) async -> Result {
         guard enabled, !text.isEmpty else { return Result(text: text, notice: nil) }
         guard let key, !key.isEmpty else {
-            return Result(text: text, notice: "Polishing skipped: add a Volcengine Ark key in Dictation settings.")
+            return Result(text: text, notice: "Polishing is unavailable in this build.")
         }
         do {
             try Task.checkCancellation()

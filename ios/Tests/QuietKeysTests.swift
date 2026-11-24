@@ -71,19 +71,13 @@ final class QuietKeysModelTests: XCTestCase {
         meter.advance(nil, at: now.addingTimeInterval(1), reducedMotion: true)
         XCTAssertEqual(meter.level, 0)
     }
-    func testRelayCannotLeakIdleAudioOrPreviousHoldLevels() throws {
-        let relay = AudioRelay()
-        XCTAssertNil(relay.capture); XCTAssertNil(relay.level)
-        relay.set([SeedStreamingSession { _ in }])
-        let first = try XCTUnwrap(relay.capture)
-        relay.append([0.1, -0.1], generation: first)
-        XCTAssertGreaterThan(try XCTUnwrap(relay.level).value, 0)
-        relay.set([]); XCTAssertNil(relay.level); XCTAssertNil(relay.capture)
-        relay.set([SeedStreamingSession { _ in }])
-        relay.append([0.1], generation: first)
-        XCTAssertNil(relay.level)
-        relay.set([])
+    func testWebAudioRMSMatchesNativeMeter() {
+        XCTAssertEqual(VoiceLevel.normalizedRMS(0.1), VoiceLevel.measure([0.1, -0.1]), accuracy: 0.00001)
+        XCTAssertEqual(VoiceLevel.normalizedRMS(.nan), 0)
+        XCTAssertEqual(VoiceLevel.normalizedRMS(0), 0)
+        XCTAssertEqual(VoiceLevel.normalizedRMS(2), 1)
     }
+
 }
 
 @MainActor final class QuietKeysIntegrationTests: XCTestCase {
@@ -199,6 +193,19 @@ final class QuietKeysModelTests: XCTestCase {
             XCTAssertNil(keyboard.quietKeys.sessionID)
         }
     }
+    func testShiftAndEmojiFadeDuringDictationAndReturnAfterRelease() async throws {
+        try await withKeyboard { keyboard, _ in
+            let shift = try key("shift", keyboard)
+            let emoji = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? KeyboardSwitcherButton }.first)
+            let icon = try XCTUnwrap(emoji.subviews.compactMap { $0 as? UIImageView }.first)
+            let (source, _) = try start(keyboard)
+            XCTAssertEqual(shift.icon.alpha, 0); XCTAssertEqual(icon.alpha, 0)
+            XCTAssertEqual(emoji.alpha, 1, "Keep the control's event region intact")
+            source.releasePress()
+            XCTAssertEqual(shift.icon.alpha, 1); XCTAssertEqual(icon.alpha, 1)
+        }
+    }
+
     func testNativeQuietKeysContactSheet() async throws {
         var panels: [(String, UIImage)] = []
         let format = UIGraphicsImageRendererFormat(); format.scale = 2

@@ -69,6 +69,17 @@ final class KeyboardTouchSurface: UIView {
 /// UIButton's tracking must use the same ownership rule as the surrounding keys.
 final class KeyboardSwitcherButton: UIButton {
     weak var touchSurface: KeyboardTouchSurface?
+    let quietFeedback = QuietKeyFeedback()
+    private var dictating = false
+    func setDictating(_ active: Bool, animated: Bool = true) {
+        quietFeedback.setRecording(active, dimBase: true, mini: false)
+        if !active { quietFeedback.reset(animated: animated) }
+        guard dictating != active else { return }; dictating = active
+        let update = { self.subviews.compactMap { $0 as? UIImageView }.forEach { $0.alpha = active ? 0 : 1 } }
+        if animated, window != nil, !UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: update)
+        } else { update() }
+    }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard let touchSurface else { return super.point(inside: point, with: event) }
         return touchSurface.target(at: convert(point, to: touchSurface)) === self

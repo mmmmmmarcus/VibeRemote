@@ -96,17 +96,15 @@ import UIKit
         XCTAssertTrue(key.movePress(to: CGPoint(x: point.x + dx, y: point.y + dy), at: 10.15))
         key.advancePress(to: 12); key.releasePress()
     }
-    private func pill(_ keyboard: KeyboardViewController, _ action: KeyboardEditSwipe) throws {
-        let control = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? GesturePill }.first)
-        control.onBegin?(); control.onAction?(action)
+    private func holdReturn(_ keyboard: KeyboardViewController) throws {
+        let control = try key("return", keyboard)
+        XCTAssertTrue(control.press(at: 10, point: CGPoint(x: control.bounds.midX, y: control.bounds.midY)))
+        control.advancePress(to: 11); control.releasePress()
     }
-    func testPillDeletesRestoresAndInsertsLineWithoutSending() async throws {
+    func testReturnHoldInsertsLineWithoutSending() async throws {
         try await withKeyboard { keyboard, proxy in
-            try pill(keyboard, .deleteWord); XCTAssertEqual(proxy.editor.text, "hello ")
-            try pill(keyboard, .restoreWord); XCTAssertEqual(proxy.editor.text, "hello world")
-            try pill(keyboard, .restoreWord); XCTAssertEqual(proxy.editor.text, "hello world")
             proxy.returnKeyType = .send
-            try pill(keyboard, .lineBreak); XCTAssertEqual(proxy.editor.text, "hello world\u{2028}")
+            try holdReturn(keyboard); XCTAssertEqual(proxy.editor.text, "hello world\u{2028}")
             XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
         }
     }
@@ -118,21 +116,20 @@ import UIKit
             XCTAssertTrue(keyboard.testingVoiceCommands.isEmpty)
         }
     }
-    func testPillRejectsChangedDestinationAndTypedTextInvalidatesUndo() async throws {
+    func testReturnHoldRejectsChangedDestination() async throws {
         try await withKeyboard { keyboard, proxy in
-            let control = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? GesturePill }.first)
-            control.onBegin?(); proxy.documentIdentifier = UUID(); control.onAction?(.deleteWord)
+            let control = try key("return", keyboard)
+            XCTAssertTrue(control.press(at: 10, point: CGPoint(x: control.bounds.midX, y: control.bounds.midY)))
+            proxy.documentIdentifier = UUID()
+            control.advancePress(to: 11); control.releasePress()
             XCTAssertEqual(proxy.editor.text, "hello world")
-            try pill(keyboard, .deleteWord)
-            _ = try key("b", keyboard).accessibilityActivate()
-            try pill(keyboard, .restoreWord); XCTAssertEqual(proxy.editor.text, "hello b")
         }
     }
-    func testChineseCompositionCommitsBeforePillLineBreak() async throws {
+    func testChineseCompositionCommitsBeforeReturnHoldLineBreak() async throws {
         try await withKeyboard(language: .chinese) { keyboard, proxy in
             for value in "haode" { _ = try key(String(value), keyboard).accessibilityActivate() }
             for _ in 0..<100 { if proxy.editor.text.hasSuffix("haode") { break }; try await Task.sleep(for: .milliseconds(10)) }
-            try pill(keyboard, .lineBreak)
+            try holdReturn(keyboard)
             for _ in 0..<100 { if proxy.editor.text.hasSuffix("好的\u{2028}") { break }; try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertTrue(proxy.editor.text.hasSuffix("好的\u{2028}"))
         }

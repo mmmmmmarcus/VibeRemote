@@ -1,5 +1,11 @@
 # vvhisper for Android
 
+> Personal-build update (2026-11-24): credentials are bundled at build time; no API-key
+> setup or backend is required. Settings transfer now carries preferences only.
+> Older credential setup instructions below are historical. See the repository's
+> `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
+
+
 vvhisper is a native Android input method and companion settings app for Android 10 and later. Enable it in **vvhisper → Enable vvhisper**, select it with **Choose keyboard**, then open **Try keyboard** or a text field in another app. Dictation runs in the active keyboard and keeps the current editor on screen. If microphone permission is missing, tap the keyboard’s **Settings** action to grant it, then retry. Typing works offline.
 
 ### Mobile parity update — 2026-11-20

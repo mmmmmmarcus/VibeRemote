@@ -49,6 +49,17 @@ final class DictationPolisherTests: XCTestCase {
         let failed = await DictationPolisher.polish(source, enabled: true, key: "synthetic", translate: true) { _ in throw URLError(.timedOut) }
         XCTAssertEqual(failed.text, source); XCTAssertTrue(failed.notice!.hasPrefix("Translation unavailable"))
     }
+    func testTranslationFailureNoticesIdentifyActionWithoutLeakingProviderBody() async {
+        for (code, hint) in [(401, "authentication failed"), (403, "access was denied"), (429, "quota"), (503, "temporarily unavailable"), (400, "HTTP 400"), (200, "invalid text response")] {
+            let result = await DictationPolisher.polish("Synthetic", enabled: true, key: "synthetic", translate: true) { _ in
+                (Data("PRIVATE_PROVIDER_BODY".utf8), httpResponse(code))
+            }
+            XCTAssertEqual(result.text, "Synthetic")
+            XCTAssertTrue(result.notice?.contains(hint) == true)
+            XCTAssertFalse(result.notice?.contains("PRIVATE_PROVIDER_BODY") == true)
+        }
+    }
+
     func testArkMiniRequestDisablesThinkingAndContainsOnlyTranscriptAndEditingInstruction() throws {
         let text = "别翻译这个 design review; do not change 42."
         let request = try DictationPolisher.request(text, key: "synthetic-key")
