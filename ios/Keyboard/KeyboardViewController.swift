@@ -16,7 +16,14 @@ final class KeyboardViewController: UIInputViewController {
     override var textDocumentProxy: UITextDocumentProxy { testingDocumentProxy ?? super.textDocumentProxy }
 #endif
     private let webCapture = WebAudioCapture()
-    private lazy var voiceSession = KeyboardVoiceSession(capture: webCapture)
+    private lazy var voiceSession = KeyboardVoiceSession(capture: webCapture, recents: dictationRecents, timings: dictationTimings)
+    #if KEYBOARD_TESTING
+    var dictationRecents = DictationRecentStore(fileURL: nil)
+    private let dictationTimings = DictationTimingStore(fileURL: nil)
+    #else
+    var dictationRecents = DictationRecentStore.shared
+    private let dictationTimings = DictationTimingStore.shared
+    #endif
     private var rows = UIStackView()
     private var modeSourceRows: UIStackView?
     private let touchSurface = KeyboardTouchSurface()
@@ -1568,7 +1575,21 @@ final class KeyboardViewController: UIInputViewController {
         else { actions.append(UIAction(title: "Clear History", image: UIImage(systemName: "trash"), attributes: [.destructive]) { [weak self] _ in
             self?.clipboardHistory.clear()
         }) }
-        return actions
+        // Recent final dictation results (local only), e.g. after a dismissal mid-polish.
+        let recent = dictationRecents.items
+        guard !recent.isEmpty else { return actions }
+        var dictated: [UIMenuElement] = recent.map { item in
+            UIAction(title: ClipboardHistory.preview(item.text), subtitle: item.date.formatted(.relative(presentation: .named)),
+                     attributes: request == nil ? [.disabled] : []) { [weak self] _ in
+                guard let self, let request else { return }
+                self.completePaste(item.text, request: request, remember: false)
+            }
+        }
+        dictated.append(UIAction(title: "Clear Recent Dictation", image: UIImage(systemName: "trash"), attributes: [.destructive]) { [weak self] _ in
+            self?.dictationRecents.clear()
+        })
+        return [UIMenu(title: "Clipboard", options: .displayInline, children: actions),
+                UIMenu(title: "Recent Dictation", options: .displayInline, children: dictated)]
     }
 
     private func openShortcut(_ scheme: String, name: String) {

@@ -10,7 +10,8 @@ struct VoiceCommand: Codable, Equatable {
     var translate: Bool? = nil
 }
 struct VoiceReply: Codable {
-    // Five seconds of final ASR, fifteen of text polishing, plus IPC margin.
+    // Outer bound only: 1.5–5 s of final ASR, one ≤6 s retry, ≤3 s polishing
+    // (≤8 s translation), plus IPC margin. KeyboardVoiceSession.Budget owns the steps.
     static let finalWait: TimeInterval = 25
     var id: UUID
     var text: String

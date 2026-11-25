@@ -12,11 +12,14 @@ final class MainSettingsViewController: UITableViewController {
     private let sharpnessCell = HapticParameterCell(title: "Sharpness", identifier: "keyboard.haptic-sharpness", allowsOff: false)
     private let feedback = KeyboardHaptics()
     private var lastHapticPreview: TimeInterval = 0
+    private let timings: DictationTimingStore
 
     init(loadPreferences: @escaping () -> KeyboardPreferences = { .load() },
          savePreferences: @escaping (KeyboardPreferences) throws -> Void = { try $0.save() },
-         outputDefaults: UserDefaults = VoiceConfiguration.defaults) {
+         outputDefaults: UserDefaults = VoiceConfiguration.defaults,
+         timings: DictationTimingStore = .shared) {
         self.loadPreferences = loadPreferences; self.savePreferences = savePreferences
+        self.timings = timings
         self.outputDefaults = outputDefaults
         preferences = loadPreferences()
         super.init(style: .insetGrouped)
@@ -63,18 +66,19 @@ final class MainSettingsViewController: UITableViewController {
         feedback.stop(); super.viewWillDisappear(animated)
     }
 
-    override func numberOfSections(in tableView: UITableView) -> Int { 4 }
+    override func numberOfSections(in tableView: UITableView) -> Int { 5 }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? 4 : section == 2 ? 3 : section == 3 ? 1 : 3
+        section == 0 ? 4 : section == 2 ? 3 : section == 3 ? 1 : section == 4 ? 2 : 3
     }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        ["Voice Input", "Keyboard", "Haptics", "Experimental"][section]
+        ["Voice Input", "Keyboard", "Haptics", "Experimental", "Dictation Timing"][section]
     }
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch section {
         case 0: return "The microphone starts when you hold a letter key or Dictate, and stops when you release. Dictation works directly in the keyboard."
         case 1: return "Add vvhisper in Settings → General → Keyboard, then allow Full Access for dictation. Use the language key to switch typing languages."
         case 2: return "Strength controls force. Sharpness changes the tap from soft to crisp. Use − and + for 1% adjustments. Set Strength to Off for no haptics."
+        case 4: return "Durations and outcomes of your last \(DictationTimingStore.limit) dictations, stored only on this device. No dictated text or keys are recorded."
         default: return "Chinese mode already suggests recognizable English words. Turn this on to also favor capitalized words and unfinished English spelling."
         }
     }
@@ -128,6 +132,19 @@ final class MainSettingsViewController: UITableViewController {
             content.text = "Test Tap"; content.image = UIImage(systemName: "hand.tap")
             content.textProperties.color = .systemBlue; cell.accessoryType = .none
             cell.accessibilityIdentifier = "settings.test-haptic"
+        case (4, 0):
+            content = .subtitleCell()
+            content.text = "Release to Text"
+            content.secondaryText = DictationTimingSummary(timings.load()).text
+            content.secondaryTextProperties.numberOfLines = 0
+            content.secondaryTextProperties.color = .secondaryLabel
+            content.image = UIImage(systemName: "stopwatch")
+            cell.accessoryType = .none; cell.selectionStyle = .none
+            cell.accessibilityIdentifier = "settings.dictation-timing"
+        case (4, 1):
+            content.text = "Copy Timing JSON"; content.image = UIImage(systemName: "doc.on.doc")
+            content.textProperties.color = .systemBlue; cell.accessoryType = .none
+            cell.accessibilityIdentifier = "settings.copy-dictation-timing"
         case (3, 0):
             content.text = "More English Suggestions"
             content.image = UIImage(systemName: "character.bubble")
@@ -153,6 +170,11 @@ final class MainSettingsViewController: UITableViewController {
         case (1, 1): UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case (1, 2): navigationController?.pushViewController(TypingSettingsViewController(load: loadPreferences, save: savePreferences), animated: true)
         case (2, 2): feedback.tap()
+        case (4, 1):
+            UIPasteboard.general.string = timings.exportJSON()
+            let alert = UIAlertController(title: "Timing Copied", message: "Durations and outcomes only, without dictated text or keys.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
         default: break
         }
     }

@@ -46,6 +46,39 @@ Only Seed/Ark keys and polishing/punctuation settings transfer. Missing values
 never erase local keys. Conflicts require a choice; offline failures preserve
 local operation. See macos/Design/ConfigurationSync.md for the shared format.
 
+## Text first, better later (2026-11-25)
+
+User request: dictation commits text quickly and stays robust; this supersedes the
+older 5 s refinement wait, the 15 s polish wait and "no dictation history".
+KeyboardVoiceSession.Budget owns the numbers and the tests pin them:
+- Seed live + nostream sockets open at hold start (audio queues until connected);
+  release before the first audio chunk still completes silently and closes them.
+- Refinement: wait 1.5 s after release for the nostream final, then use the live
+  final, else the latest live partial. If neither stream has any text, wait until
+  5 s, then retry. A dead live stream also waits to 5 s before retrying.
+- Polishing budget 3 s (translation 8 s). Past it, commit the unpolished text
+  with Sentence Punctuation and drop the late result; never swap text afterwards.
+  Ordinary polishing has no notice for the budget; translation says it kept the transcript.
+- Short utterances skip ordinary polishing: Han char = 1 unit, Latin/digit word =
+  1.5 units, ≤ 6 units skips (≤ 6 Han chars or ≤ 4 words). Translation still polishes.
+- Retry: the utterance's PCM stays in memory only (cap 3.84 MB = 120 s 16 kHz PCM16)
+  so that after both streams fail, or both stall for 5 s, it can be resent once to a
+  fresh nostream session (6 s budget) after release. Auth/quota failures never retry.
+  Ark retries once on connection errors (not timeouts/HTTP errors), inside the budget.
+- After failure keep the best text; with no text show a classified message
+  (DictationFailureKind: offline, auth 401/403, quota 429/Seed 55000031, timeout, other).
+  SeedStreamingSession emits only that class, never provider text or log IDs.
+- Recent results: the last 10 final texts with timestamps in the App Group
+  (DictationRecent.json, complete-unless-open protection, excluded from backup), local
+  only, never logged/sent. Cancellation after release (dismissal, field change,
+  typing, timeout) saves the best in-flight text; cancelling while recording does not.
+  The keyboard shows them as an inline "Recent Dictation" section of the existing
+  Clipboard History menu, with its own Clear action, inserting via completePaste.
+- Timing metrics: DictationTiming.json in the App Group, last 200 utterances,
+  durations, path, polish outcome and error class only; never text, lengths or keys.
+  Host Settings → Dictation Timing shows count, median/p90 release→text and the most
+  common slow step, and copies the JSON. Real-device timing needs a physical device.
+
 ## Direct keyboard dictation (2026-11-22)
 
 The user authorized WebKit capture as the primary path, superseding the older
@@ -100,7 +133,8 @@ finish_reason=stop JSON with only a nonempty text field. Missing credentials,
 timeout and invalid responses keep the original recognized text with a notice.
 Distinguish authentication, model access, quota/rate limits, server failure,
 timeout and invalid responses without exposing provider bodies or transcript text.
-Use an ephemeral session with a 15 s resource deadline. Keep recognized text
+Use an ephemeral session with a 15 s resource deadline (the keyboard's 3 s polish budget
+ends the wait sooner; see Text first, better later). Keep recognized text
 marked while awaiting polish; release never commits early. UITextDocumentProxy
 cannot force an underline in arbitrary host apps: marked-text appearance belongs
 to the host. Never insert decoration or mutate document underline formatting.
@@ -299,7 +333,7 @@ excluded from backups. Never send clips to providers or log their contents.
 History selection validates the captured destination and does not change the system
 clipboard or reorder the history. Clear History removes only our saved items;
 unchanged clipboard contents must not silently refill the cleared list. The code
-monitor still persists version/expiry metadata separately. No dictation history. Public app URLs contain no recipients, phone numbers or message bodies;
+monitor still persists version/expiry metadata separately. Recent dictation results are a separate, user-requested store (see Text first, better later). Public app URLs contain no recipients, phone numbers or message bodies;
 never call or send. An unavailable app/empty Phone URL shows a manual-open hint.
 Double-Space replaces only this field's own recent Space within 450 ms with `. ` in
 English or `。` in Chinese; never transform URL/email/numeric/code fields, changed

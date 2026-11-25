@@ -56,4 +56,24 @@ import XCTest
         keyboard.completePaste("wrong", request: stale, remember: false)
         XCTAssertEqual(proxy.editor.text, "first")
     }
+    func testRecentDictationSectionInsertsSavedResultWithoutTouchingClipboardHistory() throws {
+        let saved = UserDefaults.standard.object(forKey: KeyboardLayoutMode.preferenceKey)
+        KeyboardLayoutMode.full.save()
+        defer { UserDefaults.standard.set(saved, forKey: KeyboardLayoutMode.preferenceKey) }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("vvhisper-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let keyboard = KeyboardViewController()
+        let proxy = TextViewProxy("", selection: .init(location: 0, length: 0))
+        keyboard.testingDocumentProxy = proxy; keyboard.loadViewIfNeeded()
+        defer { keyboard.viewWillDisappear(false) }
+        XCTAssertFalse(keyboard.clipboardHistoryMenu().contains { ($0 as? UIMenu)?.title == "Recent Dictation" })
+        keyboard.dictationRecents = DictationRecentStore(fileURL: url)
+        keyboard.dictationRecents.record("Dictated result.")
+        let sections = keyboard.clipboardHistoryMenu().compactMap { $0 as? UIMenu }
+        XCTAssertEqual(sections.map(\.title), ["Clipboard", "Recent Dictation"])
+        let item = try XCTUnwrap(sections[1].children.first as? UIAction)
+        XCTAssertEqual(item.title, "Dictated result.")
+        XCTAssertEqual((sections[1].children.last as? UIAction)?.title, "Clear Recent Dictation")
+        XCTAssertTrue(keyboard.clipboardHistory.items.isEmpty)
+    }
 }

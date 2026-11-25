@@ -156,7 +156,8 @@ final class SeedStreamingSession: @unchecked Sendable {
         case partial(SeedStreamResult)
         /// nil when the last frame carried no result: keep the latest partial.
         case final(SeedStreamResult?)
-        case failed(String)
+        /// A coarse class only: provider bodies, identifiers and status text never leave the session.
+        case failed(DictationFailureKind)
     }
 
     private let queue = DispatchQueue(label: "com.vvhisper.dictation.seed-stream")
@@ -250,7 +251,7 @@ final class SeedStreamingSession: @unchecked Sendable {
     private func send(_ data: Data) {
         task?.send(.data(data)) { [weak self] error in
             guard let error, let self else { return }
-            self.queue.async { self.fail("send failed: \(error.localizedDescription)") }
+            self.queue.async { self.fail(DictationFailureKind.classify(error)) }
         }
     }
 
@@ -261,10 +262,9 @@ final class SeedStreamingSession: @unchecked Sendable {
                 guard !self.closed else { return }
                 switch result {
                 case .failure(let error):
-                    let http = self.task?.response as? HTTPURLResponse
-                    let status = http.map { " HTTP \($0.statusCode)" } ?? ""
-                    let logID = http?.value(forHTTPHeaderField: "X-Tt-Logid").map { " logid=\($0)" } ?? ""
-                    self.fail("\(error.localizedDescription)\(status)\(logID)")
+                    // The handshake status distinguishes a rejected key or quota from transport loss.
+                    let status = (self.task?.response as? HTTPURLResponse)?.statusCode
+                    self.fail(status.flatMap(DictationFailureKind.classify(httpStatus:)) ?? DictationFailureKind.classify(error))
                 case .success(let message):
                     let data: Data
                     switch message {
@@ -275,7 +275,7 @@ final class SeedStreamingSession: @unchecked Sendable {
                     do {
                         switch try SeedStreamFrame.parse(data) {
                         case .error(let code, let message):
-                            self.fail("error \(code): \(message)")
+                            self.fail(DictationFailureKind.classify(seedCode: code, message: message))
                         case .response(let isLast, let payload):
                             let parsed = SeedStreamResult.parse(payload)
                             if isLast {
@@ -287,16 +287,16 @@ final class SeedStreamingSession: @unchecked Sendable {
                             }
                         }
                     } catch {
-                        self.fail(error.localizedDescription)
+                        self.fail(.other)
                     }
                 }
             }
         }
     }
 
-    private func fail(_ reason: String) {
+    private func fail(_ kind: DictationFailureKind) {
         guard !closed else { return }
-        onEvent(.failed(reason))
+        onEvent(.failed(kind))
         close()
     }
 
