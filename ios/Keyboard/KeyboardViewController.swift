@@ -1382,9 +1382,13 @@ final class KeyboardViewController: UIInputViewController {
             self.pinyin = result
             if let error = result.error { self.pendingMiniMode = nil; self.cursorKey?.cancelPress(); self.showError(error) }
             self.insertingTypedText = true
-            // Replace the marked spelling, never append a second copy of it.
+            // Replace the marked spelling with one plain insertion, never append a
+            // second copy of it. Real hosts coalesce a turn's proxy writes and can
+            // apply insertions before marked-text writes, so committing with
+            // setMarkedText + unmarkText let a queued digit/symbol land before it
+            // ("B03" became "0B3"). Insertions keep their relative order.
             if !result.committed.isEmpty {
-                self.textDocumentProxy.setMarkedText(result.committed, selectedRange: NSRange(location: result.committed.utf16.count, length: 0))
+                self.textDocumentProxy.insertText(result.committed)
                 self.textDocumentProxy.unmarkText()
             }
             if !result.input.isEmpty {

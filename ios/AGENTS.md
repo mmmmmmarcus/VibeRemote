@@ -238,7 +238,11 @@ it regressed correctly spelled phrases. Preserve raw marked spelling until selec
 or Space and use the displayed candidate's action. Recognizable bundled English
 repairs remain available in Chinese mode. Persist the selected mode in
 extension-local preferences so typing still works without Full Access. Switching
-keeps unfinished spelling and preserves queued keystroke order. Dictation's speech
+keeps unfinished spelling and preserves queued keystroke order.
+Commit Pinyin results with `insertText` (replacing the marked spelling), then
+unmark; never setMarkedText(committed)+unmarkText (2026-11-25). Hosts coalesce a
+turn's proxy output and may apply insertions before marked writes, so a queued
+digit/symbol landed before the spelling ("B03" became "0B3"). Dictation's speech
 language recognition remains independent of this typing mode.
 Settings → Experimental → More English Suggestions optionally favors capitals
 and unconverted Latin spelling in Chinese mode; the language key retains its Chinese

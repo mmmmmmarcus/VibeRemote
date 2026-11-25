@@ -326,6 +326,12 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     var defersTextEdits = false
     var defersMarkedEdits = false
     var excludesMarkedContext = false
+    /// Models a remote host that receives one coalesced output per main-loop
+    /// turn and applies its insertions/deletions before marked-text writes.
+    var coalescesTurnOutput = false
+    private var turnTextEdits: [() -> Void] = []
+    private var turnMarkedEdits: [() -> Void] = []
+    private var turnFlushScheduled = false
     private var pendingTextEdits: [() -> Void] = []
     private(set) var pendingCursorMoves: [Int] = []
     var onWrite: (() -> Void)?
@@ -360,13 +366,29 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     }
     var documentInputMode: UITextInputMode? { nil }
     var hasText: Bool { editor.hasText }
+    private func coalesce(marked: Bool, _ edit: @escaping () -> Void) -> Bool {
+        guard coalescesTurnOutput else { return false }
+        if marked { turnMarkedEdits.append(edit) } else { turnTextEdits.append(edit) }
+        if !turnFlushScheduled {
+            turnFlushScheduled = true
+            DispatchQueue.main.async { [weak self] in self?.flushTurnOutput() }
+        }
+        return true
+    }
+    func flushTurnOutput() {
+        let edits = turnTextEdits + turnMarkedEdits
+        turnTextEdits = []; turnMarkedEdits = []; turnFlushScheduled = false
+        edits.forEach { $0() }
+    }
     func insertText(_ text: String) {
         onInsert?(text)
+        if coalesce(marked: false, { [weak self] in self?.editor.insertText(text) }) { return }
         if defersTextEdits { pendingTextEdits.append { [weak self] in self?.editor.insertText(text) } }
         else { editor.insertText(text) }
     }
     func deleteBackward() {
         backspaces += 1
+        if coalesce(marked: false, { [weak self] in self?.editor.deleteBackward() }) { return }
         if defersTextEdits { pendingTextEdits.append { [weak self] in self?.editor.deleteBackward() } }
         else { editor.deleteBackward() }
     }
@@ -383,11 +405,13 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     }
     func setMarkedText(_ markedText: String, selectedRange: NSRange) {
         writes += 1
+        if coalesce(marked: true, { [weak self] in self?.editor.setMarkedText(markedText, selectedRange: selectedRange); self?.onWrite?() }) { return }
         if defersMarkedEdits { pendingTextEdits.append { [weak self] in self?.editor.setMarkedText(markedText, selectedRange: selectedRange); self?.onWrite?() } }
         else { editor.setMarkedText(markedText, selectedRange: selectedRange); onWrite?() }
     }
     func unmarkText() {
         unmarks += 1
+        if coalesce(marked: true, { [weak self] in self?.editor.unmarkText(); self?.onWrite?() }) { return }
         if defersMarkedEdits { pendingTextEdits.append { [weak self] in self?.editor.unmarkText(); self?.onWrite?() } }
         else { editor.unmarkText(); onWrite?() }
     }
