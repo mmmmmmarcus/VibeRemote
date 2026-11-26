@@ -121,6 +121,8 @@ candidate strip; no extra accessory row. Bottom row is 123, Language, Emoji, Spa
 Return at letter-row height/gap: 1.25, 1.25, 1, rest, 2.5 letter-key widths. Emoji
 uses the function-key fill/radius. Long Return titles shrink, never wrap. The
 candidate strip is opaque (KeyboardMetrics.candidateFill, >=4.5:1 with `.label`).
+While collapsed words overflow, the strip's last 24 pt before the chevron fades
+(alpha mask into the strip fill); none at the list's end, when expanded, or on candidate 0.
 Duo arrangements keep their measured widths. PhoneLayoutTests pins this.
 
 Only audio from an explicit dictation hold is sent to Seed. Never log audio,

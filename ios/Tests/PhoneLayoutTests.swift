@@ -220,6 +220,49 @@ final class PhoneLayoutTests: XCTestCase {
                       && collection.leftEdgeEffect.isHidden && collection.rightEdgeEffect.isHidden)
     }
 
+    func testCollapsedStripFadesTrailingEdgeBeforeChevron() throws {
+        XCTAssertEqual(CandidatePanel.trailingFadeWidth, 24)
+        let words = (0..<40).map { PinyinCandidates.Candidate(text: "候选词\($0)", identifier: "candidate.\($0)", action: .chooseAbsolute($0)) }
+        for width in phoneWidths + [466] {
+            let panel = CandidatePanel(frame: CGRect(x: 0, y: 0, width: width, height: 44))
+            panel.show(words, hasMore: false)
+            panel.layoutIfNeeded()
+            let collection = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
+            collection.layoutIfNeeded()
+            let chevron = try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "candidate.expand" })
+            XCTAssertEqual(collection.frame.maxX, chevron.frame.minX, accuracy: 0.01, "Fade ends at the chevron at \(width)")
+            let mask = try XCTUnwrap(collection.layer.mask as? CAGradientLayer, "Overflowing strip fades at \(width)")
+            XCTAssertEqual(mask.frame, collection.bounds)
+            XCTAssertEqual(mask.startPoint, CGPoint(x: 0, y: 0.5)); XCTAssertEqual(mask.endPoint, CGPoint(x: 1, y: 0.5))
+            let stops = try XCTUnwrap(mask.locations).map { CGFloat($0.doubleValue) }
+            XCTAssertEqual(stops.count, 3)
+            XCTAssertEqual((1 - stops[1]) * mask.bounds.width, 24, accuracy: 0.01, "24pt fade at \(width)")
+            let alphas = try XCTUnwrap(mask.colors as? [CGColor]).map(\.alpha)
+            XCTAssertEqual(alphas, [1, 1, 0])
+            // The highlighted first candidate stays fully opaque.
+            let first = try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: 0, section: 0))).frame
+            XCTAssertLessThanOrEqual(first.maxX, collection.bounds.width - 24, "First candidate clear of the fade at \(width)")
+            // The mask follows scrolling; at the end of the list nothing fades.
+            collection.contentOffset.x = 120; collection.layoutIfNeeded()
+            XCTAssertEqual((collection.layer.mask as? CAGradientLayer)?.frame.minX ?? -1, 120, accuracy: 0.01)
+            collection.contentOffset.x = collection.contentSize.width - collection.bounds.width; collection.layoutIfNeeded()
+            XCTAssertNil(collection.layer.mask, "No fade at the end at \(width)")
+            collection.contentOffset.x = 0; collection.layoutIfNeeded()
+            XCTAssertNotNil(collection.layer.mask)
+            // The expanded browser wraps inside its width: no fade.
+            panel.setExpanded(true); panel.layoutIfNeeded(); collection.layoutIfNeeded()
+            XCTAssertNil(collection.layer.mask, "Expanded browser does not fade at \(width)")
+            panel.setExpanded(false); panel.layoutIfNeeded(); collection.layoutIfNeeded()
+            XCTAssertNotNil(collection.layer.mask)
+        }
+        // A short list that fits never fades.
+        let panel = CandidatePanel(frame: CGRect(x: 0, y: 0, width: 402, height: 44))
+        panel.show(Array(words.prefix(2)), hasMore: false); panel.layoutIfNeeded()
+        let collection = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
+        collection.layoutIfNeeded()
+        XCTAssertNil(collection.layer.mask)
+    }
+
     // MARK: Evidence renders (offscreen, inside the test runner)
 
     private static let evidenceDirectory: URL = {

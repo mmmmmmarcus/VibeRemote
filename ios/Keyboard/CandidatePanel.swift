@@ -13,6 +13,11 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
     private var transition: UIViewPropertyAnimator?
     private var transitionSnapshot: UIView?
     private let expandWidth: CGFloat = 56
+    /// Width of the alpha fade at the collapsed strip's trailing edge, just
+    /// before the chevron (2026-11-26). Words fade into the opaque strip fill
+    /// rather than being hard-cut to a sliver.
+    static let trailingFadeWidth: CGFloat = 24
+    private let trailingFade = CAGradientLayer()
     private var candidates: [PinyinCandidates.Candidate] = []
     private var hasMore = false
     private var loading = false
@@ -37,6 +42,12 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
         collection.backgroundColor = .clear
         // No scroll-edge blur over the words at the strip's edges.
         for effect in [collection.topEdgeEffect, collection.bottomEdgeEffect, collection.leftEdgeEffect, collection.rightEdgeEffect] { effect.isHidden = true }
+        // Alpha-only mask: the collection is clear, so masked words fade into
+        // the panel's own opaque candidateFill in light and dark alike.
+        trailingFade.startPoint = CGPoint(x: 0, y: 0.5)
+        trailingFade.endPoint = CGPoint(x: 1, y: 0.5)
+        trailingFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        collection.onLayout = { [weak self] in self?.updateTrailingFade() }
         collection.dataSource = self; collection.delegate = self
         collection.showsHorizontalScrollIndicator = false
         collection.showsVerticalScrollIndicator = false
@@ -186,6 +197,25 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
         collection.alwaysBounceHorizontal = !isExpanded
         collection.alwaysBounceVertical = isExpanded
         layout.invalidateLayout()
+        updateTrailingFade()
+    }
+
+    /// Fades only while collapsed words continue past the visible trailing
+    /// edge; at the end of the list (or when everything fits) nothing fades.
+    private func updateTrailingFade() {
+        let bounds = collection.bounds
+        let fade = Self.trailingFadeWidth
+        let overflows = collection.contentSize.width - bounds.maxX > 0.5
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard !isExpanded, overflows, bounds.width > fade else {
+            if collection.layer.mask != nil { collection.layer.mask = nil }
+            return
+        }
+        // The mask lives in the scroll view's bounds space, so it follows the offset.
+        trailingFade.frame = bounds
+        trailingFade.locations = [0, NSNumber(value: Double((bounds.width - fade) / bounds.width)), 1]
+        if collection.layer.mask !== trailingFade { collection.layer.mask = trailingFade }
     }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { candidates.count }
@@ -207,6 +237,7 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         let remaining = isExpanded ? scrollView.contentSize.height - scrollView.bounds.height - scrollView.contentOffset.y
             : scrollView.contentSize.width - scrollView.bounds.width - scrollView.contentOffset.x
+        updateTrailingFade()
         if remaining < 100 { requestMore() }
     }
     private func requestMore() {
@@ -218,6 +249,8 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
 }
 
 private final class CandidateCollectionView: UICollectionView {
+    var onLayout: (() -> Void)?
+    override func layoutSubviews() { super.layoutSubviews(); onLayout?() }
     override func touchesShouldCancel(in view: UIView) -> Bool {
         view is CandidateButton || super.touchesShouldCancel(in: view)
     }
