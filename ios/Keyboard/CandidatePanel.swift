@@ -28,11 +28,15 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
     override init(frame: CGRect) {
         super.init(frame: frame)
         clipsToBounds = true
-        // Remote keyboard hosting must receive touches in the transparent
-        // strip gaps and the padding around the chevron, not just its ink.
-        backgroundColor = UIColor.label.withAlphaComponent(0.001)
+        // Opaque strip (2026-11-26): host content must not show through the
+        // candidates. Being painted also keeps remote hosting delivering touches
+        // in the strip gaps and the padding around the chevron.
+        backgroundColor = KeyboardMetrics.candidateFill
+        isOpaque = true
         accessibilityIdentifier = "keyboard.candidates"
         collection.backgroundColor = .clear
+        // No scroll-edge blur over the words at the strip's edges.
+        for effect in [collection.topEdgeEffect, collection.bottomEdgeEffect, collection.leftEdgeEffect, collection.rightEdgeEffect] { effect.isHidden = true }
         collection.dataSource = self; collection.delegate = self
         collection.showsHorizontalScrollIndicator = false
         collection.showsVerticalScrollIndicator = false

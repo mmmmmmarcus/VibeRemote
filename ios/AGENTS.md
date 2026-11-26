@@ -116,6 +116,13 @@ input policies. Widths below 600 fall back to phone geometry; do not force iPad
 layout onto the Duo or request unsupported floating-window behavior. Validate
 portrait, landscape and narrow windows; host and extension target both families.
 
+Regular iPhone portrait (designer spec 2026-11-26): exactly four key rows under the
+candidate strip; no extra accessory row. Bottom row is 123, Language, Emoji, Space,
+Return at letter-row height/gap: 1.25, 1.25, 1, rest, 2.5 letter-key widths. Emoji
+uses the function-key fill/radius. Long Return titles shrink, never wrap. The
+candidate strip is opaque (KeyboardMetrics.candidateFill, >=4.5:1 with `.label`).
+Duo arrangements keep their measured widths. PhoneLayoutTests pins this.
+
 Only audio from an explicit dictation hold is sent to Seed. Never log audio,
 transcripts, credentials or provider response bodies.
 All async responses must match the hold and focused document before inserting.

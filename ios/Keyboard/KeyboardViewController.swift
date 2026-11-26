@@ -583,19 +583,6 @@ final class KeyboardViewController: UIInputViewController {
         }
         bottom.addArrangedSubview(makeKey("space"))
         if metrics.inlineAccessories { bottom.addArrangedSubview(makeAccessoryReturn()) }
-        else if metrics.belowAccessories {
-            let accessories = UIStackView(); accessories.axis = .horizontal
-            accessories.spacing = metrics.keyGap
-            accessories.isLayoutMarginsRelativeArrangement = true
-            let inset: CGFloat = metrics.arrangement == .innerPortrait ? 45.33 : 17
-            accessories.layoutMargins = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
-            accessories.heightAnchor.constraint(equalToConstant: 50 - metrics.rowGap).isActive = true
-            accessories.addArrangedSubview(makeLanguageKey())
-            accessories.addArrangedSubview(makeSwitcher())
-            accessories.addArrangedSubview(UIView())
-            accessories.addArrangedSubview(makeAccessoryReturn())
-            rows.addArrangedSubview(accessories)
-        }
         updateHeader()
     }
 
@@ -750,7 +737,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func makeLanguageKey() -> KeyControl {
         let key = makeKey("language")
-        key.widthAnchor.constraint(equalToConstant: metrics.switcherWidth).isActive = true
+        key.widthAnchor.constraint(equalToConstant: metrics.languageWidth).isActive = true
         return key
     }
 
@@ -2068,7 +2055,13 @@ final class KeyControl: UIControl {
         quietFeedback.frame = bounds; quietFeedback.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(quietFeedback)
         label.textAlignment = .center; label.isUserInteractionEnabled = false; icon.contentMode = .scaleAspectFit; icon.tintColor = .label
+        // Long Return titles (search, emergency call, 发送…) shrink inside their
+        // key instead of overflowing or wrapping; ordinary legends already fit.
+        label.numberOfLines = 1; label.adjustsFontSizeToFitWidth = true; label.minimumScaleFactor = 0.5
+        label.baselineAdjustment = .alignCenters
         for item in [label, icon] { item.translatesAutoresizingMaskIntoConstraints = false; addSubview(item) }
+        let labelFits = label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -4)
+        labelFits.priority = UILayoutPriority(999); labelFits.isActive = true
         labelCenterY = label.centerYAnchor.constraint(equalTo: centerYAnchor)
         NSLayoutConstraint.activate([label.centerXAnchor.constraint(equalTo: centerXAnchor), labelCenterY!, icon.centerXAnchor.constraint(equalTo: centerXAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 25), icon.heightAnchor.constraint(equalToConstant: 24)])
     }

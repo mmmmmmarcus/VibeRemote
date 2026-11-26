@@ -80,7 +80,7 @@ final class KeyboardLayoutTests: XCTestCase {
 
     func testEnterIsWiderWithoutGrowingModeKeyAcrossDuoLayouts() {
         for (width, landscape, minimum, mode): (CGFloat, Bool, CGFloat, CGFloat) in [
-            (375, false, 110, 86.075), (466, false, 90, 39.667),
+            (375, false, 76, 38.458), (466, false, 90, 39.667),
             (655, false, 115, 50.667), (529, true, 100, 45.333), (802, true, 110, 46.667)
         ] {
             let metrics = KeyboardMetrics(width: width, landscape: landscape)

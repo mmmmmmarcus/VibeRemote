@@ -7,8 +7,9 @@ struct KeyboardMetrics {
     let arrangement: Arrangement
     let mini: Bool
     var tablet: Bool { arrangement == .tablet }
-    var inlineAccessories: Bool { arrangement == .outerPortrait || arrangement == .innerPortrait || arrangement == .outerLandscape }
-    var belowAccessories: Bool { !mini && arrangement == .phone }
+    /// Language and emoji sit inside the bottom key row. Regular iPhones use
+    /// the same single bottom row as Duo (2026-11-26); no extra accessory row.
+    var inlineAccessories: Bool { arrangement == .phone || arrangement == .outerPortrait || arrangement == .innerPortrait || arrangement == .outerLandscape }
     var split: Bool { arrangement == .innerLandscape }
     private(set) var inset: CGFloat
     let keyHeight: CGFloat
@@ -23,14 +24,19 @@ struct KeyboardMetrics {
     var candidateHeight: CGFloat { mini ? 0 : split ? 43.333 : arrangement == .outerLandscape ? 43 : 47 }
     var topInset: CGFloat { mini ? inset : 0 }
     var bottomInset: CGFloat { mini ? inset : arrangement == .outerLandscape ? 4 : split ? 3.667 : arrangement == .innerPortrait ? 3.333 : arrangement == .outerPortrait ? 6.667 : 0 }
-    var contentHeight: CGFloat { topInset + candidateHeight + (mini ? 1 : tablet ? 5 : 4) * keyHeight + (mini ? 0 : tablet ? 4 : 3) * rowGap + bottomInset + (belowAccessories ? 50 : 0) }
+    var contentHeight: CGFloat { topInset + candidateHeight + (mini ? 1 : tablet ? 5 : 4) * keyHeight + (mini ? 0 : tablet ? 4 : 3) * rowGap + bottomInset }
     var miniFunctionWidth: CGFloat { max(44, min(60, shiftWidth)) }
-    var switcherWidth: CGFloat { split ? 46.667 : arrangement == .outerLandscape ? 45.333 : arrangement == .innerPortrait ? 50.667 : arrangement == .outerPortrait ? 39.667 : 42 }
+    /// One letter key in the phone's ten-key top row.
+    let letterWidth: CGFloat
+    var switcherWidth: CGFloat { arrangement == .phone ? letterWidth : split ? 46.667 : arrangement == .outerLandscape ? 45.333 : arrangement == .innerPortrait ? 50.667 : arrangement == .outerPortrait ? 39.667 : 42 }
     let modeWidth: CGFloat
+    /// Phone: 123 and Language are both 1.25 letter keys. Duo keeps its measured widths.
+    var languageWidth: CGFloat { arrangement == .phone ? modeWidth : switcherWidth }
     var letterFont: UIFont { UIFont(name: "SFCompact-Regular", size: fontSize) ?? .systemFont(ofSize: fontSize) }
 
     init(width: CGFloat, landscape: Bool = false, mini: Bool = false, tablet: Bool = false) {
         self.mini = mini
+        var phoneLetter: CGFloat = 0
         if tablet && width >= 600 {
             arrangement = .tablet
             inset = 8; keyHeight = landscape ? 54 : 50; rowGap = 8; keyGap = 7
@@ -61,9 +67,13 @@ struct KeyboardMetrics {
             arrangement = .phone
             inset = 6.67; keyHeight = 43; rowGap = 11; keyGap = 6
             middleInset = 20; sideGap = 13.333; shiftWidth = 45
-            returnWidth = min(120, (width - 13.34) * 0.32)
-            modeWidth = min(93, (width - 13.34) * 0.238); cornerRadius = 8.5; fontSize = 25
+            // Bottom row (designer spec 2026-11-26): 123 and Language 1.25,
+            // Emoji 1, Return 2.5 letter keys; Space takes the rest.
+            let letter = max(20, (width - 2 * 6.67 - 9 * 6) / 10); phoneLetter = letter
+            returnWidth = 2.5 * letter
+            modeWidth = 1.25 * letter; cornerRadius = 8.5; fontSize = 25
         }
+        letterWidth = phoneLetter
         // Mini has no candidate strip to provide breathing room. Match its top
         // and sides, including the full-layout Duo variant with no side inset.
         if mini { inset = max(8, inset) }
@@ -71,6 +81,14 @@ struct KeyboardMetrics {
 
     @MainActor static let actionKeyFill = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     @MainActor static let actionKeyInk = UIColor { $0.userInterfaceStyle == .dark ? .black : .white }
+
+    /// Opaque candidate strip: nothing behind the keyboard shows through the
+    /// words. With `.label` text this stays well above 4.5:1 in both appearances.
+    @MainActor static let candidateFill = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.137, green: 0.137, blue: 0.149, alpha: 1)
+            : UIColor(red: 0.835, green: 0.847, blue: 0.867, alpha: 1)
+    }
 
     @MainActor static let keyFill = UIColor { traits in
         let dark = traits.userInterfaceStyle == .dark
