@@ -37,7 +37,7 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
 
     override init(frame: CGRect) {
         let layout = UICollectionViewFlowLayout(); layout.scrollDirection = .horizontal
-        layout.minimumLineSpacing = 6; layout.minimumInteritemSpacing = 0
+        layout.minimumLineSpacing = 6; layout.minimumInteritemSpacing = 6
         collection = UICollectionView(frame: .zero, collectionViewLayout: layout)
         super.init(frame: frame)
         backgroundColor = UIColor.label.withAlphaComponent(0.001)
@@ -112,8 +112,12 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
         let record = records[indexPath.item]
         let text = "@@" + String(record.abbreviation.prefix(80)) + "  " + record.preview
         let width = (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13, weight: .semibold)]).width + 24
-        return CGSize(width: min(max(44, width), max(44, collection.bounds.width - 8)), height: bounds.height)
+        return CGSize(width: min(max(44, ceil(width)), max(44, collection.bounds.width - 8)), height: bounds.height)
     }
+    // Specify both delegate metrics: UIKit's horizontal flow placement must
+    // retain the visible 6pt gap regardless of its line/item packing choice.
+    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, minimumLineSpacingForSectionAt section: Int) -> CGFloat { 6 }
+    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, minimumInteritemSpacingForSectionAt section: Int) -> CGFloat { 6 }
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard records.indices.contains(indexPath.item) else { return }
         collectionView.deselectItem(at: indexPath, animated: false); onSelect?(records[indexPath.item])

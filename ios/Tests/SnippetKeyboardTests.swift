@@ -310,6 +310,49 @@ import UIKit
         }
     }
 
+    func testMeasuredCapsuleSpacingAndFixedBackAcrossWidthsAndThemes() async throws {
+        for width: CGFloat in [375, 402, 440, 466] {
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                try await withKeyboard(width: width) { keyboard, _, _, _ in
+                    keyboard.overrideUserInterfaceStyle = style
+                    keyboard.openSnippets(); try await wait { keyboard.snippetStrip.records.count == 2 }
+                    let strip = keyboard.snippetStrip, collection = strip.collection
+                    keyboard.view.layoutIfNeeded(); strip.layoutIfNeeded(); collection.layoutIfNeeded()
+                    @MainActor func assertGap() throws {
+                        let cells = collection.visibleCells.sorted { $0.frame.minX < $1.frame.minX }
+                        XCTAssertGreaterThanOrEqual(cells.count, 2)
+                        for (left, right) in zip(cells, cells.dropFirst()) {
+                            left.layoutIfNeeded(); right.layoutIfNeeded()
+                            let leftPill = try XCTUnwrap(left.contentView.subviews.first)
+                            let rightPill = try XCTUnwrap(right.contentView.subviews.first)
+                            let a = leftPill.convert(leftPill.bounds, to: strip)
+                            let b = rightPill.convert(rightPill.bounds, to: strip)
+                            XCTAssertEqual(right.frame.minX - left.frame.maxX, 6, accuracy: 0.1, "cell gap width \(width), theme \(style.rawValue)")
+                            XCTAssertEqual(b.minX - a.maxX, 6, accuracy: 0.1, "visible capsule gap width \(width), theme \(style.rawValue)")
+                            XCTAssertEqual(a.height, 32, accuracy: 0.1)
+                            XCTAssertEqual(a.minY, b.minY, accuracy: 0.1)
+                        }
+                    }
+                    try assertGap()
+                    let back = strip.back.convert(strip.back.bounds, to: keyboard.view)
+                    let viewport = collection.convert(collection.bounds, to: keyboard.view)
+                    XCTAssertEqual(back.width, 44, accuracy: 0.1)
+                    XCTAssertEqual(viewport.minX, back.maxX, accuracy: 0.1)
+                    XCTAssertFalse(strip.back.isDescendant(of: collection))
+                    let first = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
+                    let originalX = first.convert(first.bounds, to: strip).minX
+                    collection.contentOffset.x = 24; collection.layoutIfNeeded()
+                    try assertGap()
+                    XCTAssertEqual(strip.back.convert(strip.back.bounds, to: keyboard.view), back)
+                    XCTAssertEqual(collection.convert(collection.bounds, to: keyboard.view), viewport)
+                    XCTAssertEqual(first.convert(first.bounds, to: strip).minX, originalX - 24, accuracy: 0.1)
+                    let hit = strip.hitTest(CGPoint(x: 22, y: strip.bounds.midY), with: nil)
+                    XCTAssertTrue(hit === strip.back || hit?.isDescendant(of: strip.back) == true)
+                }
+            }
+        }
+    }
+
     private func evidence(_ window: UIWindow, name: String) throws {
         window.layoutIfNeeded()
         let png = try XCTUnwrap(UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
@@ -341,10 +384,8 @@ import UIKit
                     let expectedColor: UIColor = style == .dark ? .systemGray4 : .systemGray5
                     XCTAssertEqual(capsule.backgroundColor?.resolvedColor(with: window.traitCollection), expectedColor.resolvedColor(with: window.traitCollection))
                     keyboard.snippetStrip.show(.failure); try evidence(window, name: name + "-error")
-                    if width == 402 {
-                        for (state, suffix): (SnippetStripState, String) in [(.permission, "permission"), (.empty, "empty"), (.information(SnippetCopy.permissionDetail), "info")] {
-                            keyboard.snippetStrip.show(state); try evidence(window, name: name + "-" + suffix)
-                        }
+                    for (state, suffix): (SnippetStripState, String) in [(.permission, "permission"), (.empty, "empty"), (.information(SnippetCopy.permissionDetail), "info")] {
+                        keyboard.snippetStrip.show(state); try evidence(window, name: name + "-" + suffix)
                     }
                     keyboard.closeSnippets(); try tap("ABC", keyboard); try typePrefix(keyboard)
                     try await wait { keyboard.snippetStrip.records.first?.id == record.id }
