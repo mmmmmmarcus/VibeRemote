@@ -79,6 +79,34 @@ struct KeyboardMetrics {
         if mini { inset = max(8, inset) }
     }
 
+    /// The design height is a request, not proof of the remote host's bounds.
+    /// Spend vertical whitespace first when the host grants less; keep every row
+    /// and the original fonts. Never feed this fitted height back into negotiation.
+    struct VerticalLayout {
+        let candidateHeight: CGFloat
+        let topInset: CGFloat
+        let bottomInset: CGFloat
+        let keyHeight: CGFloat
+        let rowGap: CGFloat
+        var rowsHeight: CGFloat { rowCount * keyHeight + max(0, rowCount - 1) * rowGap }
+        private let rowCount: CGFloat
+
+        init(metrics: KeyboardMetrics, availableHeight: CGFloat) {
+            rowCount = metrics.mini ? 1 : metrics.tablet ? 5 : 4
+            candidateHeight = metrics.candidateHeight
+            let height = max(0, min(metrics.contentHeight, availableHeight))
+            var deficit = max(0, metrics.contentHeight - height)
+            let bottomReduction = min(metrics.bottomInset, deficit)
+            bottomInset = metrics.bottomInset - bottomReduction; deficit -= bottomReduction
+            let topReduction = min(metrics.topInset, deficit)
+            topInset = metrics.topInset - topReduction; deficit -= topReduction
+            let gaps = max(0, rowCount - 1)
+            let gapReduction = gaps > 0 ? min(max(0, metrics.rowGap - 2), deficit / gaps) : 0
+            rowGap = metrics.rowGap - gapReduction; deficit -= gapReduction * gaps
+            keyHeight = max(0, metrics.keyHeight - deficit / rowCount)
+        }
+    }
+
     @MainActor static let actionKeyFill = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     @MainActor static let actionKeyInk = UIColor { $0.userInterfaceStyle == .dark ? .black : .white }
 

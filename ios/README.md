@@ -6,6 +6,34 @@
 > `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
 
 
+## Duo keyboard host sizing — 2026-11-27
+
+The keyboard's design height is a request, not a guarantee from the remote host.
+The previous controller positioned fixed-height rows using that request even when
+its actual bounds were shorter, and only recalculated metrics on width/orientation
+changes. A constrained controller-host regression reproduces the missing/clipped
+fourth row at unfolded widths before the fix.
+
+The input view now opts into public self-sizing and publishes its preferred height.
+Layout independently uses the granted bounds on every pass, including height-only
+changes: first reclaim bottom/top whitespace and row gaps, then share the remaining
+height among all rows without changing the fonts. Height-only fitting updates the
+existing row constraints, preserving candidate/snippet state, and does not lower
+the next preferred-height request. Expanded candidates use the same fitted row
+geometry so they cannot cover the bottom controls. Normal-height metrics, Pinyin
+and Snippet storage/insertion policies are unchanged.
+
+`KeyboardHostBoundsTests` exercises a host with required edge constraints against
+the extension's optional height request, dynamic unfold/rotate/shrink/grow cycles,
+375/402/440/466-point layouts, historical 655/802-point extension widths, and
+669/951-point inner-display-derived fixtures (plus host-margin variants). It
+checks all four rows, unchanged letter font sizes, candidates, Snippet insertion
+and full granted-frame PNGs. This is an isolated Builder controller harness, not
+an installed remote keyboard or proof of actual Duo system height negotiation.
+The exact system-granted bounds, physical fold/rotation behavior and host-specific
+safe areas still require device validation; no shared simulator or TestFlight
+release is part of this fix.
+
 ## Local Snippets — 2026-11-27
 
 Settings → Keyboard → Snippet manages arbitrary abbreviation/content pairs. The

@@ -38,6 +38,7 @@ final class KeyboardViewController: UIInputViewController {
     private(set) var quietKeys = QuietKeys()
     private var keyboardHeight: NSLayoutConstraint!
     private var layoutWidth: CGFloat = 0
+    private var layoutHeight: CGFloat = 0
     private var layoutLandscape = false
     private var tabletLayout: Bool {
         #if KEYBOARD_TESTING
@@ -200,6 +201,10 @@ final class KeyboardViewController: UIInputViewController {
         keyboardHeight = view.heightAnchor.constraint(equalToConstant: metrics.contentHeight)
         keyboardHeight.priority = .init(999)
         keyboardHeight.isActive = true
+        // Opt into UIInputView's public self-sizing contract. A host can still
+        // impose a smaller required height, so layout must use its actual bounds.
+        inputView?.allowsSelfSizing = true
+        requestKeyboardHeight(metrics.contentHeight)
         status.font = .systemFont(ofSize: 14)
         status.textAlignment = .center; status.textColor = .label; status.numberOfLines = 2
         status.accessibilityIdentifier = "keyboard.voice-status"
@@ -356,6 +361,15 @@ final class KeyboardViewController: UIInputViewController {
     private var sameDestination: Bool {
         dictationText?.matches(textDocumentProxy) == true
     }
+    private func requestKeyboardHeight(_ height: CGFloat) {
+        keyboardHeight.constant = height
+        let size = CGSize(width: 0, height: height)
+        if preferredContentSize != size {
+            preferredContentSize = size
+            view.invalidateIntrinsicContentSize()
+        }
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let width = view.bounds.width
@@ -369,18 +383,37 @@ final class KeyboardViewController: UIInputViewController {
             layoutWidth = width; layoutLandscape = landscape
             stopModeAnimation()
             metrics = KeyboardMetrics(width: width, landscape: landscape, mini: isMiniMode, tablet: tabletLayout)
-            keyboardHeight.constant = metrics.contentHeight
+            requestKeyboardHeight(metrics.contentHeight)
             buildKeys()
+        }
+        if abs(view.bounds.height - layoutHeight) > 0.5 {
+            layoutHeight = view.bounds.height
+            if !preparingModeTransition && !isModeAnimating {
+                hideDeleteExpansion(animated: false); hideKeyPreview(); hideSymbolAlternatives()
+                currentKey?.cancelPress(); currentKey = nil
+                if command != nil { cancelHold() }
+            }
+        }
+        // Transition snapshots intentionally use the full-height canvas until
+        // completion. Ordinary layout always fits the granted extension frame,
+        // including height-only changes with an unchanged width/orientation.
+        let vertical = KeyboardMetrics.VerticalLayout(metrics: metrics,
+            availableHeight: preparingModeTransition || isModeAnimating ? metrics.contentHeight : view.bounds.height)
+        rows.spacing = vertical.rowGap
+        for row in rows.arrangedSubviews {
+            for constraint in row.constraints where constraint.firstAttribute == .height && constraint.secondItem == nil {
+                constraint.constant = vertical.keyHeight
+            }
         }
         let previewTransforms = modeContentViews.map(\.transform)
         for content in modeContentViews { content.transform = .identity }
-        touchSurface.frame = CGRect(x: 0, y: metrics.candidateHeight + metrics.topInset, width: width,
-                                    height: metrics.contentHeight - metrics.candidateHeight - metrics.topInset - metrics.bottomInset)
+        touchSurface.frame = CGRect(x: 0, y: vertical.candidateHeight + vertical.topInset, width: width,
+                                    height: vertical.rowsHeight)
         rows.frame = CGRect(x: metrics.inset, y: 0, width: width - 2 * metrics.inset, height: touchSurface.bounds.height)
         let headerHeight = min(44, max(0, metrics.candidateHeight - 1))
         candidatePanel.headerHeight = headerHeight
         let expanded = candidatePanel.isExpanded && !candidatePanel.isHidden
-        let panelHeight = expanded ? metrics.candidateHeight + 3 * (metrics.keyHeight + metrics.rowGap) - metrics.rowGap / 2 - 1 : headerHeight
+        let panelHeight = expanded ? vertical.candidateHeight + 3 * (vertical.keyHeight + vertical.rowGap) - vertical.rowGap / 2 - 1 : headerHeight
         candidatePanel.frame = CGRect(x: 0, y: 1, width: width, height: panelHeight)
         snippetStrip.frame = CGRect(x: 0, y: 1, width: width, height: headerHeight)
         helperScroll.frame = CGRect(x: 0, y: 1, width: width, height: min(ClipPillStrip.stripHeight, headerHeight))
@@ -389,7 +422,7 @@ final class KeyboardViewController: UIInputViewController {
             row.accessibilityElementsHidden = expanded && index < 3
         }
         let miniSide = metrics.inset + metrics.miniFunctionWidth + metrics.keyGap
-        status.frame = isMiniMode ? CGRect(x: miniSide, y: metrics.topInset, width: width - 2 * metrics.inset - 3 * metrics.miniFunctionWidth - 3 * metrics.keyGap, height: metrics.keyHeight) : CGRect(x: 12, y: 1, width: width - 24, height: 42)
+        status.frame = isMiniMode ? CGRect(x: miniSide, y: vertical.topInset, width: width - 2 * metrics.inset - 3 * metrics.miniFunctionWidth - 3 * metrics.keyGap, height: vertical.keyHeight) : CGRect(x: 12, y: 1, width: width - 24, height: 42)
         launchLink?.view.frame = status.frame
         for (content, transform) in zip(modeContentViews, previewTransforms) { content.transform = transform }
     }
@@ -416,9 +449,13 @@ final class KeyboardViewController: UIInputViewController {
         pasteGeneration += 1; clearText = nil; deleteDestination = nil
         isMiniMode = mini; page = targetPage
         metrics = KeyboardMetrics(width: layoutWidth > 0 ? layoutWidth : 466, landscape: layoutLandscape, mini: mini, tablet: tabletLayout)
-        if resizeHost { keyboardHeight.constant = metrics.contentHeight }
-        preparingModeTransition = true; buildKeys(); preparingModeTransition = false
+        if resizeHost { requestKeyboardHeight(metrics.contentHeight) }
+        preparingModeTransition = true; buildKeys()
+        // Snapshot preparation must lay out the full destination even while the
+        // host still has the source (possibly mini) height.
+        preparingModeTransition = !resizeHost
         view.setNeedsLayout(); view.superview?.layoutIfNeeded(); view.layoutIfNeeded(); rows.layoutIfNeeded()
+        preparingModeTransition = false
     }
     private func modeAppearance() -> KeyboardModeAppearance {
         var items: [KeyboardModeAppearance.Item] = [], used = Set<String>()
@@ -454,7 +491,7 @@ final class KeyboardViewController: UIInputViewController {
             full: fromMini ? target : source, mini: fromMini ? source : target, reduced: reduceModeMotion,
             onHeight: { [weak self] height in
                 guard let self else { return }
-                self.keyboardHeight.constant = height
+                self.requestKeyboardHeight(height)
                 self.view.superview?.layoutIfNeeded()
             }, onCompletion: { [weak self] mini in self?.finishModeTransition(mini) })
         modeTransition = transition
