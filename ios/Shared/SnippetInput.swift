@@ -26,9 +26,18 @@ final class SnippetExpansion {
     private(set) var expected: SnippetDestination
     private var preceding: SnippetDestination?
     private var awaiting = false
+    private var pendingTextChanges = 0
     init(destination: SnippetDestination) { expected = destination }
     func cancel() { cancelled = true }
-    func changed(_ current: SnippetDestination?) {
+    func willChange(selection: Bool) {
+        // A selection notification is never proof of an owned delete. Cancel
+        // before the proxy updates, including between acknowledged writes.
+        guard !selection, awaiting else { cancel(); return }
+        pendingTextChanges += 1
+    }
+    func changed(_ current: SnippetDestination?, selection: Bool = false) {
+        guard !selection else { cancel(); return }
+        pendingTextChanges = max(0, pendingTextChanges - 1)
         guard let current else { cancel(); return }
         // A delayed proxy may still show the pre-write context. This is not an
         // acknowledgment: wait without issuing any further operation.
@@ -39,12 +48,12 @@ final class SnippetExpansion {
         guard token.hasPrefix("@@"), token.count > 2,
               token.dropFirst(2).allSatisfy(SnippetStore.validCharacter), expected.before.hasSuffix(token) else { return false }
         for _ in token.utf8 {
-            guard !cancelled, permitted(), SnippetDestination.capture(proxy, composing: composing()) == expected else { return false }
+            guard !cancelled, pendingTextChanges == 0, permitted(), SnippetDestination.capture(proxy, composing: composing()) == expected else { return false }
             preceding = expected; expected = expected.deletingASCII(); awaiting = true
             proxy.deleteBackward()
             let deadline = ContinuousClock.now.advanced(by: .milliseconds(600))
-            while !cancelled, permitted(), SnippetDestination.capture(proxy, composing: composing()) != expected {
-                guard let current = SnippetDestination.capture(proxy, composing: composing()), current == preceding,
+            while !cancelled, permitted(), pendingTextChanges != 0 || SnippetDestination.capture(proxy, composing: composing()) != expected {
+                guard let current = SnippetDestination.capture(proxy, composing: composing()), current == preceding || current == expected,
                       ContinuousClock.now < deadline else { cancel(); return false }
                 do { try await Task.sleep(for: .milliseconds(10)) } catch { cancel(); return false }
             }
@@ -53,7 +62,7 @@ final class SnippetExpansion {
             // Yield between deletes so document/selection/lifecycle callbacks run.
             await Task.yield()
         }
-        guard !cancelled, permitted(), SnippetDestination.capture(proxy, composing: composing()) == expected else { return false }
+        guard !cancelled, pendingTextChanges == 0, permitted(), SnippetDestination.capture(proxy, composing: composing()) == expected else { return false }
         proxy.insertText(content) // Once, unchanged; there is no general success receipt.
         return true
     }

@@ -34,7 +34,15 @@ context, selection revision and composing state. Only tokens typed in the curren
 verifiable keyboard session qualify; pre-existing/pasted tokens and ambiguous
 hosts fail closed. Destructive expansion acknowledges each single ASCII deletion
 before issuing another; there is no blind batch deletion, compensation, retry or
-pasteboard fallback. UIKit provides neither an atomic cross-process replace nor a
+pasteboard fallback. Unresolved text-will/did notifications are a write barrier;
+selection-will notifications cancel expansion immediately, even if the proxy still
+reports the last acknowledged context. Hosts that emit indistinguishable selection
+changes for owned edits may therefore stop after one delete rather than risk a
+second. Candidate reads capture the context revision and lose raw ownership on
+selection changes even before publication. Scheduled reads do not count as evaluated
+until the owned raw suffix is acknowledged; delayed acknowledgments can retry.
+Tap locks belong to operation IDs so canceled old reads cannot lock out or unlock
+newer taps. UIKit provides neither an atomic cross-process replace nor a
 success receipt: an interrupted host can leave a partially removed prefix, and
 physical-host validation remains necessary. Full original content is inserted
 once, without fabricated success/failure receipts.

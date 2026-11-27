@@ -70,7 +70,13 @@ final class KeyboardViewController: UIInputViewController {
     private var snippetAccess: Bool?
     private var snippetContextRevision = 0
     private var snippetReadGeneration = -1
-    private var snippetBusy = false
+    private var snippetOperation: UUID?
+    private var snippetMatchRead: UUID?
+    private var snippetBusy: Bool { snippetOperation != nil }
+    #if KEYBOARD_TESTING
+    var testingSnippetRead: (() async -> Result<[Snippet], Error>)?
+    var testingSnippetBusy: Bool { snippetBusy }
+    #endif
     private var snippetComposing = false
     private var snippetLastTap = Date.distantPast
     var copiedCodes = CopiedCodeMonitor()
@@ -312,7 +318,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
-        snippetWillChange(textInput)
+        snippetWillChange(textInput, selection: true)
     }
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
@@ -336,7 +342,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
-        snippetDocumentChanged(textInput)
+        snippetDocumentChanged(textInput, selection: true)
         guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
         if !insertingTypedText { pasteGeneration += 1 }
         if !insertingTypedText { wordEdits.observe(textDocumentProxy) }
@@ -1241,9 +1247,11 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func tap(_ value: String) {
+        // A key invalidates an in-flight tap even before its store read returns.
+        if snippetBusy { cancelSnippetTask() }
         if snippetExpansion != nil {
-            snippetEpoch = UUID(); snippetTask?.cancel()
-            snippetExpansion?.cancel(); snippetExpansion = nil; snippetBusy = false
+            snippetEpoch = UUID(); cancelSnippetTask()
+            snippetExpansion?.cancel(); snippetExpansion = nil; snippetOperation = nil
             snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
             snippetStrip.show(.loading)
         }
@@ -1544,8 +1552,8 @@ final class KeyboardViewController: UIInputViewController {
         return SnippetDestination.capture(textDocumentProxy, composing: snippetIsComposing)
     }
     @objc func clearSnippetSession() {
-        snippetEpoch = UUID(); snippetTask?.cancel(); snippetTask = nil
-        snippetExpansion?.cancel(); snippetExpansion = nil; snippetBusy = false
+        snippetEpoch = UUID(); cancelSnippetTask(); snippetTask = nil
+        snippetExpansion?.cancel(); snippetExpansion = nil; snippetOperation = nil
         snippetRaw.clear(); snippetMatch = nil; snippetReadGeneration = -1
         snippetsOpen = false; snippetComposing = false; snippetDocumentID = nil; snippetAccess = nil
         snippetStrip.show(.loading); snippetStrip.isHidden = true
@@ -1563,8 +1571,8 @@ final class KeyboardViewController: UIInputViewController {
             // Polls must not continually dismiss the permission information layer.
             guard snippetAccess != false else { return }
             snippetAccess = false
-            snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
-            snippetEpoch = UUID(); snippetRaw.clear(); snippetMatch = nil; snippetBusy = false
+            cancelSnippetTask(); snippetExpansion?.cancel(); snippetExpansion = nil
+            snippetEpoch = UUID(); snippetRaw.clear(); snippetMatch = nil; snippetOperation = nil
             snippetReadGeneration = -1
             snippetStrip.show(.permission)
             if isViewLoaded { updateHeader() }
@@ -1574,41 +1582,62 @@ final class KeyboardViewController: UIInputViewController {
         snippetAccess = true
         if restored, snippetsOpen { openSnippets() }
     }
-    private func snippetWillChange(_ input: UITextInput?) {
-        if let input { snippetComposing = input.markedTextRange != nil }
-        guard !insertingTypedText, snippetExpansion == nil else { return }
-        snippetContextRevision &+= 1
-        // Once a candidate has been published, even an away-and-back cursor
-        // notification invalidates it; matching text alone never revives it.
-        if snippetMatch != nil {
-            snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
-            snippetTask?.cancel(); snippetStrip.show(.loading); updateHeader()
-        }
+    private func cancelSnippetTask() {
+        snippetTask?.cancel(); snippetTask = nil
+        if snippetOperation != nil { snippetLastTap = .distantPast }
+        snippetOperation = nil; snippetMatchRead = nil
     }
-    private func snippetDocumentChanged(_ input: UITextInput?) {
+    private func readSnippets(_ store: SnippetStore) async -> Result<[Snippet], Error> {
+        #if KEYBOARD_TESTING
+        if let testingSnippetRead { return await testingSnippetRead() }
+        #endif
+        return await Task.detached { Result { try store.load() } }.value
+    }
+    private func invalidateSnippetContext() {
+        let hadMatch = snippetMatch != nil, hadTap = snippetBusy
+        cancelSnippetTask()
+        snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
+        if hadTap { snippetNotice(snippetsOpen ? SnippetCopy.insertionFailure : SnippetCopy.unsafe) }
+        else if hadMatch { snippetStrip.show(.loading); updateHeader() }
+    }
+    private func snippetWillChange(_ input: UITextInput?, selection: Bool = false) {
+        if let input { snippetComposing = input.markedTextRange != nil }
+        guard !insertingTypedText else { return }
+        snippetContextRevision &+= 1
+        if let expansion = snippetExpansion {
+            expansion.willChange(selection: selection)
+            return
+        }
+        // Invalidate ownership even before publication. Matching context after
+        // an away-and-back event cannot re-authorize a pending read.
+        invalidateSnippetContext()
+    }
+    private func snippetDocumentChanged(_ input: UITextInput?, selection: Bool = false) {
         if let input { snippetComposing = input.markedTextRange != nil }
         checkSnippetPermission()
         guard !insertingTypedText else { return }
-        if let expansion = snippetExpansion { expansion.changed(snippetDestination); return }
         snippetContextRevision &+= 1
-        if snippetMatch != nil {
-            snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
-            snippetTask?.cancel(); snippetStrip.show(.loading); updateHeader(); return
+        if let expansion = snippetExpansion { expansion.changed(snippetDestination, selection: selection); return }
+        if selection || snippetMatch != nil || snippetBusy {
+            invalidateSnippetContext(); return
         }
+        // A bare text acknowledgment may complete owned raw output after the
+        // debounce. Restart its pending read with this revision, never a stale one.
+        if snippetMatchRead != nil { cancelSnippetTask() }
         snippetRaw.observe(snippetDestination)
         refreshSnippetMatch()
     }
     private func handleSnippetLiteral(_ value: String) -> Bool {
         guard !snippetIsComposing, let destination = snippetDestination else { return false }
         if value == "delete", snippetRaw.canDelete(at: destination) {
-            snippetMatch = nil; snippetTask?.cancel(); snippetReadGeneration = -1
+            snippetMatch = nil; cancelSnippetTask(); snippetReadGeneration = -1
             snippetRaw.deleted(from: destination)
             insertingTypedText = true; textDocumentProxy.deleteBackward(); insertingTypedText = false
             renderCandidates(); refreshSnippetMatch(); return true
         }
         let text = page == 0 && shifted ? value.uppercased() : value
         guard value.count == 1, snippetRaw.wantsLiteral(text, at: destination) else { return false }
-        snippetMatch = nil; snippetTask?.cancel(); snippetReadGeneration = -1
+        snippetMatch = nil; cancelSnippetTask(); snippetReadGeneration = -1
         typingAssistance.clear(); wordEdits.clear()
         snippetRaw.inserted(text, from: destination)
         insertingTypedText = true; textDocumentProxy.insertText(text); insertingTypedText = false
@@ -1618,34 +1647,47 @@ final class KeyboardViewController: UIInputViewController {
         return true
     }
     private func refreshSnippetMatch() {
-        guard !snippetsOpen, !snippetBusy, clipPillsAllowed,
+        guard !snippetsOpen, !snippetBusy, clipPillsAllowed, snippetMatchRead == nil,
               snippetRaw.token.hasPrefix("@@"), snippetRaw.token.count > 2,
               snippetReadGeneration != snippetRaw.generation else { return }
-        snippetReadGeneration = snippetRaw.generation
-        let generation = snippetRaw.generation, epoch = snippetEpoch, store = snippetStore
-        snippetTask?.cancel()
+        let generation = snippetRaw.generation, epoch = snippetEpoch, store = snippetStore, read = UUID()
+        cancelSnippetTask(); snippetMatchRead = read
         snippetTask = Task { [weak self] in
-            // Publish only after this turn's coalesced own writes and callbacks.
+            guard let self else { return }
+            defer { if self.snippetMatchRead == read { self.snippetMatchRead = nil } }
             do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
-            guard let self, !Task.isCancelled, self.snippetEpoch == epoch,
-                  self.snippetRaw.generation == generation, !self.snippetsOpen,
-                  let destination = self.snippetDestination,
-                  let token = self.snippetRaw.matchable(at: destination) else { return }
-            self.snippetRaw.observe(destination)
-            let result = await Task.detached { Result { try store.load() } }.value
-            guard !Task.isCancelled, self.snippetEpoch == epoch, self.clipPillsAllowed,
-                  !self.snippetsOpen, self.snippetRaw.generation == generation,
-                  self.snippetDestination == destination else { return }
-            guard case .success(let records) = result,
-                  let record = records.first(where: { $0.key == token.dropFirst(2).lowercased() }) else { return }
-            self.snippetMatch = (record, token, destination, generation)
-            self.snippetStrip.matching = true; self.snippetStrip.show(.data([record])); self.updateHeader()
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(600))
+            // Scheduled is not evaluated: delayed proxies can acknowledge after
+            // the debounce. Only an exact owned acknowledgment permits lookup.
+            while true {
+                guard !Task.isCancelled, self.snippetEpoch == epoch, self.snippetMatchRead == read,
+                      self.snippetRaw.generation == generation, !self.snippetsOpen, self.clipPillsAllowed,
+                      let destination = self.snippetDestination else { return }
+                if let token = self.snippetRaw.matchable(at: destination) {
+                    self.snippetRaw.observe(destination)
+                    let revision = self.snippetContextRevision
+                    let result = await self.readSnippets(store)
+                    guard !Task.isCancelled, self.snippetEpoch == epoch, self.snippetMatchRead == read,
+                          self.snippetContextRevision == revision, self.clipPillsAllowed,
+                          !self.snippetsOpen, self.snippetRaw.generation == generation,
+                          self.snippetDestination == destination else { return }
+                    self.snippetReadGeneration = generation
+                    guard case .success(let records) = result,
+                          let record = records.first(where: { $0.key == token.dropFirst(2).lowercased() }) else { return }
+                    self.snippetMatch = (record, token, destination, generation)
+                    self.snippetStrip.matching = true; self.snippetStrip.show(.data([record])); self.updateHeader()
+                    return
+                }
+                self.snippetRaw.observe(destination)
+                guard self.snippetRaw.generation == generation, ContinuousClock.now < deadline else { return }
+                do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+            }
         }
     }
     func openSnippets() {
         checkSnippetPermission()
-        snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
-        snippetBusy = false; snippetMatch = nil; snippetsOpen = true
+        cancelSnippetTask(); snippetExpansion?.cancel(); snippetExpansion = nil
+        snippetOperation = nil; snippetMatch = nil; snippetsOpen = true
         snippetStrip.matching = false
         candidatePanel.setExpanded(false)
         snippetEpoch = UUID()
@@ -1653,8 +1695,9 @@ final class KeyboardViewController: UIInputViewController {
         snippetStrip.show(.loading); updateHeader()
         let epoch = snippetEpoch, store = snippetStore
         snippetTask = Task { [weak self] in
-            let result = await Task.detached { Result { try store.load() } }.value
-            guard !Task.isCancelled, let self, self.snippetEpoch == epoch, self.snippetsOpen else { return }
+            guard let self else { return }
+            let result = await self.readSnippets(store)
+            guard !Task.isCancelled, self.snippetEpoch == epoch, self.snippetsOpen else { return }
             guard self.clipPillsAllowed else { self.checkSnippetPermission(); return }
             switch result {
             case .success(let records): self.snippetStrip.show(records.isEmpty ? .empty : .data(records))
@@ -1664,8 +1707,8 @@ final class KeyboardViewController: UIInputViewController {
     }
     func closeSnippets() {
         snippetEpoch = UUID()
-        snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
-        snippetBusy = false; snippetsOpen = false; snippetMatch = nil
+        cancelSnippetTask(); snippetExpansion?.cancel(); snippetExpansion = nil
+        snippetOperation = nil; snippetsOpen = false; snippetMatch = nil
         // Keep the raw segment literal, but suppress this generation's match.
         snippetReadGeneration = snippetRaw.generation
         snippetStrip.show(.loading); updateHeader()
@@ -1682,13 +1725,14 @@ final class KeyboardViewController: UIInputViewController {
                   match.generation == snippetRaw.generation,
                   snippetRaw.matchable(at: destination) == match.token else { snippetNotice(SnippetCopy.unsafe); return }
         }
-        snippetLastTap = Date(); snippetBusy = true
-        let epoch = snippetEpoch, contextRevision = snippetContextRevision, store = snippetStore
-        snippetTask?.cancel()
+        let epoch = snippetEpoch, contextRevision = snippetContextRevision, store = snippetStore, operation = UUID()
+        cancelSnippetTask()
+        snippetLastTap = Date(); snippetOperation = operation
         snippetTask = Task { [weak self] in
-            let result = await Task.detached { Result { try store.load() } }.value
-            guard !Task.isCancelled, let self, self.snippetEpoch == epoch else { return }
-            defer { self.snippetBusy = false }
+            guard let self else { return }
+            defer { if self.snippetOperation == operation { self.snippetOperation = nil } }
+            let result = await self.readSnippets(store)
+            guard !Task.isCancelled, self.snippetEpoch == epoch, self.snippetOperation == operation else { return }
             guard self.clipPillsAllowed else { self.checkSnippetPermission(); return }
             guard case .success(let records) = result else {
                 self.snippetMatch = nil; self.snippetStrip.show(.failure); self.snippetsOpen = true; self.updateHeader(); return

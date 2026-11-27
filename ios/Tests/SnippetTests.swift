@@ -150,6 +150,35 @@ final class SnippetStoreTests: XCTestCase {
             XCTAssertFalse(result); XCTAssertEqual(proxy.backspaces, 1); XCTAssertEqual(proxy.editor.text, "prefix @@GMAI")
         }
     }
+    func testTextWillDidBarrierWaitsForAcknowledgmentEvenWhenContextAlreadyMatches() async throws {
+        let proxy = proxy()
+        let operation = SnippetExpansion(destination: try XCTUnwrap(SnippetDestination.capture(proxy, composing: false)))
+        var acknowledgment: Task<Void, Never>?
+        proxy.onDelete = {
+            guard proxy.backspaces == 1 else { return }
+            operation.willChange(selection: false)
+            acknowledgment = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                XCTAssertEqual(proxy.backspaces, 1, "Matching context alone cannot bypass an unresolved will-change")
+                operation.changed(SnippetDestination.capture(proxy, composing: false))
+            }
+        }
+        let result = await operation.run(token: "@@GMAIL", content: "complete", proxy: proxy, permitted: { true }, composing: { false })
+        await acknowledgment?.value; proxy.onDelete = nil
+        XCTAssertTrue(result); XCTAssertEqual(proxy.backspaces, 7); XCTAssertEqual(proxy.editor.text, "prefix complete")
+    }
+    func testSelectionWillAfterAcknowledgmentIsATerminalBarrierWithoutDidCallback() async throws {
+        let proxy = proxy()
+        let operation = SnippetExpansion(destination: try XCTUnwrap(SnippetDestination.capture(proxy, composing: false)))
+        var notified = false
+        let result = await operation.run(token: "@@GMAIL", content: "NEVER", proxy: proxy, permitted: {
+            if proxy.backspaces == 1, !notified {
+                notified = true; operation.willChange(selection: true)
+            }
+            return true
+        }, composing: { false })
+        XCTAssertFalse(result); XCTAssertEqual(proxy.backspaces, 1); XCTAssertEqual(proxy.editor.text, "prefix @@GMAI")
+    }
     func testRawInputRequiresOwnedExactSuffixAndResetsOnCursorChange() throws {
         let proxy = proxy("prefix ")
         let raw = SnippetRawInput()

@@ -170,6 +170,112 @@ import UIKit
             XCTAssertTrue(keyboard.snippetStrip.isHidden); XCTAssertEqual(proxy.editor.text, "")
         }
     }
+    func testWillChangeBarrierStopsExpansionBeforeStaleProxyCanDeleteAtMovedCursor() async throws {
+        for selection in [true, false] {
+            try await withKeyboard { keyboard, proxy, _, record in
+                proxy.editor.text = "lead "; proxy.editor.selectedRange = NSRange(location: 5, length: 0)
+                try typePrefix(keyboard); try await wait { keyboard.snippetStrip.records.first?.id == record.id }
+                proxy.onDelete = {
+                    guard proxy.backspaces == 1 else { return }
+                    // The first delete is applied and visible, but the next host
+                    // mutation is announced before its proxy context catches up.
+                    proxy.contextOverride = (proxy.documentContextBeforeInput, proxy.documentContextAfterInput)
+                    if selection { keyboard.selectionWillChange(nil) }
+                    else { keyboard.textWillChange(nil) }
+                    proxy.editor.selectedRange = NSRange(location: 2, length: 0)
+                    // Deliberately withhold didChange until expansion stops.
+                }
+                defer { proxy.onDelete = nil; proxy.contextOverride = nil }
+                keyboard.selectSnippet(record)
+                try await wait { !keyboard.testingSnippetBusy }
+                XCTAssertEqual(proxy.backspaces, 1, "An unresolved will-change must prevent the next delete")
+                XCTAssertEqual(proxy.editor.text, "lead @@gmai", "Unrelated host prefix must survive")
+                XCTAssertEqual(keyboard.snippetStrip.state, .notice(SnippetCopy.unsafe))
+                proxy.contextOverride = nil
+                if selection { keyboard.selectionDidChange(nil) } else { keyboard.textDidChange(nil) }
+                XCTAssertEqual(proxy.backspaces, 1)
+            }
+        }
+    }
+    func testCancelledTapReadReleasesBusyAndOldCompletionCannotUnlockNewTap() async throws {
+        for cursorChange in [false, true] {
+            try await withKeyboard { keyboard, proxy, store, record in
+                keyboard.openSnippets(); try await wait { keyboard.snippetStrip.records.count == 2 }
+                let records = try store.load(), gate = SnippetReadGate()
+                keyboard.testingSnippetRead = { await gate.load() }
+                defer { gate.finishAll(records); keyboard.testingSnippetRead = nil }
+                keyboard.selectSnippet(record); try await wait { gate.calls == 1 }
+                XCTAssertTrue(keyboard.testingSnippetBusy)
+                if cursorChange {
+                    keyboard.selectionWillChange(nil); keyboard.selectionDidChange(nil)
+                } else {
+                    try tap("123", keyboard); try tap("@", keyboard)
+                }
+                XCTAssertFalse(keyboard.testingSnippetBusy)
+                keyboard.selectSnippet(record); try await wait { gate.calls == 2 }
+                gate.finish(1, records)
+                try await Task.sleep(for: .milliseconds(30))
+                XCTAssertTrue(keyboard.testingSnippetBusy, "Old defer must not unlock the newer operation")
+                keyboard.selectSnippet(record); XCTAssertEqual(gate.calls, 2)
+                gate.finish(2, records)
+                try await wait { !keyboard.testingSnippetBusy }
+                XCTAssertEqual(proxy.editor.text, (cursorChange ? "" : "@") + record.content)
+                XCTAssertEqual(proxy.backspaces, 0)
+            }
+        }
+    }
+    func testSelectionRoundTripBeforePublicationInvalidatesScheduledAndPendingReads() async throws {
+        for duringRead in [false, true] {
+            try await withKeyboard { keyboard, proxy, store, record in
+                let records = try store.load(), gate = SnippetReadGate()
+                keyboard.testingSnippetRead = { await gate.load() }
+                defer { gate.finishAll(records); keyboard.testingSnippetRead = nil }
+                try typePrefix(keyboard)
+                if duringRead { try await wait { gate.calls == 1 } }
+                keyboard.selectionWillChange(nil); proxy.editor.selectedRange = NSRange(location: 0, length: 0)
+                keyboard.selectionDidChange(nil)
+                keyboard.selectionWillChange(nil); proxy.editor.selectedRange = NSRange(location: 7, length: 0)
+                keyboard.selectionDidChange(nil)
+                gate.finishAll(records)
+                try await Task.sleep(for: .milliseconds(200))
+                XCTAssertEqual(gate.calls, duringRead ? 1 : 0)
+                XCTAssertTrue(keyboard.snippetStrip.isHidden); XCTAssertTrue(keyboard.snippetStrip.records.isEmpty)
+                keyboard.selectSnippet(record)
+                XCTAssertEqual(proxy.editor.text, "@@gmail"); XCTAssertEqual(proxy.backspaces, 0)
+                keyboard.testingSnippetRead = nil
+                try typePrefix(keyboard)
+                try await wait { keyboard.snippetStrip.records.first?.id == record.id }
+                XCTAssertEqual(proxy.editor.text, "@@gmail@@gmail", "New owned input may establish a fresh candidate")
+            }
+        }
+    }
+    func testLateOwnedRawAcknowledgmentRetriesWithoutRevivingInvalidSessions() async throws {
+        // 0: no callback; 1: bare owned text acknowledgment; others invalidate.
+        for invalidation in 0..<6 {
+            try await withKeyboard { keyboard, proxy, _, record in
+                proxy.defersTextEdits = true
+                try typePrefix(keyboard)
+                try await Task.sleep(for: .milliseconds(170)) // Beyond the original 80ms debounce.
+                XCTAssertTrue(keyboard.snippetStrip.records.isEmpty)
+                switch invalidation {
+                case 2: keyboard.selectionWillChange(nil); keyboard.selectionDidChange(nil)
+                case 3: keyboard.clearSnippetSession()
+                case 4: keyboard.testingFullAccess = false; keyboard.textDidChange(nil)
+                case 5: keyboard.closeSnippets()
+                default: break
+                }
+                proxy.defersTextEdits = false; proxy.flushTextEdits()
+                if invalidation == 1 { keyboard.textDidChange(nil) }
+                if invalidation < 2 { try await wait { keyboard.snippetStrip.records.first?.id == record.id } }
+                else {
+                    try await Task.sleep(for: .milliseconds(150))
+                    XCTAssertTrue(keyboard.snippetStrip.records.isEmpty)
+                }
+                XCTAssertEqual(proxy.editor.text, "@@gmail"); XCTAssertEqual(proxy.backspaces, 0)
+                XCTAssertNil(proxy.editor.markedTextRange)
+            }
+        }
+    }
     func testStripSwitchPreservesEveryKeyFrameAndVirtualizesManyPills() async throws {
         for width: CGFloat in [375, 402, 440, 466] {
             try await withKeyboard(width: width) { keyboard, _, _, record in
@@ -272,4 +378,18 @@ import UIKit
             }
         }
     }
+}
+
+/// Main-actor gate makes store completion ordering deterministic, without disk
+/// sleeps or locks on the UI actor. Every continuation is released by its test.
+@MainActor private final class SnippetReadGate {
+    private(set) var calls = 0
+    private var pending: [Int: CheckedContinuation<Result<[Snippet], Error>, Never>] = [:]
+    func load() async -> Result<[Snippet], Error> {
+        calls += 1
+        let call = calls
+        return await withCheckedContinuation { pending[call] = $0 }
+    }
+    func finish(_ call: Int, _ records: [Snippet]) { pending.removeValue(forKey: call)?.resume(returning: .success(records)) }
+    func finishAll(_ records: [Snippet]) { for call in Array(pending.keys) { finish(call, records) } }
 }

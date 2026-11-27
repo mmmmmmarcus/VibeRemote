@@ -612,6 +612,13 @@ host changes. Never route snippet insertion through completePaste or AI paths.
 `SnippetExpansion` acknowledges one ASCII delete at a time, stopping on ambiguity;
 never compensate, retry or use pasteboard. UIKit cannot provide an atomic prefix
 transaction or insertion receipt. Pre-existing/unowned tokens do not qualify.
+Unresolved text will/did changes block further writes; selection-will cancels
+expansion immediately, before stale proxy context can authorize another delete.
+A pending candidate read must capture/check context revision; cursor notifications
+invalidate raw ownership even before publication. Keep scheduled reads distinct
+from evaluated raw generations so late owned acknowledgments can retry. Tap busy
+state is owned by an operation ID: old canceled-read cleanup cannot unlock a new
+operation, and cancellation releases its own lock immediately.
 
 Run the full `app` Builder test plus `snippets-storage` cross-process harness.
 The latter adapts only unsupported iOS protection calls for macOS and does not

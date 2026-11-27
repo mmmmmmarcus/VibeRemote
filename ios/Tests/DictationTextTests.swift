@@ -336,6 +336,9 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     private(set) var pendingCursorMoves: [Int] = []
     var onWrite: (() -> Void)?
     var onInsert: ((String) -> Void)?
+    var onDelete: (() -> Void)?
+    /// A host may move its actual cursor before updating the proxy context.
+    var contextOverride: (before: String?, after: String?)?
     private(set) var writes = 0
     private(set) var backspaces = 0
     private(set) var unmarks = 0
@@ -344,6 +347,7 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
         editor.text = text; editor.selectedRange = selection
     }
     var documentContextBeforeInput: String? {
+        if let contextOverride { return contextOverride.before }
         if hidesContext { return nil }
         let position = excludesMarkedContext ? editor.markedTextRange?.start : nil
         let offset = position.map { editor.offset(from: editor.beginningOfDocument, to: $0) } ?? editor.selectedRange.location
@@ -353,6 +357,7 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
         return contextLimit.map { String(text.suffix($0)) } ?? text
     }
     var documentContextAfterInput: String? {
+        if let contextOverride { return contextOverride.after }
         if hidesContext { return nil }
         let position = excludesMarkedContext ? editor.markedTextRange?.end : nil
         let offset = position.map { editor.offset(from: editor.beginningOfDocument, to: $0) } ?? NSMaxRange(editor.selectedRange)
@@ -388,9 +393,12 @@ final class TextViewProxy: NSObject, UITextDocumentProxy {
     }
     func deleteBackward() {
         backspaces += 1
-        if coalesce(marked: false, { [weak self] in self?.editor.deleteBackward() }) { return }
-        if defersTextEdits { pendingTextEdits.append { [weak self] in self?.editor.deleteBackward() } }
-        else { editor.deleteBackward() }
+        if coalesce(marked: false, { [weak self] in self?.applyDeletion() }) { return }
+        if defersTextEdits { pendingTextEdits.append { [weak self] in self?.applyDeletion() } }
+        else { applyDeletion() }
+    }
+    private func applyDeletion() {
+        editor.deleteBackward(); onDelete?()
     }
     func flushTextEdits() { let edits = pendingTextEdits; pendingTextEdits = []; edits.forEach { $0() } }
     func adjustTextPosition(byCharacterOffset offset: Int) {
