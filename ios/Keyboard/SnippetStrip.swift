@@ -122,11 +122,14 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
 
 private final class SnippetCell: UICollectionViewCell {
     private let capsule = UIView()
+    // systemGray5 merges into the existing dark keyboard backdrop. Keep the
+    // neutral capsule visible using the adjacent semantic gray in dark mode.
+    private let restingColor = UIColor { $0.userInterfaceStyle == .dark ? .systemGray4 : .systemGray5 }
     private let label = UILabel()
     var onActivate: (() -> Void)?
     override init(frame: CGRect) {
         super.init(frame: frame)
-        capsule.backgroundColor = .systemGray5; capsule.layer.cornerRadius = 16; capsule.clipsToBounds = true
+        capsule.backgroundColor = restingColor; capsule.layer.cornerRadius = 16; capsule.clipsToBounds = true
         label.numberOfLines = 1; label.lineBreakMode = .byTruncatingTail; label.isAccessibilityElement = false
         contentView.addSubview(capsule); capsule.addSubview(label)
         isAccessibilityElement = true; accessibilityTraits = .button
@@ -145,7 +148,7 @@ private final class SnippetCell: UICollectionViewCell {
         capsule.frame = CGRect(x: 0, y: (bounds.height - 32) / 2, width: bounds.width, height: 32)
         label.frame = capsule.bounds.insetBy(dx: 10, dy: 0)
     }
-    override var isHighlighted: Bool { didSet { capsule.backgroundColor = isHighlighted ? .systemGray3 : .systemGray5 } }
+    override var isHighlighted: Bool { didSet { capsule.backgroundColor = isHighlighted ? .systemGray3 : restingColor } }
     override func accessibilityActivate() -> Bool { onActivate?(); return onActivate != nil }
     func clear() { label.attributedText = nil; accessibilityLabel = nil; accessibilityHint = nil; onActivate = nil }
     override func prepareForReuse() { super.prepareForReuse(); clear() }

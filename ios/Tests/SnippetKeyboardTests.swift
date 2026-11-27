@@ -231,6 +231,9 @@ import UIKit
                     try tap("123", keyboard); try evidence(window, name: name + "-default")
                     keyboard.openSnippets(); try await wait { keyboard.snippetStrip.records.count == 2 }
                     keyboard.view.layoutIfNeeded(); try evidence(window, name: name + "-manual")
+                    let capsule = try XCTUnwrap(keyboard.snippetStrip.collection.visibleCells.first?.contentView.subviews.first)
+                    let expectedColor: UIColor = style == .dark ? .systemGray4 : .systemGray5
+                    XCTAssertEqual(capsule.backgroundColor?.resolvedColor(with: window.traitCollection), expectedColor.resolvedColor(with: window.traitCollection))
                     keyboard.snippetStrip.show(.failure); try evidence(window, name: name + "-error")
                     if width == 402 {
                         for (state, suffix): (SnippetStripState, String) in [(.permission, "permission"), (.empty, "empty"), (.information(SnippetCopy.permissionDetail), "info")] {
