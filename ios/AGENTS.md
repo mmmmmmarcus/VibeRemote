@@ -589,3 +589,31 @@ never chooses emoji automatically. Chinese queries include raw input and the top
 five conversions; English uses its owned in-progress word. Selecting emoji replaces
 only the current owned word/composition, with existing destination guards, without
 an automatic trailing space. No typed queries leave the keyboard or are persisted.
+
+
+## Local Snippets (2026-11-27)
+
+Snippet is arbitrary user-defined abbreviation/content, not the superseded fixed
+My Info fields. `Shared/SnippetStore` is independent protected, backup-excluded
+App Group storage: flock read/validate/atomic rename, stable IDs/order and revision
+checks. Do not add snippets to preference sync/export, clipboard/history, AI,
+analytics or logging. Preserve original content; no product count/length caps.
+Only previews use the first 20 extended graphemes. Main app CRUD is independent
+of keyboard Full Access and uses native dirty-cancel/delete confirmations.
+
+The new neutral helper follows Messages before all existing clip pills. Replace
+only the existing header, never keys or keyboard height. Back stays outside the
+virtualized scroller. Manual insertion never deletes a prefix and stays open.
+`SnippetRawInput` owns literal @@ input outside Rime/English correction. Matching
+is case-insensitive but tap validation is exact-case/exact-context, same session,
+selection revision, id/revision, permission and no composing/selected text. Fresh
+reads at activation/tap; clear previews and ownership on permission/lifecycle/
+host changes. Never route snippet insertion through completePaste or AI paths.
+`SnippetExpansion` acknowledges one ASCII delete at a time, stopping on ambiguity;
+never compensate, retry or use pasteboard. UIKit cannot provide an atomic prefix
+transaction or insertion receipt. Pre-existing/unowned tokens do not qualify.
+
+Run the full `app` Builder test plus `snippets-storage` cross-process harness.
+The latter adapts only unsupported iOS protection calls for macOS and does not
+prove device Data Protection. Offscreen snippets-*.png evidence lives in the test
+artifact's phone-layout directory; do not use a shared simulator for this task.

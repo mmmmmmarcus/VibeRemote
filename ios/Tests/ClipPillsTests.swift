@@ -154,10 +154,10 @@ import UIKit
                 XCTAssertFalse(strip.isHidden)
                 addFixtures(keyboard, code: true)
                 strip.layoutIfNeeded(); strip.pills.forEach { $0.layoutIfNeeded() }
-                XCTAssertEqual(strip.bounds.height, 42, accuracy: 0.01, "\(width)")
+                XCTAssertEqual(strip.bounds.height, 44, accuracy: 0.01, "\(width)")
                 XCTAssertEqual(strip.frame.minX, 0); XCTAssertEqual(strip.bounds.width, width)
                 let ids = strip.pills.map { $0.accessibilityIdentifier ?? "" }
-                XCTAssertEqual(ids, ["keyboard.open-1password", "keyboard.open-messages", "keyboard.paste-code",
+                XCTAssertEqual(ids, ["keyboard.open-1password", "keyboard.open-messages", "keyboard.snippet", "keyboard.paste-code",
                                      "keyboard.clip.0", "keyboard.clip.1", "keyboard.clip.2", "keyboard.clip.3", "keyboard.clip.4",
                                      "keyboard.clipboard-history"])
                 XCTAssertEqual(strip.clipButtons.compactMap { $0.clip?.kind }, [.number, .link, .text, .email, .phone, .number])
@@ -167,8 +167,8 @@ import UIKit
                     XCTAssertEqual(right.frame.minX - left.frame.maxX, 6, accuracy: 0.01, "6pt spacing at \(width)")
                 }
                 for pill in strip.pills {
-                    XCTAssertEqual(pill.frame.height, 42, accuracy: 0.01, "Full-height tap target")
-                    XCTAssertEqual(pill.capsule.frame.height, 32); XCTAssertEqual(pill.capsule.frame.midY, 21, accuracy: 0.01)
+                    XCTAssertEqual(pill.frame.height, 44, accuracy: 0.01, "Full-height tap target")
+                    XCTAssertEqual(pill.capsule.frame.height, 32); XCTAssertEqual(pill.capsule.frame.midY, 22, accuracy: 0.01)
                     XCTAssertEqual(pill.capsule.layer.cornerRadius, 16)
                     XCTAssertEqual(pill.capsule.layer.shadowOpacity, 0); XCTAssertEqual(pill.capsule.layer.borderWidth, 0)
                 }
@@ -252,7 +252,7 @@ import UIKit
             XCTAssertEqual(keyboard.clipboardHistory.items, ["newest", original])
             // Clearing history leaves only the shortcuts and the clock.
             keyboard.clipboardHistory.clear(); keyboard.refreshCopiedCodeIndicator()
-            XCTAssertEqual(strip.pills.count, 3)
+            XCTAssertEqual(strip.pills.count, 4)
         }
     }
 
@@ -268,7 +268,7 @@ import UIKit
                 let strip = try pillStrip(keyboard)
                 XCTAssertTrue(strip.clipButtons.isEmpty)
                 XCTAssertEqual(strip.pills.map { $0.accessibilityIdentifier ?? "" },
-                               ["keyboard.open-1password", "keyboard.open-messages", "keyboard.clipboard-history"])
+                               ["keyboard.open-1password", "keyboard.open-messages", "keyboard.snippet", "keyboard.clipboard-history"])
                 XCTAssertNil(strip.scroll.layer.mask, "Nothing to fade")
                 XCTAssertFalse(descendants(strip).contains { ($0 as? UILabel).map { !$0.isHidden && !($0.text ?? "").isEmpty } ?? false },
                                "No hint text")

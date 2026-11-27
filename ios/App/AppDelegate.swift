@@ -10,6 +10,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
+    private var privacyCover: UIView?
+    func sceneWillResignActive(_ scene: UIScene) { setPrivacyCovered(true) }
+    func setPrivacyCovered(_ covered: Bool) {
+        guard covered else { privacyCover?.removeFromSuperview(); privacyCover = nil; return }
+        guard let window, privacyCover == nil else { return }
+        let cover = UIView(frame: window.bounds)
+        cover.backgroundColor = .systemBackground
+        cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        cover.accessibilityViewIsModal = true
+        window.addSubview(cover); privacyCover = cover
+    }
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
@@ -33,6 +44,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         VoiceIPC.remove("activation.json")
     }
     func sceneDidBecomeActive(_ scene: UIScene) {
+        setPrivacyCovered(false)
         MobileConfiguration.sync.refresh()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--verify-cursor") || ProcessInfo.processInfo.arguments.contains("--verify-haptics") || ProcessInfo.processInfo.arguments.contains("--verify-dictation") { return }

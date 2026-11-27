@@ -68,7 +68,7 @@ final class MainSettingsViewController: UITableViewController {
 
     override func numberOfSections(in tableView: UITableView) -> Int { 5 }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? 4 : section == 2 ? 3 : section == 3 ? 1 : section == 4 ? 2 : 3
+        section == 0 ? 4 : section == 1 ? 4 : section == 2 ? 3 : section == 3 ? 1 : section == 4 ? 2 : 3
     }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         ["Voice Input", "Keyboard", "Haptics", "Experimental", "Dictation Timing"][section]
@@ -128,6 +128,10 @@ final class MainSettingsViewController: UITableViewController {
             content.text = "Typing Assistance"
             content.image = UIImage(systemName: "textformat.abc")
             cell.accessibilityIdentifier = "settings.typing-assistance"
+        case (1, 3):
+            content.text = "Snippet"
+            content.image = UIImage(systemName: "text.bubble")
+            cell.accessibilityIdentifier = "settings.snippets"
         case (2, 2):
             content.text = "Test Tap"; content.image = UIImage(systemName: "hand.tap")
             content.textProperties.color = .systemBlue; cell.accessoryType = .none
@@ -169,6 +173,7 @@ final class MainSettingsViewController: UITableViewController {
         case (1, 0): navigationController?.pushViewController(KeyboardTestViewController(), animated: true)
         case (1, 1): UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
         case (1, 2): navigationController?.pushViewController(TypingSettingsViewController(load: loadPreferences, save: savePreferences), animated: true)
+        case (1, 3): navigationController?.pushViewController(SnippetListViewController(), animated: true)
         case (2, 2): feedback.tap()
         case (4, 1):
             UIPasteboard.general.string = timings.exportJSON()

@@ -58,6 +58,21 @@ final class KeyboardViewController: UIInputViewController {
     private var endCursor: CursorDragSession?
     private var endCursorSteps = 0
     private let helperScroll = ClipPillStrip()
+    let snippetStrip = SnippetStrip()
+    var snippetStore = SnippetStore.shared
+    private(set) var snippetsOpen = false
+    private let snippetRaw = SnippetRawInput()
+    private var snippetMatch: (record: Snippet, token: String, destination: SnippetDestination, generation: Int)?
+    private var snippetTask: Task<Void, Never>?
+    private var snippetExpansion: SnippetExpansion?
+    private var snippetEpoch = UUID()
+    private var snippetDocumentID: UUID?
+    private var snippetAccess: Bool?
+    private var snippetContextRevision = 0
+    private var snippetReadGeneration = -1
+    private var snippetBusy = false
+    private var snippetComposing = false
+    private var snippetLastTap = Date.distantPast
     var copiedCodes = CopiedCodeMonitor()
     #if KEYBOARD_TESTING
     var clipboardHistory = ClipboardHistory(fileURL: nil)
@@ -208,7 +223,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         rows.axis = .vertical
         touchSurface.addSubview(rows)
-        for item in [helperScroll, touchSurface, candidatePanel, status] { view.addSubview(item) }
+        for item in [helperScroll, touchSurface, candidatePanel, snippetStrip, status] { view.addSubview(item) }
         emojiPanel.isHidden = true; view.addSubview(emojiPanel)
         emojiPanel.onClose = { [weak self] in self?.playTapFeedback(); self?.setEmojiVisible(false) }
         emojiPanel.onPress = { [weak self] in
@@ -223,6 +238,11 @@ final class KeyboardViewController: UIInputViewController {
             self.playTapFeedback()
         }
         configureInputHelpers()
+        snippetStrip.isHidden = true
+        snippetStrip.onBack = { [weak self] in self?.closeSnippets() }
+        snippetStrip.onRetry = { [weak self] in self?.openSnippets() }
+        snippetStrip.onSelect = { [weak self] record in self?.selectSnippet(record) }
+        NotificationCenter.default.addObserver(self, selector: #selector(clearSnippetSession), name: .NSExtensionHostWillResignActive, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.changedNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshCopiedCodes), name: UIPasteboard.removedNotification, object: nil)
         let link = UIHostingController(rootView: VoiceLaunchLink(
@@ -265,6 +285,7 @@ final class KeyboardViewController: UIInputViewController {
         poll()
     }
     override func viewWillDisappear(_ animated: Bool) {
+        clearSnippetSession()
         hideDeleteExpansion(animated: false)
         // The remote document may already be gone, including its nominally nonnull UUID.
         // Teardown must only discard local state, never message the detached proxy.
@@ -285,8 +306,17 @@ final class KeyboardViewController: UIInputViewController {
         activationRequest = nil; offersHostLaunch = false
         resetComposition(); timer?.invalidate(); timer = nil; super.viewWillDisappear(animated)
     }
+    override func textWillChange(_ textInput: UITextInput?) {
+        super.textWillChange(textInput)
+        snippetWillChange(textInput)
+    }
+    override func selectionWillChange(_ textInput: UITextInput?) {
+        super.selectionWillChange(textInput)
+        snippetWillChange(textInput)
+    }
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        snippetDocumentChanged(textInput)
         guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
         refreshKeyboardAppearance()
         for key in keys where key.value == "return" { updateReturnKey(key) }
@@ -306,6 +336,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
+        snippetDocumentChanged(textInput)
         guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
         if !insertingTypedText { pasteGeneration += 1 }
         if !insertingTypedText { wordEdits.observe(textDocumentProxy) }
@@ -345,6 +376,7 @@ final class KeyboardViewController: UIInputViewController {
         let expanded = candidatePanel.isExpanded && !candidatePanel.isHidden
         let panelHeight = expanded ? metrics.candidateHeight + 3 * (metrics.keyHeight + metrics.rowGap) - metrics.rowGap / 2 - 1 : headerHeight
         candidatePanel.frame = CGRect(x: 0, y: 1, width: width, height: panelHeight)
+        snippetStrip.frame = CGRect(x: 0, y: 1, width: width, height: headerHeight)
         helperScroll.frame = CGRect(x: 0, y: 1, width: width, height: min(ClipPillStrip.stripHeight, headerHeight))
         for (index, row) in rows.arrangedSubviews.enumerated() {
             row.alpha = expanded && index < 3 ? 0 : 1
@@ -373,7 +405,7 @@ final class KeyboardViewController: UIInputViewController {
             playTapFeedback()
         } else { applyMode(enabled); (enabled ? KeyboardLayoutMode.mini : .full).save() }
     }
-    private var modeContentViews: [UIView] { [touchSurface, candidatePanel, helperScroll, status] }
+    private var modeContentViews: [UIView] { [touchSurface, candidatePanel, helperScroll, snippetStrip, status] }
     private func applyMode(_ mini: Bool, page targetPage: Int = 0, resizeHost: Bool = true) {
         pasteGeneration += 1; clearText = nil; deleteDestination = nil
         isMiniMode = mini; page = targetPage
@@ -743,10 +775,12 @@ final class KeyboardViewController: UIInputViewController {
     private func updateHeader() {
         let voiceVisible = command != nil || activationRequest != nil || Date() < errorUntil
         setRecordingAppearance(command?.phase == .recording, voiceVisible: voiceVisible)
-        candidatePanel.isHidden = showingEmoji || isMiniMode || voiceVisible || visibleCandidates.isEmpty
+        let showSnippets = (snippetsOpen || snippetMatch != nil) && !showingEmoji && !isMiniMode && !voiceVisible && cursorKey == nil
+        snippetStrip.isHidden = !showSnippets
+        candidatePanel.isHidden = showSnippets || showingEmoji || isMiniMode || voiceVisible || visibleCandidates.isEmpty
         if candidatePanel.isHidden { candidatePanel.setExpanded(false) }
         let hidePills = showingEmoji || isMiniMode || cursorKey != nil || voiceVisible || candidatePanel.isExpanded
-        helperScroll.isHidden = hidePills || page == 0 || !candidatePanel.isHidden
+        helperScroll.isHidden = showSnippets || hidePills || page == 0 || !candidatePanel.isHidden
         refreshCopiedCodeIndicator()
         view.setNeedsLayout()
         status.textColor = .label
@@ -1207,6 +1241,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func tap(_ value: String) {
+        if snippetExpansion != nil {
+            snippetEpoch = UUID(); snippetTask?.cancel()
+            snippetExpansion?.cancel(); snippetExpansion = nil; snippetBusy = false
+            snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
+            snippetStrip.show(.loading)
+        }
         endCursor = nil
         if value != "space" { doubleSpace.reset() }
         let miniDelete = isMiniMode && value == "delete"
@@ -1226,6 +1266,10 @@ final class KeyboardViewController: UIInputViewController {
                 }
             }
             return
+        }
+        if handleSnippetLiteral(value) { return }
+        if !["123", "#+=", "ABC", "shift"].contains(value) {
+            snippetRaw.clear(); snippetMatch = nil; snippetReadGeneration = -1
         }
         if let editing {
             typingAssistance.clear()
@@ -1492,6 +1536,205 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+
+    // MARK: Local-only Snippets
+    private var snippetIsComposing: Bool { snippetComposing || typingPending || !pinyin.input.isEmpty || command != nil || dictationText != nil }
+    private var snippetDestination: SnippetDestination? {
+        guard !documentDetached else { return nil }
+        return SnippetDestination.capture(textDocumentProxy, composing: snippetIsComposing)
+    }
+    @objc func clearSnippetSession() {
+        snippetEpoch = UUID(); snippetTask?.cancel(); snippetTask = nil
+        snippetExpansion?.cancel(); snippetExpansion = nil; snippetBusy = false
+        snippetRaw.clear(); snippetMatch = nil; snippetReadGeneration = -1
+        snippetsOpen = false; snippetComposing = false; snippetDocumentID = nil; snippetAccess = nil
+        snippetStrip.show(.loading); snippetStrip.isHidden = true
+    }
+    private func checkSnippetPermission() {
+        if !documentDetached {
+            let document = KeyboardDocumentIdentity.read(textDocumentProxy)
+            if let previous = snippetDocumentID, previous != document {
+                clearSnippetSession()
+                if isViewLoaded { updateHeader() }
+            }
+            snippetDocumentID = document
+        }
+        guard clipPillsAllowed else {
+            // Polls must not continually dismiss the permission information layer.
+            guard snippetAccess != false else { return }
+            snippetAccess = false
+            snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
+            snippetEpoch = UUID(); snippetRaw.clear(); snippetMatch = nil; snippetBusy = false
+            snippetReadGeneration = -1
+            snippetStrip.show(.permission)
+            if isViewLoaded { updateHeader() }
+            return
+        }
+        let restored = snippetAccess == false
+        snippetAccess = true
+        if restored, snippetsOpen { openSnippets() }
+    }
+    private func snippetWillChange(_ input: UITextInput?) {
+        if let input { snippetComposing = input.markedTextRange != nil }
+        guard !insertingTypedText, snippetExpansion == nil else { return }
+        snippetContextRevision &+= 1
+        // Once a candidate has been published, even an away-and-back cursor
+        // notification invalidates it; matching text alone never revives it.
+        if snippetMatch != nil {
+            snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
+            snippetTask?.cancel(); snippetStrip.show(.loading); updateHeader()
+        }
+    }
+    private func snippetDocumentChanged(_ input: UITextInput?) {
+        if let input { snippetComposing = input.markedTextRange != nil }
+        checkSnippetPermission()
+        guard !insertingTypedText else { return }
+        if let expansion = snippetExpansion { expansion.changed(snippetDestination); return }
+        snippetContextRevision &+= 1
+        if snippetMatch != nil {
+            snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
+            snippetTask?.cancel(); snippetStrip.show(.loading); updateHeader(); return
+        }
+        snippetRaw.observe(snippetDestination)
+        refreshSnippetMatch()
+    }
+    private func handleSnippetLiteral(_ value: String) -> Bool {
+        guard !snippetIsComposing, let destination = snippetDestination else { return false }
+        if value == "delete", snippetRaw.canDelete(at: destination) {
+            snippetMatch = nil; snippetTask?.cancel(); snippetReadGeneration = -1
+            snippetRaw.deleted(from: destination)
+            insertingTypedText = true; textDocumentProxy.deleteBackward(); insertingTypedText = false
+            renderCandidates(); refreshSnippetMatch(); return true
+        }
+        let text = page == 0 && shifted ? value.uppercased() : value
+        guard value.count == 1, snippetRaw.wantsLiteral(text, at: destination) else { return false }
+        snippetMatch = nil; snippetTask?.cancel(); snippetReadGeneration = -1
+        typingAssistance.clear(); wordEdits.clear()
+        snippetRaw.inserted(text, from: destination)
+        insertingTypedText = true; textDocumentProxy.insertText(text); insertingTypedText = false
+        if page > 0, value == "@" { page = 0; buildKeys() }
+        if shifted && !capsLock { shifted = false; updateKeyLegends() }
+        renderCandidates(); refreshSnippetMatch()
+        return true
+    }
+    private func refreshSnippetMatch() {
+        guard !snippetsOpen, !snippetBusy, clipPillsAllowed,
+              snippetRaw.token.hasPrefix("@@"), snippetRaw.token.count > 2,
+              snippetReadGeneration != snippetRaw.generation else { return }
+        snippetReadGeneration = snippetRaw.generation
+        let generation = snippetRaw.generation, epoch = snippetEpoch, store = snippetStore
+        snippetTask?.cancel()
+        snippetTask = Task { [weak self] in
+            // Publish only after this turn's coalesced own writes and callbacks.
+            do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+            guard let self, !Task.isCancelled, self.snippetEpoch == epoch,
+                  self.snippetRaw.generation == generation, !self.snippetsOpen,
+                  let destination = self.snippetDestination,
+                  let token = self.snippetRaw.matchable(at: destination) else { return }
+            self.snippetRaw.observe(destination)
+            let result = await Task.detached { Result { try store.load() } }.value
+            guard !Task.isCancelled, self.snippetEpoch == epoch, self.clipPillsAllowed,
+                  !self.snippetsOpen, self.snippetRaw.generation == generation,
+                  self.snippetDestination == destination else { return }
+            guard case .success(let records) = result,
+                  let record = records.first(where: { $0.key == token.dropFirst(2).lowercased() }) else { return }
+            self.snippetMatch = (record, token, destination, generation)
+            self.snippetStrip.matching = true; self.snippetStrip.show(.data([record])); self.updateHeader()
+        }
+    }
+    func openSnippets() {
+        checkSnippetPermission()
+        snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
+        snippetBusy = false; snippetMatch = nil; snippetsOpen = true
+        snippetStrip.matching = false
+        candidatePanel.setExpanded(false)
+        snippetEpoch = UUID()
+        guard clipPillsAllowed else { snippetStrip.show(.permission); updateHeader(); return }
+        snippetStrip.show(.loading); updateHeader()
+        let epoch = snippetEpoch, store = snippetStore
+        snippetTask = Task { [weak self] in
+            let result = await Task.detached { Result { try store.load() } }.value
+            guard !Task.isCancelled, let self, self.snippetEpoch == epoch, self.snippetsOpen else { return }
+            guard self.clipPillsAllowed else { self.checkSnippetPermission(); return }
+            switch result {
+            case .success(let records): self.snippetStrip.show(records.isEmpty ? .empty : .data(records))
+            case .failure: self.snippetStrip.show(.failure)
+            }
+        }
+    }
+    func closeSnippets() {
+        snippetEpoch = UUID()
+        snippetTask?.cancel(); snippetExpansion?.cancel(); snippetExpansion = nil
+        snippetBusy = false; snippetsOpen = false; snippetMatch = nil
+        // Keep the raw segment literal, but suppress this generation's match.
+        snippetReadGeneration = snippetRaw.generation
+        snippetStrip.show(.loading); updateHeader()
+        UIAccessibility.post(notification: .layoutChanged, argument: helperScroll.snippet)
+    }
+    func selectSnippet(_ displayed: Snippet) {
+        guard !snippetBusy, Date().timeIntervalSince(snippetLastTap) >= 0.4 else { return }
+        guard clipPillsAllowed else { checkSnippetPermission(); return }
+        let match = snippetsOpen ? nil : snippetMatch
+        guard snippetsOpen || match != nil else { return }
+        guard let destination = snippetDestination else { snippetNotice(match == nil ? SnippetCopy.insertionFailure : SnippetCopy.unsafe); return }
+        if let match {
+            guard match.record.id == displayed.id, match.destination == destination,
+                  match.generation == snippetRaw.generation,
+                  snippetRaw.matchable(at: destination) == match.token else { snippetNotice(SnippetCopy.unsafe); return }
+        }
+        snippetLastTap = Date(); snippetBusy = true
+        let epoch = snippetEpoch, contextRevision = snippetContextRevision, store = snippetStore
+        snippetTask?.cancel()
+        snippetTask = Task { [weak self] in
+            let result = await Task.detached { Result { try store.load() } }.value
+            guard !Task.isCancelled, let self, self.snippetEpoch == epoch else { return }
+            defer { self.snippetBusy = false }
+            guard self.clipPillsAllowed else { self.checkSnippetPermission(); return }
+            guard case .success(let records) = result else {
+                self.snippetMatch = nil; self.snippetStrip.show(.failure); self.snippetsOpen = true; self.updateHeader(); return
+            }
+            guard let record = records.first(where: { $0.id == displayed.id }), record.revision == displayed.revision else {
+                self.snippetNotice(SnippetError.stale.message)
+                self.snippetTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    guard let self, self.snippetEpoch == epoch, self.snippetsOpen else { return }
+                    self.openSnippets() // Fresh again; refresh never inserts automatically.
+                }
+                return
+            }
+            guard self.snippetContextRevision == contextRevision, self.snippetDestination == destination else { self.snippetNotice(match == nil ? SnippetCopy.insertionFailure : SnippetCopy.unsafe); return }
+            self.typingAssistance.clear(); self.wordEdits.clear(); self.doubleSpace.reset(); self.pasteGeneration += 1
+            if let match {
+                guard self.snippetMatch?.generation == match.generation,
+                      self.snippetRaw.matchable(at: destination) == match.token else { self.snippetNotice(SnippetCopy.unsafe); return }
+                let expansion = SnippetExpansion(destination: destination)
+                self.snippetExpansion = expansion
+                let completed = await expansion.run(token: match.token, content: record.content, proxy: self.textDocumentProxy,
+                    permitted: { [weak self] in self?.clipPillsAllowed == true && self?.snippetEpoch == epoch && self?.documentDetached == false },
+                    composing: { [weak self] in self?.snippetIsComposing != false })
+                guard self.snippetEpoch == epoch else { return }
+                self.snippetExpansion = nil; self.snippetMatch = nil; self.snippetRaw.clear(); self.snippetReadGeneration = -1
+                if completed { self.playTapFeedback(); self.updateHeader() }
+                else { self.snippetNotice(SnippetCopy.unsafe) }
+            } else {
+                // Intentionally NOT completePaste: no code extraction, history,
+                // length limit, clipboard fallback or prefix deletion.
+                self.insertingTypedText = true
+                self.textDocumentProxy.insertText(record.content)
+                self.insertingTypedText = false
+                self.snippetRaw.clear(); self.snippetReadGeneration = -1
+                self.snippetStrip.show(records.isEmpty ? .empty : .data(records))
+                self.playTapFeedback() // No invented success/failure receipt.
+            }
+        }
+    }
+    private func snippetNotice(_ text: String) {
+        snippetMatch = nil; snippetRaw.clear(); snippetReadGeneration = -1
+        snippetsOpen = true; snippetStrip.matching = false
+        snippetStrip.show(.notice(text)); updateHeader()
+        UIAccessibility.post(notification: .announcement, argument: text)
+    }
+
     private func configureInputHelpers() {
         pasteConfiguration = UIPasteConfiguration(forAccepting: NSString.self)
         let strip = helperScroll
@@ -1510,6 +1753,11 @@ final class KeyboardViewController: UIInputViewController {
         strip.messages.accessibilityIdentifier = "keyboard.open-messages"
         strip.messages.accessibilityLabel = "Open Messages"
         strip.messages.addAction(UIAction { [weak self] _ in self?.openShortcut("sms:", name: "Messages") }, for: .touchUpInside)
+        strip.snippet.setShortcutImage(UIImage(systemName: "text.bubble", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)))
+        strip.snippet.iconView.tintColor = .label
+        strip.snippet.accessibilityIdentifier = "keyboard.snippet"
+        strip.snippet.accessibilityLabel = "Snippet"
+        strip.snippet.addAction(UIAction { [weak self] _ in self?.openSnippets() }, for: .touchUpInside)
         strip.history.accessibilityIdentifier = "keyboard.clipboard-history"
         strip.history.accessibilityLabel = "Clipboard History"
         strip.history.showsMenuAsPrimaryAction = true
@@ -1800,6 +2048,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func poll() {
+        checkSnippetPermission()
         guard !documentDetached, KeyboardDocumentIdentity.read(textDocumentProxy) != nil else { return }
         if let endCursor {
             endCursorSteps += 1

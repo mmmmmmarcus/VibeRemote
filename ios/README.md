@@ -6,6 +6,51 @@
 > `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
 
 
+## Local Snippets — 2026-11-27
+
+Settings → Keyboard → Snippet manages arbitrary abbreviation/content pairs. The
+native editor validates ASCII letters/digits/underscore and case-insensitive
+uniqueness, preserves the complete original Unicode text, and confirms unsaved
+cancellation and deletion. There are no product count or length limits. List and
+keyboard previews show only the first 20 graphemes; neither preview nor visual
+truncation changes saved or inserted content. Inactive app snapshots are covered.
+
+`Shared/SnippetStore.swift` owns an independent App Group `Snippets` directory:
+complete file protection, backup-exclusion metadata, cross-process `flock`,
+optimistic revisions, and protected temporary-file/atomic-rename commits. Nothing
+is added to preferences transfer, sync, clipboard/history, AI requests or logging.
+The main app does not need keyboard Full Access. Keyboard reads do; permission,
+loading and read errors never masquerade as an empty store or show stale values.
+
+The neutral toolbar entry follows Messages and precedes the unchanged clipboard
+pills. It replaces only the existing header with a fixed Back button and a
+virtualized horizontal strip. Manual taps insert the entire original once, never
+delete an abbreviation, and leave the strip open. Key geometry/modes are unchanged.
+
+An owned `@@` segment bypasses Pinyin/English correction. Exact case-insensitive
+lookup offers a candidate; only its explicit tap expands. Every tap rereads the
+store and validates id/revision, permission, document/session, original-case token,
+context, selection revision and composing state. Only tokens typed in the current
+verifiable keyboard session qualify; pre-existing/pasted tokens and ambiguous
+hosts fail closed. Destructive expansion acknowledges each single ASCII deletion
+before issuing another; there is no blind batch deletion, compensation, retry or
+pasteboard fallback. UIKit provides neither an atomic cross-process replace nor a
+success receipt: an interrupted host can leave a partially removed prefix, and
+physical-host validation remains necessary. Full original content is inserted
+once, without fabricated success/failure receipts.
+
+Builder verification: `runtest <project-id> --script app` includes the real-Rime
+integration, fake/coalescing/deferred proxy guards, native editor failures,
+privacy cover, backup/policy checks, unchanged key frames and offscreen light/dark
+PNG evidence at 375/402/440/466 points. `--script snippets-storage` runs 64 actual
+macOS worker processes against the production locking/validation/rename code,
+using `ios/scripts/test-snippet-concurrency.sh`, with only iOS-only protection calls adapted for macOS. It checks one concurrent
+case-insensitive winner and no lost independent writes. This is not device Data
+Protection evidence. Simulator cannot report protection classes; locked-device
+behavior, actual Full Access/extension host transitions, VoiceOver/Switch Control
+feel and physical-host proxy behavior still require device checks. No shared
+simulator, release upload or version bump is part of this feature.
+
 ## Chinese multi-error suggestions — 2026-11-27
 
 Continuous mistyped Pinyin can now offer optional whole-input Chinese candidates,

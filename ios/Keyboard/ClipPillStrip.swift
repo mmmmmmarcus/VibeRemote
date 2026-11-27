@@ -4,10 +4,10 @@ import UIKit
 #endif
 
 /// Symbol-page strip (designer spec 2026-11-27): 1Password → Messages → copied
-/// code → up to five clips → Clipboard History, one horizontally scrolling row
+/// Snippet → copied code → up to five clips → Clipboard History, one horizontally scrolling row
 /// with no fill of its own and a 24pt trailing alpha fade.
 final class ClipPillStrip: UIView {
-    static let stripHeight: CGFloat = 42
+    static let stripHeight: CGFloat = 44
     static let pillHeight: CGFloat = 32
     static let leadingInset: CGFloat = 8
     static let spacing: CGFloat = 6
@@ -17,6 +17,7 @@ final class ClipPillStrip: UIView {
     let scroll = ClipPillScrollView()
     let onePassword = ClipPillButton(shortcutFill: UIColor(red: 0x05 / 255.0, green: 0x72 / 255.0, blue: 0xEC / 255.0, alpha: 1))
     let messages = ClipPillButton(shortcutFill: UIColor(red: 0x34 / 255.0, green: 0xC7 / 255.0, blue: 0x59 / 255.0, alpha: 1))
+    let snippet = ClipPillButton(shortcutFill: .systemGray5)
     let history = ClipPillButton(historyIcon: ())
     private(set) var clips: [ClipPill] = []
     private(set) var clipButtons: [ClipPillButton] = []
@@ -24,7 +25,7 @@ final class ClipPillStrip: UIView {
     var onSelect: ((ClipPill) -> Void)?
 
     /// Every pill in visual order.
-    var pills: [ClipPillButton] { [onePassword, messages] + clipButtons + [history] }
+    var pills: [ClipPillButton] { [onePassword, messages, snippet] + clipButtons + [history] }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -43,7 +44,7 @@ final class ClipPillStrip: UIView {
         trailingFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
         scroll.onLayout = { [weak self] in self?.updateTrailingFade() }
         addSubview(scroll)
-        for pill in [onePassword, messages, history] { scroll.addSubview(pill) }
+        for pill in [onePassword, messages, snippet, history] { scroll.addSubview(pill) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -100,7 +101,7 @@ final class ClipPillScrollView: UIScrollView {
     override func touchesShouldCancel(in view: UIView) -> Bool { true }
 }
 
-/// A 32pt capsule, vertically centred in a full-height (42pt) tap target.
+/// A 32pt capsule, vertically centred in a full-height (44pt) tap target.
 final class ClipPillButton: UIButton {
     enum Style { case shortcut, clip, history }
     let style: Style

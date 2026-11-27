@@ -91,6 +91,7 @@ targets:
       - Keyboard/CandidateButton.swift
       - Keyboard/CandidatePanel.swift
       - Keyboard/ClipPillStrip.swift
+      - Keyboard/SnippetStrip.swift
       - Keyboard/KeyboardTouchSurface.swift
       - Keyboard/KeyPreviewView.swift
       - Keyboard/SymbolAlternativesView.swift
