@@ -9,7 +9,7 @@ import UIKit
     var onSelect: ((String) -> Void)?
     var onClose: (() -> Void)?
     private let grid: UICollectionView
-    private let categoryScroll = UIScrollView()
+    private let categoryScroll = EmojiCategoryScrollView()
     private let categories = UIStackView()
     private let back = UIButton(type: .system)
     private let bottomFade = CAGradientLayer()
@@ -19,6 +19,10 @@ import UIKit
     private var visible: [KeyboardEmoji] = []
     private var pressed: String?
     private var categoryButtons: [UIButton] = []
+    private var gridSize: CGSize?
+    #if KEYBOARD_TESTING
+    private(set) var testingGridInvalidations = 0
+    #endif
     private static let symbols = ["face.smiling", "hand.wave", "leaf", "fork.knife", "airplane", "soccerball", "lightbulb", "number", "flag"]
 
     override init(frame: CGRect) {
@@ -31,6 +35,8 @@ import UIKit
         backgroundColor = .clear
         categories.axis = .horizontal; categories.spacing = 3
         categoryScroll.showsHorizontalScrollIndicator = false
+        categoryScroll.accessibilityIdentifier = "emoji.categories"
+        categoryScroll.canCancelContentTouches = true
         categoryScroll.addSubview(categories)
         for (index, name) in EmojiCatalog.categories.enumerated() {
             let button = UIButton(type: .system)
@@ -85,7 +91,13 @@ import UIKit
         categories.distribution = .equalSpacing; categoryScroll.contentSize = categories.bounds.size
         grid.frame = CGRect(x: 0, y: 48, width: bounds.width, height: max(0, bounds.height - 48))
         updateFade()
-        grid.collectionViewLayout.invalidateLayout()
+        if gridSize != grid.bounds.size {
+            gridSize = grid.bounds.size
+            grid.collectionViewLayout.invalidateLayout()
+            #if KEYBOARD_TESTING
+            testingGridInvalidations += 1
+            #endif
+        }
     }
     private func updateFade() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -132,6 +144,12 @@ import UIKit
         let glyph = visible[indexPath.item].glyph
         guard pressed == glyph else { return }; pressed = nil; onSelect?(glyph)
     }
+}
+
+/// Let a drag that starts on a category button become native scrolling. UIKit
+/// cancels the button's tracking, so releasing after a drag cannot select it.
+@MainActor final class EmojiCategoryScrollView: UIScrollView {
+    override func touchesShouldCancel(in view: UIView) -> Bool { view is UIControl || super.touchesShouldCancel(in: view) }
 }
 
 @MainActor private final class EmojiCell: UICollectionViewCell {
