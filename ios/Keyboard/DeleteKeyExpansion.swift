@@ -22,7 +22,7 @@ import UIKit
     private weak var source: KeyControl?
     private weak var neighbor: KeyControl?
     private let cap = UIView()
-    private let broom = UIImageView(image: UIImage(named: "DeleteBroom"))
+    private let broom = UIImageView(image: UIImage(systemName: "trash"))
     private let deleteIcon = UIImageView()
     private let neighborFace: ModeKeyFace?
     private let neighborFrame: CGRect
@@ -50,7 +50,7 @@ import UIKit
         if let neighborFace { addSubview(neighborFace) }
         addSubview(cap)
         for icon in [broom, deleteIcon] { icon.contentMode = .scaleAspectFit; addSubview(icon) }
-        broom.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 21, weight: .regular)
+        broom.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(.preferringMonochrome())
         broom.tintColor = .secondaryLabel
         broom.accessibilityIdentifier = "keyboard.delete-broom"
         broom.frame = CGRect(x: geometry.broomCenter.x - 12, y: bounds.midY - 12, width: 24, height: 24)

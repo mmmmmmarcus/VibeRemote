@@ -42,12 +42,17 @@ import UIKit
     }
 
     func testSweepReachesBroomAcrossDuoOrientationsMiniSymbolsAndTablet() async throws {
-        XCTAssertEqual(UIImage(named: "DeleteBroom")?.isSymbolImage, true, "The custom broom must compile as an SF symbol asset")
+        XCTAssertEqual(UIImage(systemName: "trash")?.isSymbolImage, true)
         for (width, landscape, tablet): (CGFloat, Bool, Bool) in [(375,false,false),(466,false,false),(655,false,false),(529,true,false),(802,true,false),(834,false,true),(1194,true,true)] {
             for mini in [false, true] {
                 try await withKeyboard(width: width, landscape: landscape, mini: mini, tablet: tablet) { keyboard, proxy in
                     let delete = try key("delete", keyboard), original = delete.convert(delete.bounds, to: keyboard.view)
                     let source = try hold(keyboard), visual = try XCTUnwrap(expansion(keyboard))
+                    let icon = try XCTUnwrap(descendants(visual).first { $0.accessibilityIdentifier == "keyboard.delete-broom" } as? UIImageView)
+                    XCTAssertEqual(icon.image?.isSymbolImage, true)
+                    XCTAssertEqual(icon.image?.pngData(), UIImage(systemName: "trash")?.pngData(), "Use the Apple trash symbol, not custom artwork")
+                    XCTAssertEqual(icon.preferredSymbolConfiguration, UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(.preferringMonochrome()))
+                    XCTAssertFalse(visual.isUserInteractionEnabled, "The overlay must never become tap-to-clear")
                     XCTAssertEqual(delete.convert(delete.bounds, to: keyboard.view), original)
                     XCTAssertEqual(visual.frame.maxX, original.maxX, accuracy: 0.01)
                     XCTAssertTrue(keyboard.view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(visual.frame))
@@ -132,6 +137,14 @@ import UIKit
                         context.fill(keyboard.view.bounds); keyboard.view.layer.render(in: context.cgContext)
                     }
                     panels.append(("\(Int(width)) pt · \(landscape ? "Landscape" : "Portrait") · \(mini ? "Mini" : "Full") · \(style == .light ? "Light" : "Dark")",image))
+                    let name = "delete-trash-\(Int(width))-\(mini ? "mini" : "full")-\(style == .light ? "light" : "dark")"
+                    let png = try XCTUnwrap(image.pngData())
+                    let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                    attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+                    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                    let directory = root.appendingPathComponent(".airbuild/artifacts/phone-layout")
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try png.write(to: directory.appendingPathComponent("\(name).png"))
                     source.cancelPress()
                 }
             }

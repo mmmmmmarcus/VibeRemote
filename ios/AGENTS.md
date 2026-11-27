@@ -24,8 +24,9 @@ Extended Delete (2026-11-22): after the direct Delete hold threshold, grow a
 visual-only surface left over its adjacent same-row key (M on phone letters).
 Keep the real key frames and hit targets unchanged. The broom center is the
 latched clear-all target; reaching it clears once, and release never deletes again.
-The current SDK has no built-in broom: `DeleteBroom.symbolset` is original artwork
-compiled as a custom SF symbol, not a system-provided icon. Keep the 180 ms reveal,
+The clear-all target uses the system `trash` SF Symbol at 20pt regular,
+monochrome in the existing foreground colors (designer update 2026-11-27).
+Keep the 180 ms reveal,
 120 ms dismissal and Reduce Motion support. Restore borrowed key paint on release,
 cancel, second-key input, field changes, rotation, mode changes and dismissal.
 Use actual geometry in continuous/split, portrait/landscape and symbol layouts;
