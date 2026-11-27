@@ -113,6 +113,7 @@ import UIKit
         host.backgroundColor = UIColor(white: 0.16, alpha: 1)
         host.overrideUserInterfaceStyle = .dark
         host.layoutIfNeeded()
+        for view in descendants(host) { view.layoutIfNeeded() }
         let format = UIGraphicsImageRendererFormat(); format.scale = 2
         let image = UIGraphicsImageRenderer(bounds: host.bounds, format: format).image { ctx in host.layer.render(in: ctx.cgContext) }
         let png = try XCTUnwrap(image.pngData())
@@ -146,8 +147,12 @@ import UIKit
                 keyboard.openSnippets()
                 try await wait { keyboard.snippetStrip.records.first?.id == snippet.id }
                 keyboard.view.layoutIfNeeded(); assertContained(keyboard)
-                keyboard.snippetStrip.layoutIfNeeded(); keyboard.snippetStrip.collection.layoutIfNeeded()
-                XCTAssertFalse(keyboard.snippetStrip.collection.visibleCells.isEmpty, "Evidence must include rendered Snippet cells")
+                try await wait {
+                    keyboard.snippetStrip.layoutIfNeeded(); keyboard.snippetStrip.collection.layoutIfNeeded()
+                    return !keyboard.snippetStrip.collection.visibleCells.isEmpty
+                }
+                XCTAssertFalse(keyboard.snippetStrip.collection.visibleCells.isEmpty,
+                               "Snippet evidence at \(width): bounds=\(keyboard.snippetStrip.collection.bounds), items=\(keyboard.snippetStrip.collection.numberOfItems(inSection: 0)), content=\(keyboard.snippetStrip.collection.contentSize)")
                 XCTAssertTrue(keyboard.view.bounds.contains(keyboard.snippetStrip.frame))
                 try capture(keyboard, host: host, name: "duo-host-\(Int(width))-216-snippets")
                 let before = proxy.editor.text ?? ""

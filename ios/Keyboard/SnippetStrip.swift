@@ -109,7 +109,13 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
         messageScroll.contentSize = message.frame.size
         if layoutSize != collection.bounds.size {
             layoutSize = collection.bounds.size
-            collection.collectionViewLayout.invalidateLayout()
+            // A height change must discard cached delegate item sizes too. A
+            // plain invalidation can retain 44pt cells in a 42.333pt landscape
+            // header, leaving its nonempty data source with no visible cells.
+            let context = UICollectionViewFlowLayoutInvalidationContext()
+            context.invalidateFlowLayoutDelegateMetrics = true
+            context.invalidateFlowLayoutAttributes = true
+            collection.collectionViewLayout.invalidateLayout(with: context)
             #if KEYBOARD_TESTING
             testingSizeInvalidations += 1
             #endif

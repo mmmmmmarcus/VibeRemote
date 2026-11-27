@@ -69,6 +69,18 @@ import UIKit
         XCTAssertTrue(strip.collection.canCancelContentTouches)
     }
 
+    func testSnippetCellsRecomputeHeightAcrossPortraitLandscapeRotation() throws {
+        let strip = SnippetStrip(frame: CGRect(x: 0, y: 0, width: 669, height: 44))
+        strip.show(.data([Snippet(id: UUID(), revision: UUID(), abbreviation: "reply", content: "Synthetic fixture")]))
+        for (width, height): (CGFloat, CGFloat) in [(669, 44), (951, 42.333), (669, 44)] {
+            strip.frame.size = CGSize(width: width, height: height)
+            strip.layoutIfNeeded(); strip.collection.layoutIfNeeded()
+            let attributes = try XCTUnwrap(strip.collection.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: 0, section: 0)))
+            XCTAssertEqual(attributes.frame.height, height, accuracy: 0.01, "Flow layout must discard cached portrait delegate sizes")
+            XCTAssertFalse(strip.collection.visibleCells.isEmpty)
+        }
+    }
+
     func testRawPrefixBypassesRealRimeWithoutAutomaticExpansionAndExplicitTapWorks() async throws {
         for coalesced in [false, true] {
             try await withKeyboard(coalesced: coalesced) { keyboard, proxy, _, record in
