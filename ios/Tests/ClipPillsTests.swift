@@ -158,7 +158,9 @@ import UIKit
             let builds = keyboard.testingClipModelBuilds, layouts = keyboard.testingHeaderLayoutRequests
             let buttons = strip.clipButtons
             strip.scroll.contentOffset.x = 40
+            keyboard.view.layoutIfNeeded(); strip.scroll.layoutIfNeeded()
             for _ in 0..<100 { keyboard.testingUpdateHeader() }
+            XCTAssertFalse(keyboard.view.layer.needsLayout(), "Unchanged polling must not dirty the root layout")
             XCTAssertEqual(keyboard.testingClipModelBuilds, builds)
             XCTAssertEqual(keyboard.testingHeaderLayoutRequests, layouts)
             XCTAssertEqual(strip.clipButtons.map(ObjectIdentifier.init), buttons.map(ObjectIdentifier.init))

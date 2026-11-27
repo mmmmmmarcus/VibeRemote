@@ -146,6 +146,8 @@ import UIKit
                 keyboard.openSnippets()
                 try await wait { keyboard.snippetStrip.records.first?.id == snippet.id }
                 keyboard.view.layoutIfNeeded(); assertContained(keyboard)
+                keyboard.snippetStrip.layoutIfNeeded(); keyboard.snippetStrip.collection.layoutIfNeeded()
+                XCTAssertFalse(keyboard.snippetStrip.collection.visibleCells.isEmpty, "Evidence must include rendered Snippet cells")
                 XCTAssertTrue(keyboard.view.bounds.contains(keyboard.snippetStrip.frame))
                 try capture(keyboard, host: host, name: "duo-host-\(Int(width))-216-snippets")
                 let before = proxy.editor.text ?? ""
