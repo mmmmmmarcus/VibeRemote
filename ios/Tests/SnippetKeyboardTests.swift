@@ -77,6 +77,7 @@ import UIKit
             strip.layoutIfNeeded(); strip.collection.layoutIfNeeded()
             let attributes = try XCTUnwrap(strip.collection.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: 0, section: 0)))
             XCTAssertEqual(attributes.frame.height, height, accuracy: 0.01, "Flow layout must discard cached portrait delegate sizes")
+            XCTAssertEqual(strip.collection.adjustedContentInset, .zero)
             XCTAssertFalse(strip.collection.visibleCells.isEmpty)
         }
     }

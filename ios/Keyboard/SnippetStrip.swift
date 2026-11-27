@@ -50,6 +50,9 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
         accessibilityIdentifier = "keyboard.snippets"
         collection.backgroundColor = .clear; collection.dataSource = self; collection.delegate = self
         collection.showsHorizontalScrollIndicator = false; collection.alwaysBounceVertical = false
+        // This is already inside the keyboard's allocated header. Inheriting a
+        // window safe-area inset can consume the entire short landscape strip.
+        collection.contentInsetAdjustmentBehavior = .never
         collection.register(SnippetCell.self, forCellWithReuseIdentifier: "snippet")
         collection.delaysContentTouches = false; collection.canCancelContentTouches = true
         for effect in [collection.topEdgeEffect, collection.bottomEdgeEffect, collection.leftEdgeEffect, collection.rightEdgeEffect] { effect.isHidden = true }
@@ -109,9 +112,7 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
         messageScroll.contentSize = message.frame.size
         if layoutSize != collection.bounds.size {
             layoutSize = collection.bounds.size
-            // A height change must discard cached delegate item sizes too. A
-            // plain invalidation can retain 44pt cells in a 42.333pt landscape
-            // header, leaving its nonempty data source with no visible cells.
+            // Width/height changes also invalidate cached delegate item sizes.
             let context = UICollectionViewFlowLayoutInvalidationContext()
             context.invalidateFlowLayoutDelegateMetrics = true
             context.invalidateFlowLayoutAttributes = true

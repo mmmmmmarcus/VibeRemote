@@ -151,6 +151,7 @@ import UIKit
                     keyboard.snippetStrip.layoutIfNeeded(); keyboard.snippetStrip.collection.layoutIfNeeded()
                     return !keyboard.snippetStrip.collection.visibleCells.isEmpty
                 }
+                XCTAssertEqual(keyboard.snippetStrip.collection.adjustedContentInset, .zero, "A window safe area must not be applied again inside the allocated keyboard header")
                 XCTAssertFalse(keyboard.snippetStrip.collection.visibleCells.isEmpty,
                                "Snippet evidence at \(width): bounds=\(keyboard.snippetStrip.collection.bounds), items=\(keyboard.snippetStrip.collection.numberOfItems(inSection: 0)), content=\(keyboard.snippetStrip.collection.contentSize)")
                 XCTAssertTrue(keyboard.view.bounds.contains(keyboard.snippetStrip.frame))
