@@ -28,6 +28,12 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
     let collection: UICollectionView
     private(set) var state: SnippetStripState = .loading
     private var previousState: SnippetStripState?
+    private var renderedMatching: Bool?
+    private var layoutSize: CGSize?
+    #if KEYBOARD_TESTING
+    private(set) var testingReloads = 0
+    private(set) var testingSizeInvalidations = 0
+    #endif
     private let configuredCells = NSHashTable<SnippetCell>.weakObjects()
     var matching = false
     var onBack: (() -> Void)?
@@ -62,6 +68,14 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func show(_ state: SnippetStripState) {
+        // Repeated refreshes must not replace cells or disturb native scrolling.
+        // Matching changes still refresh accessibility; state changes still wipe
+        // every configured cell (including the reuse pool) for privacy.
+        guard state != self.state || renderedMatching != matching || previousState != nil else { return }
+        renderedMatching = matching
+        #if KEYBOARD_TESTING
+        testingReloads += 1
+        #endif
         // UICollectionView may keep offscreen cells in its reuse pool. Wipe
         // their preview/activation state too, not just the current data array.
         for cell in configuredCells.allObjects { cell.clear() }
@@ -93,7 +107,13 @@ final class SnippetStrip: UIView, UICollectionViewDataSource, UICollectionViewDe
         let size = message.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: bounds.height))
         message.frame = CGRect(x: 0, y: 0, width: size.width + 8, height: bounds.height)
         messageScroll.contentSize = message.frame.size
-        collection.collectionViewLayout.invalidateLayout()
+        if layoutSize != collection.bounds.size {
+            layoutSize = collection.bounds.size
+            collection.collectionViewLayout.invalidateLayout()
+            #if KEYBOARD_TESTING
+            testingSizeInvalidations += 1
+            #endif
+        }
     }
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { records.count }
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {

@@ -59,6 +59,18 @@ final class KeyboardViewController: UIInputViewController {
     private var endCursor: CursorDragSession?
     private var endCursorSteps = 0
     private let helperScroll = ClipPillStrip()
+    private struct ClipInputs: Equatable {
+        let history: [String]
+        let code: String?
+        let available: Bool
+        let source: String?
+    }
+    private var clipInputs: ClipInputs?
+    #if KEYBOARD_TESTING
+    private(set) var testingClipModelBuilds = 0
+    private(set) var testingHeaderLayoutRequests = 0
+    func testingUpdateHeader() { updateHeader() }
+    #endif
     let snippetStrip = SnippetStrip()
     var snippetStore = SnippetStore.shared
     private(set) var snippetsOpen = false
@@ -316,6 +328,7 @@ final class KeyboardViewController: UIInputViewController {
         currentKey?.cancelPress(); currentKey = nil
         activationRequest = nil; offersHostLaunch = false
         resetComposition(); timer?.invalidate(); timer = nil; super.viewWillDisappear(animated)
+        clipInputs = nil
     }
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
@@ -816,6 +829,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateHeader() {
+        let oldGeometry = [snippetStrip.isHidden, candidatePanel.isHidden, candidatePanel.isExpanded, helperScroll.isHidden]
         let voiceVisible = command != nil || activationRequest != nil || Date() < errorUntil
         setRecordingAppearance(command?.phase == .recording, voiceVisible: voiceVisible)
         let showSnippets = (snippetsOpen || snippetMatch != nil) && !showingEmoji && !isMiniMode && !voiceVisible && cursorKey == nil
@@ -825,7 +839,12 @@ final class KeyboardViewController: UIInputViewController {
         let hidePills = showingEmoji || isMiniMode || cursorKey != nil || voiceVisible || candidatePanel.isExpanded
         helperScroll.isHidden = showSnippets || hidePills || page == 0 || !candidatePanel.isHidden
         refreshCopiedCodeIndicator()
-        view.setNeedsLayout()
+        if oldGeometry != [snippetStrip.isHidden, candidatePanel.isHidden, candidatePanel.isExpanded, helperScroll.isHidden] {
+            view.setNeedsLayout()
+            #if KEYBOARD_TESTING
+            testingHeaderLayoutRequests += 1
+            #endif
+        }
         status.textColor = .label
         let ready = hasFullAccess && voiceReady
         launchLink?.view.isHidden = ready || !voiceVisible || command != nil || activationRequest != nil || !offersHostLaunch
@@ -1914,10 +1933,19 @@ final class KeyboardViewController: UIInputViewController {
         return hasFullAccess
     }
     func refreshCopiedCodeIndicator() {
-        guard !helperScroll.isHidden else { return } // Rebuilt when the strip is shown.
-        guard clipPillsAllowed else { helperScroll.show([]); return }
-        helperScroll.show(ClipPill.pills(history: clipboardHistory.items, code: copiedCodes.observedCode,
-                                         codeAvailable: copiedCodes.isAvailable, codeSource: copiedCodes.observedSource))
+        // Check permission even while hidden; never keep an extra cached copy
+        // after access is revoked. Availability is read afresh to retain expiry.
+        guard clipPillsAllowed else { clipInputs = nil; helperScroll.show([]); return }
+        guard !helperScroll.isHidden else { clipInputs = nil; return }
+        let inputs = ClipInputs(history: clipboardHistory.items, code: copiedCodes.observedCode,
+                                available: copiedCodes.isAvailable, source: copiedCodes.observedSource)
+        guard inputs != clipInputs else { return }
+        clipInputs = inputs
+        #if KEYBOARD_TESTING
+        testingClipModelBuilds += 1
+        #endif
+        helperScroll.show(ClipPill.pills(history: inputs.history, code: inputs.code,
+                                         codeAvailable: inputs.available, codeSource: inputs.source))
     }
     func pasteCopiedCode() {
         guard let request = beginPaste(codeOnly: true) else { return }

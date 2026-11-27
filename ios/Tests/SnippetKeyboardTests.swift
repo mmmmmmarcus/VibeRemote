@@ -43,6 +43,32 @@ import UIKit
         for _ in 0..<2 { try tap("123", keyboard); try tap("@", keyboard) }
         for character in suffix { try tap(String(character), keyboard) }
     }
+    func testUnchangedSnippetRefreshPreservesScrollingButResizeAndPrivacyStillUpdate() {
+        let strip = SnippetStrip(frame: CGRect(x: 0, y: 0, width: 375, height: 44))
+        let records = (0..<12).map { Snippet(id: UUID(), revision: UUID(), abbreviation: "reply\($0)", content: "Synthetic fixture \($0)") }
+        strip.show(.data(records)); strip.layoutIfNeeded(); strip.collection.layoutIfNeeded()
+        strip.collection.contentOffset.x = 50
+        let reloads = strip.testingReloads, invalidations = strip.testingSizeInvalidations
+        for _ in 0..<100 { strip.show(.data(records)); strip.setNeedsLayout(); strip.layoutIfNeeded() }
+        XCTAssertEqual(strip.testingReloads, reloads)
+        XCTAssertEqual(strip.testingSizeInvalidations, invalidations)
+        XCTAssertEqual(strip.collection.contentOffset.x, 50)
+        strip.frame.size.width = 669; strip.layoutIfNeeded()
+        XCTAssertEqual(strip.testingSizeInvalidations, invalidations + 1)
+        strip.matching = true; strip.show(.data(records))
+        XCTAssertEqual(strip.testingReloads, reloads + 1, "Matching accessibility must refresh")
+        strip.collection.layoutIfNeeded()
+        let oldCells = strip.collection.visibleCells
+        strip.show(.permission)
+        XCTAssertTrue(strip.records.isEmpty)
+        for cell in oldCells {
+            XCTAssertNil(cell.accessibilityLabel)
+            XCTAssertFalse(cell.accessibilityActivate(), "Revocation wipes old activation closures")
+        }
+        XCTAssertEqual(strip.collection.decelerationRate, .normal)
+        XCTAssertTrue(strip.collection.canCancelContentTouches)
+    }
+
     func testRawPrefixBypassesRealRimeWithoutAutomaticExpansionAndExplicitTapWorks() async throws {
         for coalesced in [false, true] {
             try await withKeyboard(coalesced: coalesced) { keyboard, proxy, _, record in

@@ -143,6 +143,55 @@ import UIKit
         keyboard.refreshCopiedCodeIndicator(); keyboard.view.layoutIfNeeded()
     }
 
+    func testRepeatedHeaderRefreshSkipsModelsAndGeometryButKeepsExpiryAndPermission() async throws {
+        try await withSavedPreferences {
+            let (keyboard, _) = await makeKeyboard()
+            defer { keyboard.viewWillDisappear(false) }
+            try await openSymbols(keyboard)
+            let strip = try pillStrip(keyboard)
+            for n in 0..<5 { keyboard.clipboardHistory.record(String(repeating: "a", count: 19_990) + String(n)) }
+            var date = Date(timeIntervalSince1970: 1000)
+            let board = TestCodeClipboard()
+            keyboard.copiedCodes = CopiedCodeMonitor(clipboard: board, defaults: nil, now: { date }, bootTime: { 100 })
+            keyboard.copiedCodes.refresh(); board.copy("Your code: 482913"); keyboard.copiedCodes.refresh()
+            keyboard.testingUpdateHeader(); keyboard.view.layoutIfNeeded(); strip.layoutIfNeeded()
+            let builds = keyboard.testingClipModelBuilds, layouts = keyboard.testingHeaderLayoutRequests
+            let buttons = strip.clipButtons
+            strip.scroll.contentOffset.x = 40
+            for _ in 0..<100 { keyboard.testingUpdateHeader() }
+            XCTAssertEqual(keyboard.testingClipModelBuilds, builds)
+            XCTAssertEqual(keyboard.testingHeaderLayoutRequests, layouts)
+            XCTAssertEqual(strip.clipButtons.map(ObjectIdentifier.init), buttons.map(ObjectIdentifier.init))
+            XCTAssertEqual(strip.scroll.contentOffset.x, 40)
+            date.addTimeInterval(121); keyboard.testingUpdateHeader()
+            XCTAssertFalse(strip.clips.contains(where: \.isCode), "Expiry still invalidates the cache")
+            XCTAssertEqual(keyboard.testingClipModelBuilds, builds + 1)
+            keyboard.testingFullAccess = false; keyboard.testingUpdateHeader()
+            XCTAssertTrue(strip.clips.isEmpty)
+            keyboard.testingFullAccess = true; keyboard.testingUpdateHeader()
+            XCTAssertEqual(strip.clips.count, 5)
+            keyboard.clipboardHistory.clear(); keyboard.testingUpdateHeader()
+            XCTAssertTrue(strip.clips.isEmpty, "Clearing history cannot leave cached pills")
+        }
+    }
+
+    func testNativeScrollCancellationPolicyDoesNotActivatePills() {
+        let strip = ClipPillStrip(frame: CGRect(x: 0, y: 0, width: 375, height: 44))
+        strip.show([ClipPill(clip: "Synthetic clip")])
+        var activations = 0
+        strip.onSelect = { _ in activations += 1 }
+        XCTAssertEqual(strip.scroll.decelerationRate, .normal)
+        XCTAssertTrue(strip.scroll.canCancelContentTouches)
+        for pill in strip.pills {
+            XCTAssertTrue(strip.scroll.touchesShouldCancel(in: pill))
+            pill.cancelTracking(with: nil)
+        }
+        XCTAssertEqual(activations, 0, "Cancellation, unlike touchUpInside, never inserts")
+        strip.clipButtons[0].sendActions(for: .touchUpInside)
+        XCTAssertEqual(activations, 1)
+        // This checks native policy, not a synthesized drag or real-device inertia.
+    }
+
     func testStripOrderGeometryAndColorsAtEveryWidth() async throws {
         try await withSavedPreferences {
             for width: CGFloat in [375, 402, 440, 466] {
