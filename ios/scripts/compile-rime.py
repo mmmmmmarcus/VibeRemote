@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import runpy
 
 root = Path(__file__).resolve().parents[1]
 resources = root / 'Typing/Resources/Rime'
@@ -38,6 +39,7 @@ with tempfile.TemporaryDirectory(prefix='vvhisper-rime-') as temporary:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(user / 'build', destination / 'build')
+    runpy.run_path(str(root / 'scripts/compile-typo-index.py'))['compile_typo_index'](resources, destination)
     shutil.copytree(resources / 'Licenses', destination / 'Licenses')
     for name in ('PinyinSyllables.txt', 'EnglishWords.txt', 'Pinyin-LICENSE.txt', 'RimeIce-LICENSE.txt', 'VvhisperLexicon-LICENSE.txt',
                  'dictionary-provenance.json'):

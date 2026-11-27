@@ -7,6 +7,7 @@ final class PinyinEngine: @unchecked Sendable {
     static let shared = PinyinEngine()
     enum Action: Sendable {
         case prepare, key(Int32), choose(Int), chooseAbsolute(Int), literal, english(String), clear, nextPage, previousPage
+        case correction(text: String, input: String, revision: Int)
     }
     struct Snapshot: Sendable {
         var input = ""
@@ -14,6 +15,7 @@ final class PinyinEngine: @unchecked Sendable {
         var commitPreview = ""
         var candidates: [String] = []
         var corrections: [String] = []
+        var suggestions: [String] = []
         var committed = ""
         var page = 0
         var isLastPage = true
@@ -31,15 +33,39 @@ final class PinyinEngine: @unchecked Sendable {
     private var correctionSession: RimeSessionId = 0
     private var correctedInput = ""
     private var correctionCache: [String] = []
+    private var suggestionCache: [String] = []
+    private var typoIndex: PinyinTypoIndex?
+    // Only this cancellation counter crosses queues; Rime and caches stay serial.
+    private let requestLock = NSLock()
+    private var requestGeneration: UInt64 = 0
     private var initialized = false
     private var strings: [UnsafeMutablePointer<CChar>] = []
     private var startupError: String?
     private var revision = 0
 
+    @discardableResult
+    func cancelCorrectionSearch() -> UInt64 {
+        requestLock.lock(); defer { requestLock.unlock() }
+        requestGeneration &+= 1
+        return requestGeneration
+    }
+
+    private func isCurrent(_ request: UInt64) -> Bool {
+        requestLock.lock(); defer { requestLock.unlock() }
+        return requestGeneration == request
+    }
+
     func perform(_ action: Action, completion: @escaping @MainActor @Sendable (Snapshot) -> Void) {
+        let request = cancelCorrectionSearch()
         queue.async { [self] in
-            let result = process(action)
-            Task { @MainActor in completion(result) }
+            let result = process(action, request: request)
+            Task { @MainActor in
+                // Preserve every ordered keystroke/commit callback, but never let
+                // a cancelled search publish suggestions after a newer request.
+                var delivered = result
+                if !self.isCurrent(request) { delivered.suggestions = [] }
+                completion(delivered)
+            }
         }
     }
 
@@ -102,6 +128,7 @@ final class PinyinEngine: @unchecked Sendable {
                 startupError = "Pinyin could not start. Use English or reopen the keyboard."; return
             }
             api.set_option!(session, "ascii_mode", 0)
+            typoIndex = PinyinTypoIndex(url: resources.appendingPathComponent("PinyinTypo.bin"))
             correctionSession = api.create_session!()
             if correctionSession != 0 {
                 _ = api.select_schema!(correctionSession, "vvhisper_pinyin")
@@ -112,11 +139,12 @@ final class PinyinEngine: @unchecked Sendable {
         }
     }
 
-    private func process(_ action: Action) -> Snapshot {
+    private func process(_ action: Action, request: UInt64) -> Snapshot {
         initialize()
         if let startupError { return Snapshot(error: startupError) }
         let api = rime_get_api()!.pointee
         var literal = ""
+        let previousRevision = revision
         if case .prepare = action {} else { revision &+= 1 }
         switch action {
         case .prepare: break
@@ -127,6 +155,12 @@ final class PinyinEngine: @unchecked Sendable {
         case .english(let word):
             literal = word
             api.clear_composition!(session)
+        case .correction(let text, let input, let expected):
+            let current = api.get_input!(session).map { String(cString: $0) } ?? ""
+            if previousRevision == expected, current == input, suggestionCache.contains(text) {
+                literal = text
+                api.clear_composition!(session)
+            }
         case .key(let key):
             let count = api.get_input!(session).map { strlen($0) } ?? 0
             // Bound composition memory; backspace/space remain available at the cap.
@@ -163,9 +197,46 @@ final class PinyinEngine: @unchecked Sendable {
         if snapshot.input != correctedInput {
             correctedInput = snapshot.input
             correctionCache = correctedCandidates(for: snapshot.input)
+            suggestionCache = []
+            if isCurrent(request), let typoIndex {
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.060
+                let search = typoIndex.search(snapshot.input, cancelled: { !self.isCurrent(request) })
+                suggestionCache = dictionaryCandidates(search.repairs, deadline: deadline, request: request)
+            }
         }
         snapshot.corrections = snapshot.page == 0 ? correctionCache : []
+        snapshot.suggestions = snapshot.page == 0 && isCurrent(request) ? suggestionCache : []
         return snapshot
+    }
+
+    /// At most four spellings / two Rime choices each, with a cooperative 60 ms
+    /// total deadline. Rime calls themselves cannot be interrupted. Select in an
+    /// isolated session and require the entire repaired spelling to commit.
+    private func dictionaryCandidates(_ repairs: [PinyinTypoIndex.Repair], deadline: TimeInterval,
+                                      request: UInt64) -> [String] {
+        guard correctionSession != 0 else { return [] }
+        let api = rime_get_api()!.pointee
+        defer { api.clear_composition!(correctionSession) }
+        var result: [String] = []
+        for repair in repairs {
+            for candidate in 0..<2 {
+                guard isCurrent(request), ProcessInfo.processInfo.systemUptime < deadline else { return [] }
+                api.clear_composition!(correctionSession)
+                for byte in repair.spelling.utf8 { _ = api.process_key!(correctionSession, Int32(byte), 0) }
+                _ = api.select_candidate!(correctionSession, candidate)
+                var commit = RimeCommit()
+                commit.data_size = Int32(MemoryLayout<RimeCommit>.size - MemoryLayout<Int32>.size)
+                guard api.get_commit!(correctionSession, &commit) != 0 else { continue }
+                let text = commit.text.map { String(cString: $0) } ?? ""
+                _ = api.free_commit!(&commit)
+                let remaining = api.get_input!(correctionSession).map { String(cString: $0) } ?? ""
+                if remaining.isEmpty, text.count >= 2,
+                   !text.unicodeScalars.contains(where: { $0.isASCII }),
+                   !result.contains(text), !correctionCache.contains(text) { result.append(text) }
+                if result.count == 3 { return isCurrent(request) ? result : [] }
+            }
+        }
+        return isCurrent(request) ? result : []
     }
 
     /// A separate, queue-owned Rime session tests repairs without editing the

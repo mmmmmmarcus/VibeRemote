@@ -23,6 +23,12 @@ Their complete sources and upstream attribution comments are retained under
 `Typing/Resources/Rime/cn_dicts/`; the full license is `RimeIce-LICENSE.txt`.
 `dictionary-provenance.json` records per-file SHA-256 checksums and entry counts.
 `scripts/compile-rime.py` verifies those sources and compiles the tables locally.
+It also invokes `scripts/compile-typo-index.py` to derive `PinyinTypo.bin`: a bounded
+spelling/frequency trie for optional multi-error suggestions. It keeps the maximum
+original weight for each eligible full-syllable spelling, selects up to 80,000 by
+weight (deterministic lexical ties), and stores no Han text. This derived index uses
+the same dictionary sources, license and provenance; original sources and full
+Rime conversion tables remain unchanged. Reproduce it through `compile-rime.py`.
 Both app bundles include the compiled tables, provenance and license; they omit
 the build-time source YAML. Rebuild or modify the data from these retained sources
 using the same script. The upstream weights are preserved. This data is separately licensed

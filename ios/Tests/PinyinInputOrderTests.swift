@@ -126,6 +126,26 @@ final class PinyinInputOrderTests: XCTestCase {
         }
     }
 
+    func testMultiErrorCandidateTapThenDigitCommitsWholeInputInOrder() async throws {
+        try await forEachHost { keyboard, proxy in
+            // Queue all letters without waiting for Rime; no auto-replacement.
+            for letter in "woxhfiaole" { try await tap(String(letter), keyboard) }
+            let panel = try XCTUnwrap(descendants(keyboard.view).first { $0 is CandidatePanel } as? CandidatePanel)
+            try await waitUntil {
+                keyboard.view.layoutIfNeeded(); panel.layoutIfNeeded()
+                return self.descendants(panel).contains { $0.accessibilityLabel == "我知道了" }
+            }
+            XCTAssertNotNil(proxy.editor.markedTextRange)
+            XCTAssertEqual(proxy.editor.text.filter(\.isLetter), "woxhfiaole")
+            let candidate = try XCTUnwrap(descendants(panel).first { $0.accessibilityLabel == "我知道了" } as? CandidateButton)
+            XCTAssertTrue(candidate.accessibilityActivate())
+            try await tap("123", keyboard); try await tap("1", keyboard)
+            try await waitUntil { proxy.editor.text == "我知道了1" }
+            XCTAssertNil(proxy.editor.markedTextRange)
+            XCTAssertEqual(proxy.editor.selectedRange.location, 5)
+        }
+    }
+
     func testDigitQueuedBehindCandidateCommit() async throws {
         try await forEachHost { keyboard, proxy in
             for letter in "nihao" { try await tap(String(letter), keyboard) }

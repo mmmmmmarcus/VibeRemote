@@ -1217,7 +1217,14 @@ final class KeyboardViewController: UIInputViewController {
         if command != nil { cancelHold() }
         let waitingForPinyin = usesPinyin && !pinyinReady && (value != "language" || !deferredTaps.isEmpty)
         if typingPending || waitingForPinyin {
-            if deferredTaps.count < 64 { deferredTaps.append(value) }
+            if deferredTaps.count < 64 {
+                deferredTaps.append(value)
+                // Cancel only speculative multi-error work, never the ordered
+                // Rime edit or its callback. Space still uses the displayed path.
+                if value == "delete" || value.utf8.count == 1 && value.first?.isLetter == true {
+                    PinyinEngine.shared.cancelCorrectionSearch()
+                }
+            }
             return
         }
         if let editing {

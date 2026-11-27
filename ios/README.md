@@ -6,6 +6,30 @@
 > `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
 
 
+## Chinese multi-error suggestions — 2026-11-27
+
+Continuous mistyped Pinyin can now offer optional whole-input Chinese candidates,
+including `woxhfiaole` → `我知道了`, without replacing the marked spelling or changing
+the existing Space default. Exact spellings retain their Rime order. A local,
+build-time trie of 80,000 frequent dictionary spellings supports bounded combinations
+of neighboring-key slips, transpositions and missing/extra letters. Edit cost plus
+original dictionary frequency ranks repairs; a separate Rime session verifies full
+commits. There is no phrase-specific mapping, network typing or learned history.
+Search/candidate counts, time and memory are capped; cancelled or exhausted searches
+fall back to the native path. Suggestion commits validate input and revision, and
+queued edits preserve their order. Rare spellings outside the small correction index
+remain available through the unchanged full Rime dictionaries.
+
+Validation: all 331 tests passed on the isolated Xcode 27.2 Builder (iPhone 18 Pro,
+iOS 27.2), including real-Rime multi-error/exact/negative cases, stale revisions,
+cancellation, both bilingual policies, coalesced-host candidate-tap then digit order,
+and the existing 375/402/440-point and Duo offscreen layout suite. Twelve warm Debug
+samples measured search median/p95 10.5/13.9 ms and final-key engine response
+15.4/16.8 ms. The generated index is 4,730,480 bytes (295,654 nodes); this is index
+size, not measured total process memory. Cold-start and physical-device latency,
+physical typing feel and broad corpus false-positive rates remain unverified.
+No shared simulator was used; no version bump or release is part of this change.
+
 ## Extended Delete — 2026-11-22
 
 Holding Delete expands its surface left over M and reveals a broom at the left

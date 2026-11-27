@@ -57,6 +57,7 @@ final class BilingualCandidates {
             choices.append(Candidate(text: first, identifier: "candidate.0", action: .choose(0)))
         }
         if !preferEnglish && (looksEnglish || snapshot.candidates.isEmpty) { choices.append(english) }
+        choices += PinyinCandidates().suggestions(for: snapshot)
         let completions = checker.completions(forPartialWordRange: range, in: spelling, language: "en_US") ?? []
         var seen = Set(choices.map { $0.text.lowercased() })
         var completionCount = 0

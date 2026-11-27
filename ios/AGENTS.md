@@ -278,10 +278,24 @@ Spacing applies to selected English candidates and English punctuation, consumes
 redundant Space after an automatic one, and removes only an owned preceding space.
 A directly typed dot does not add a space (domains/decimals). No spaces between Han
 characters. Suggestions/undo are bounded and ephemeral; never log or learn text.
-Pinyin typo assistance tests at most eight single-slip repairs in a separate Rime
-session on its serial queue, only for non-complete spellings of 4–32 letters.
-Promote up to three fully committed Chinese results; exact spellings retain their
-original dictionary ranking. Do not globally enable Rime's broad correction:
+Pinyin typo assistance retains the at-most-eight single-slip repairs in a separate
+Rime session on its serial queue, only for non-complete spellings of 4–32 letters.
+Additionally, 6–32-letter incomplete input can search a build-time spelling trie
+of the 80,000 highest-weight eligible dictionary spellings (at least two full
+syllables, upstream weight >=1000). Neighbor slips, transpositions and missing/extra
+letters can combine within two edits (6–8 letters) or three (9–32); insert/delete
+costs 1.25 edits. Rank by weighted edit cost and bounded dictionary-frequency prior.
+Cap the beam at 192, visited nodes at 16,000, index at 500,000 nodes / 8 MB, search
+at 35 ms and search plus Rime verification at a cooperative 60 ms. An individual
+Rime API call is not interruptible. Test at most four repairs / two choices each;
+require complete commits without residual input. Missing/malformed data, exhausted
+budgets and cancellation omit speculative suggestions, never the native candidates.
+Multi-error suggestions are optional, after the existing highlighted path, never
+an automatic replacement or a new Space default. Their actions carry the exact
+input and revision; queued edits cancel speculative work without dropping ordered
+keystrokes/commits. Keep all native candidates' relative order and Rime indices.
+Exact spellings retain their original dictionary ranking; rare names still use the
+complete exact Rime tables. Do not globally enable Rime's broad correction:
 it regressed correctly spelled phrases. Preserve raw marked spelling until selection
 or Space and use the displayed candidate's action. Recognizable bundled English
 repairs remain available in Chinese mode. Persist the selected mode in
