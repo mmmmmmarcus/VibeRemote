@@ -11,6 +11,8 @@ final class KeyboardViewController: UIInputViewController {
     var testingLandscape: Bool?
     var testingTablet: Bool?
     var testingVoiceAvailable = false
+    /// Unit tests: nil behaves as Full Access granted.
+    var testingFullAccess: Bool?
     private(set) var testingVoiceCommands: [VoiceCommand] = []
     private(set) var testingTapFeedbackCount = 0
     override var textDocumentProxy: UITextDocumentProxy { testingDocumentProxy ?? super.textDocumentProxy }
@@ -52,13 +54,10 @@ final class KeyboardViewController: UIInputViewController {
     private var candidateFetchPending = false
     private var nextCandidateOffset = 0
     private var hasMoreCandidates = false
-    private var shortcutButtons: [UIButton] = []
     private let doubleSpace = DoubleSpacePeriod()
     private var endCursor: CursorDragSession?
     private var endCursorSteps = 0
-    private let inputHelpers = UIStackView()
-    private let helperScroll = UIScrollView()
-    private var codeButton: UIButton?
+    private let helperScroll = ClipPillStrip()
     var copiedCodes = CopiedCodeMonitor()
     #if KEYBOARD_TESTING
     var clipboardHistory = ClipboardHistory(fileURL: nil)
@@ -346,7 +345,7 @@ final class KeyboardViewController: UIInputViewController {
         let expanded = candidatePanel.isExpanded && !candidatePanel.isHidden
         let panelHeight = expanded ? metrics.candidateHeight + 3 * (metrics.keyHeight + metrics.rowGap) - metrics.rowGap / 2 - 1 : headerHeight
         candidatePanel.frame = CGRect(x: 0, y: 1, width: width, height: panelHeight)
-        helperScroll.frame = CGRect(x: 4, y: 1, width: max(0, width - 8), height: max(0, headerHeight - 6))
+        helperScroll.frame = CGRect(x: 0, y: 1, width: width, height: min(ClipPillStrip.stripHeight, headerHeight))
         for (index, row) in rows.arrangedSubviews.enumerated() {
             row.alpha = expanded && index < 3 ? 0 : 1
             row.accessibilityElementsHidden = expanded && index < 3
@@ -742,14 +741,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateHeader() {
-        refreshCopiedCodeIndicator()
         let voiceVisible = command != nil || activationRequest != nil || Date() < errorUntil
         setRecordingAppearance(command?.phase == .recording, voiceVisible: voiceVisible)
         candidatePanel.isHidden = showingEmoji || isMiniMode || voiceVisible || visibleCandidates.isEmpty
         if candidatePanel.isHidden { candidatePanel.setExpanded(false) }
         let hidePills = showingEmoji || isMiniMode || cursorKey != nil || voiceVisible || candidatePanel.isExpanded
         helperScroll.isHidden = hidePills || page == 0 || !candidatePanel.isHidden
-        for button in shortcutButtons where button !== codeButton { button.isHidden = false }
         refreshCopiedCodeIndicator()
         view.setNeedsLayout()
         status.textColor = .label
@@ -1490,64 +1487,39 @@ final class KeyboardViewController: UIInputViewController {
 
     private func configureInputHelpers() {
         pasteConfiguration = UIPasteConfiguration(forAccepting: NSString.self)
-        helperScroll.showsHorizontalScrollIndicator = false
-        helperScroll.accessibilityIdentifier = "keyboard.input-helpers"
-        inputHelpers.axis = .horizontal; inputHelpers.spacing = 4; inputHelpers.alignment = .center
-        inputHelpers.translatesAutoresizingMaskIntoConstraints = false
-        helperScroll.addSubview(inputHelpers)
-        NSLayoutConstraint.activate([
-            inputHelpers.leadingAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.leadingAnchor),
-            inputHelpers.trailingAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.trailingAnchor),
-            inputHelpers.topAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.topAnchor),
-            inputHelpers.bottomAnchor.constraint(equalTo: helperScroll.contentLayoutGuide.bottomAnchor),
-            inputHelpers.heightAnchor.constraint(equalTo: helperScroll.frameLayoutGuide.heightAnchor)
-        ])
-        @discardableResult func button(_ title: String, image: UIImage?, identifier: String, hidden: Bool = false, action: @escaping () -> Void) -> UIButton {
-            let button = UIButton(type: .system)
-            var configuration = UIButton.Configuration.plain()
-            // SF Symbols carry different intrinsic canvases from the vector
-            // 1Password mark. Fit every helper into the same visible icon box.
-            configuration.image = image.map { source in
-                let side: CGFloat = 20
-                let scale = side / max(max(source.size.width, source.size.height), 1)
-                let size = CGSize(width: source.size.width * scale, height: source.size.height * scale)
-                return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
-                    source.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2,
-                                           width: size.width, height: size.height))
-                }.withRenderingMode(.alwaysTemplate)
-            }
-            configuration.baseForegroundColor = .label
-            configuration.background = .clear(); configuration.background.backgroundColor = .clear
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
-            button.configuration = configuration
-            button.accessibilityIdentifier = identifier
-            button.accessibilityLabel = title; button.isHidden = hidden
-            let width = button.widthAnchor.constraint(equalToConstant: 44)
-            width.isActive = true
-            button.heightAnchor.constraint(equalToConstant: 36).isActive = true
-            button.addAction(UIAction { _ in action() }, for: .touchUpInside)
-            inputHelpers.addArrangedSubview(button)
-            return button
-        }
-        let history = button("Clipboard History", image: UIImage(systemName: "clock.arrow.circlepath"), identifier: "keyboard.clipboard-history") {}
-        history.showsMenuAsPrimaryAction = true
-        history.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
-            guard let self else { completion([]); return }
-            completion(self.clipboardHistoryMenu())
-        }])
-        codeButton = button("Paste Code", image: UIImage(systemName: "number.square"), identifier: "keyboard.paste-code", hidden: true) { [weak self] in
-            self?.pasteCopiedCode()
-        }
-        button("Open 1Password", image: UIImage(named: "OnePassword"), identifier: "keyboard.open-1password") { [weak self] in
+        let strip = helperScroll
+        strip.onePassword.setShortcutImage(UIImage(named: "OnePassword"))
+        strip.onePassword.accessibilityIdentifier = "keyboard.open-1password"
+        strip.onePassword.accessibilityLabel = "Open 1Password"
+        strip.onePassword.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.pasteGeneration += 1
             guard let openURL = self.hostOpenURL else { self.showError("Open 1Password from your Home Screen."); return }
             openURL(URL(string: "onepassword://")!) { accepted in
                 if !accepted { Task { @MainActor in self.showError("Couldn’t open 1Password. Open it from your Home Screen.") } }
             }
-        }
-        button("Open Messages", image: UIImage(systemName: "message"), identifier: "keyboard.open-messages") { [weak self] in self?.openShortcut("sms:", name: "Messages") }
-        shortcutButtons = inputHelpers.arrangedSubviews.compactMap { $0 as? UIButton }
+        }, for: .touchUpInside)
+        strip.messages.setShortcutImage(UIImage(systemName: "message.fill"))
+        strip.messages.accessibilityIdentifier = "keyboard.open-messages"
+        strip.messages.accessibilityLabel = "Open Messages"
+        strip.messages.addAction(UIAction { [weak self] _ in self?.openShortcut("sms:", name: "Messages") }, for: .touchUpInside)
+        strip.history.accessibilityIdentifier = "keyboard.clipboard-history"
+        strip.history.accessibilityLabel = "Clipboard History"
+        strip.history.showsMenuAsPrimaryAction = true
+        strip.history.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
+            guard let self else { completion([]); return }
+            completion(self.clipboardHistoryMenu())
+        }])
+        strip.onSelect = { [weak self] clip in self?.pasteClipPill(clip) }
+    }
+
+    /// Clip pills paste the full original (code pill: re-validated codeOnly) and
+    /// never reorder history, so repeated taps hit the same pill.
+    func pasteClipPill(_ clip: ClipPill) {
+        if clip.isCode { pasteCopiedCode(); return }
+        guard let request = beginPaste(codeOnly: false) else { return }
+        // Keep a fresh code pill in place so neighbouring pills do not jump.
+        completePaste(clip.text, request: request, remember: false, consumeCode: false)
     }
 
     func clipboardHistoryMenu() -> [UIMenuElement] {
@@ -1560,7 +1532,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         if actions.isEmpty { actions.append(UIAction(title: "No recent text clips", attributes: [.disabled]) { _ in }) }
         else { actions.append(UIAction(title: "Clear History", image: UIImage(systemName: "trash"), attributes: [.destructive]) { [weak self] _ in
-            self?.clipboardHistory.clear()
+            self?.clipboardHistory.clear(); self?.refreshCopiedCodeIndicator()
         }) }
         // Recent final dictation results (local only), e.g. after a dismissal mid-polish.
         let recent = dictationRecents.items
@@ -1597,11 +1569,19 @@ final class KeyboardViewController: UIInputViewController {
         copiedCodes.refresh()
         refreshCopiedCodeIndicator()
     }
-    func refreshCopiedCodeIndicator() {
+    /// Without Full Access (or with no history) the strip keeps only the two
+    /// shortcuts and the clock pill.
+    private var clipPillsAllowed: Bool {
         #if KEYBOARD_TESTING
-        if testingDocumentProxy != nil { codeButton?.isHidden = page == 0 || !copiedCodes.isAvailable; return }
+        if testingDocumentProxy != nil { return testingFullAccess ?? true }
         #endif
-        codeButton?.isHidden = page == 0 || !keyboardVisible || !hasFullAccess || !copiedCodes.isAvailable
+        return hasFullAccess
+    }
+    func refreshCopiedCodeIndicator() {
+        guard !helperScroll.isHidden else { return } // Rebuilt when the strip is shown.
+        guard clipPillsAllowed else { helperScroll.show([]); return }
+        helperScroll.show(ClipPill.pills(history: clipboardHistory.items, code: copiedCodes.observedCode,
+                                         codeAvailable: copiedCodes.isAvailable, codeSource: copiedCodes.observedSource))
     }
     func pasteCopiedCode() {
         guard let request = beginPaste(codeOnly: true) else { return }
@@ -1618,7 +1598,7 @@ final class KeyboardViewController: UIInputViewController {
         pasteGeneration += 1
         return PasteRequest(generation: pasteGeneration, destination: KeyboardTextDestination(textDocumentProxy), codeOnly: codeOnly)
     }
-    func completePaste(_ text: String, request: PasteRequest, remember: Bool = true) {
+    func completePaste(_ text: String, request: PasteRequest, remember: Bool = true, consumeCode: Bool = true) {
         guard request.generation == pasteGeneration,
               request.destination == KeyboardTextDestination(textDocumentProxy), command == nil,
               !isMiniMode, cursorKey == nil, !typingPending, pinyin.input.isEmpty, deferredTaps.isEmpty else { return }
@@ -1634,18 +1614,20 @@ final class KeyboardViewController: UIInputViewController {
         insertingTypedText = true
         textDocumentProxy.insertText(insertion)
         insertingTypedText = false
-        copiedCodes.consume()
+        if consumeCode { copiedCodes.consume() }
         if remember && !request.codeOnly { clipboardHistory.record(text) }
         playTapFeedback(); updateHeader()
     }
     override func paste(itemProviders: [NSItemProvider]) {
         guard let provider = itemProviders.first(where: { $0.canLoadObject(ofClass: NSString.self) }),
               let request = beginPaste(codeOnly: textDocumentProxy.textContentType == .oneTimeCode) else { return }
+        // Concealed copies (e.g. a 1Password password) paste but are never recorded.
+        let concealed = itemProviders.contains { ConcealedPasteboard.isConcealed($0.registeredTypeIdentifiers) }
         provider.loadObject(ofClass: NSString.self) { [weak self] object, _ in
             let text = object as? String
             Task { @MainActor in
                 guard let self, let text else { return }
-                self.completePaste(text, request: request)
+                self.completePaste(text, request: request, remember: !concealed)
             }
         }
     }

@@ -333,10 +333,22 @@ trackpad, pinch, held-Delete clear-all, symbol alternatives and dictation slides
 Chinese phone letters have no separate period beside Return: Space gets its width.
 Chinese punctuation pages and language-aware double-Space periods stay available.
 
-Show Clipboard History, a new copied code when available, 1Password and Messages
-directly in the candidate strip on symbol pages only, when no candidates/voice
-status take precedence. No Phone or standalone Paste shortcut. Keep 44-point
-shortcut targets and horizontal scrolling on narrow windows. Clipboard observation
+Clipboard pills (designer spec 2026-11-27, `.airbuild/specs/clip-pills.md`;
+supersedes the plain icon row and the separate Paste Code button): on symbol
+pages only, when no candidates/voice status take precedence, the 42pt strip
+(no fill) scrolls one row: 1Password (#0572EC) and Messages (#34C759) filled
+44x32 capsules with white 20pt glyphs → a fresh copied code as a `number` pill
+showing its digits (codeOnly paste) → up to five history clips newest first →
+the clock pill opening the existing Clipboard History menu. 8pt leading, 6pt
+spacing, 24pt trailing alpha fade, no divider. Clip pills: type icon (link,
+envelope, phone, number, text.alignleft, first match in that order), collapsed
+whitespace, >20 Characters → 19 + "…"; a tap pastes the full original with tap
+feedback and never reorders history or consumes the code pill. No Full Access or
+no history → only the two shortcuts + clock. Concealed/transient pasteboard
+copies (org.nspasteboard.ConcealedType etc.) are never shown or recorded; a
+concealed code still gets a pill reading "Code" without digits. The code digits
+live in memory only. `ClipPill` (Shared) is the pure model, `ClipPillStrip` the view.
+No Phone or standalone Paste shortcut. Clipboard observation
 continues while the keyboard is visible, independent of shortcut visibility.
 User authorized five-item local clipboard history on 2026-11-20,
 superseding the earlier no-history choice. Retain at most five unique copied text

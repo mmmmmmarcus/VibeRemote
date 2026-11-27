@@ -90,6 +90,7 @@ targets:
       - Keyboard/KeyboardMetrics.swift
       - Keyboard/CandidateButton.swift
       - Keyboard/CandidatePanel.swift
+      - Keyboard/ClipPillStrip.swift
       - Keyboard/KeyboardTouchSurface.swift
       - Keyboard/KeyPreviewView.swift
       - Keyboard/SymbolAlternativesView.swift

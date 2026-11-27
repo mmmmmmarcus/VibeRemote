@@ -1281,6 +1281,19 @@ contact sheets were reviewed in light/dark appearances. Signed arm64 device buil
 passed. Live Spotlight comparison, physical session-expiry testing and installation
 of this update remain pending: CoreDevice reports the Duo unavailable.
 
+## Clipboard pills — 2026-11-27
+
+Symbol pages (with no Pinyin candidates) show one scrolling row in the candidate
+strip: 1Password and Messages as filled brand-colour pills, a newly copied code
+as a pill with its digits, up to five recent clips (newest first, each with a
+link/email/phone/number/text icon and a 20-character title), then the Clipboard
+History clock. Tapping a clip pastes its full original text without reordering;
+the code pill replaces the old Paste Code button. Without Full Access or history
+only the two shortcuts and the clock appear. Copies marked concealed (for example
+1Password passwords) are never shown or recorded. Offscreen light/dark renders at
+375/402/440/466 are written by `ClipPillsTests` to `.airbuild/artifacts/phone-layout/`;
+contrast over the real keyboard glass still needs a physical-device check.
+
 ## Local clipboard history — 2026-11-20
 
 Shortcuts → Clipboard History shows up to five unique text clips, newest first.

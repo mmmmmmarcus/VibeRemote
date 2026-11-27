@@ -5,9 +5,10 @@ import XCTest
     var changeCount = 1
     var value: String?
     var reads = 0
+    var isConcealed = false
     var onRead: (() -> Void)?
     var text: String? { reads += 1; onRead?(); return value }
-    func copy(_ text: String?) { changeCount += 1; value = text }
+    func copy(_ text: String?, concealed: Bool = false) { changeCount += 1; value = text; isConcealed = concealed }
 }
 
 @MainActor final class CopiedCodeTests: XCTestCase {

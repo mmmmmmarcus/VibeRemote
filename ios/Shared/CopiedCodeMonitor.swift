@@ -3,11 +3,14 @@ import UIKit
 @MainActor protocol CodeClipboard {
     var changeCount: Int { get }
     var text: String? { get }
+    /// Marked concealed/transient (e.g. a 1Password copy). Reads type metadata only.
+    var isConcealed: Bool { get }
 }
 
 @MainActor struct SystemCodeClipboard: CodeClipboard {
     var changeCount: Int { UIPasteboard.general.changeCount }
     var text: String? { UIPasteboard.general.string }
+    var isConcealed: Bool { ConcealedPasteboard.isConcealed(UIPasteboard.general.types) }
 }
 
 /// Stores clipboard version/expiry metadata only, never text or a code.
@@ -24,6 +27,12 @@ import UIKit
     private let now: () -> Date
     private let bootTime: () -> TimeInterval
     private var state: State?
+    /// In memory only, for the strip's code pill; never persisted or logged.
+    /// Nil for concealed copies and after an extension relaunch.
+    private(set) var observedCode: String?
+    /// The copied text the code came from (already in local history), so the
+    /// strip does not show it twice. In memory only.
+    private(set) var observedSource: String?
 
     init(clipboard: (any CodeClipboard)? = nil, defaults: UserDefaults? = .standard,
          now: @escaping () -> Date = Date.init,
@@ -47,13 +56,18 @@ import UIKit
             return
         }
         state = State(changeCount: count, bootTime: boot)
+        observedCode = nil; observedSource = nil
         save() // Mark this version attempted before a possible system permission prompt.
         guard count > previous.changeCount else { return }
         let text = clipboard.text
         guard clipboard.changeCount == count, state?.changeCount == count,
               let text else { return }
-        onObservedText?(text)
-        guard VerificationCode.extract(from: text) != nil else { return }
+        // Concealed copies are never recorded or shown; a code inside one is
+        // still offered, without its digits.
+        let concealed = clipboard.isConcealed
+        if !concealed { onObservedText?(text) }
+        guard let code = VerificationCode.extract(from: text) else { return }
+        if !concealed { observedCode = code; observedSource = text }
         state?.expiresAt = now().addingTimeInterval(120)
         save()
     }
@@ -67,7 +81,7 @@ import UIKit
         guard let text = clipboard.text, clipboard.changeCount == expected.changeCount else { return nil }
         return VerificationCode.extract(from: text)
     }
-    func consume() { state?.expiresAt = nil; save() }
+    func consume() { state?.expiresAt = nil; observedCode = nil; observedSource = nil; save() }
     private func save() {
         if let state, let data = try? JSONEncoder().encode(state) { defaults?.set(data, forKey: Self.preferenceKey) }
     }
