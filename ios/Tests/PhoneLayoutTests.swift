@@ -183,41 +183,118 @@ final class PhoneLayoutTests: XCTestCase {
 
     // MARK: Candidate strip
 
-    private func luminance(_ color: UIColor) -> CGFloat {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        color.getRed(&r, green: &g, blue: &b, alpha: &a)
-        func channel(_ c: CGFloat) -> CGFloat { c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
-        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-    }
-    private func over(_ top: UIColor, _ bottom: UIColor) -> UIColor {
-        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
-        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
-        top.getRed(&r1, green: &g1, blue: &b1, alpha: &a1); bottom.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        return UIColor(red: r1 * a1 + r2 * (1 - a1), green: g1 * a1 + g2 * (1 - a1), blue: b1 * a1 + b2 * (1 - a1), alpha: 1)
-    }
-    private func contrast(_ a: UIColor, _ b: UIColor) -> CGFloat {
-        let l1 = luminance(a), l2 = luminance(b)
-        return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+    private static let appearances: [UITraitCollection] = [UIUserInterfaceStyle.light, .dark].flatMap { style in
+        [UIAccessibilityContrast.normal, .high].map { contrast in
+            UITraitCollection { $0.userInterfaceStyle = style; $0.accessibilityContrast = contrast }
+        }
     }
 
-    func testCandidateStripIsOpaqueWithReadableText() throws {
-        let panel = CandidatePanel(frame: CGRect(x: 0, y: 0, width: 402, height: 44))
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            for contrastSetting in [UIAccessibilityContrast.normal, .high] {
-                let traits = UITraitCollection { $0.userInterfaceStyle = style; $0.accessibilityContrast = contrastSetting }
-                let fill = try XCTUnwrap(panel.backgroundColor).resolvedColor(with: traits)
-                var alpha: CGFloat = 0; fill.getRed(nil, green: nil, blue: nil, alpha: &alpha)
-                XCTAssertEqual(alpha, 1, "Candidate strip is opaque in \(style.rawValue)")
-                let ink = UIColor.label.resolvedColor(with: traits)
-                XCTAssertGreaterThanOrEqual(contrast(ink, fill), 4.5)
-                // The highlighted first candidate sits on secondarySystemFill.
-                let highlighted = over(UIColor.secondarySystemFill.resolvedColor(with: traits), fill)
-                XCTAssertGreaterThanOrEqual(contrast(ink, highlighted), 4.5)
+    private func paintAlpha(_ view: UIView, _ traits: UITraitCollection) -> CGFloat {
+        var alpha: CGFloat = 0
+        view.backgroundColor?.resolvedColor(with: traits).getRed(nil, green: nil, blue: nil, alpha: &alpha)
+        let layerAlpha = view.layer.backgroundColor?.alpha ?? 0
+        return max(alpha, view.backgroundColor == nil ? layerAlpha : 0)
+    }
+
+    private func visibleDescendants(_ view: UIView) -> [UIView] {
+        view.subviews.filter { !$0.isHidden && $0.alpha > 0.01 }.flatMap { [$0] + visibleDescendants($0) }
+    }
+
+    private func sameColor(_ a: UIColor?, _ b: UIColor, _ traits: UITraitCollection) -> Bool {
+        guard let a else { return false }
+        return a.resolvedColor(with: traits) == b.resolvedColor(with: traits)
+    }
+
+    /// Designer decision 2026-11-27: the strip has no fill, blur or corner radius of
+    /// its own; the system keyboard glass shows straight through, continuous with
+    /// the keys, on regular iPhones and on the Duo.
+    func testCandidateStripLetsSystemGlassThrough() async throws {
+        try await withSavedPreferences {
+            for width in phoneWidths + [466] {
+                await withCheckedContinuation { c in PinyinEngine.shared.perform(.clear) { _ in c.resume() } }
+                let (keyboard, proxy) = makeKeyboard(width: width, language: .chinese)
+                defer { keyboard.viewWillDisappear(false) }
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene)
+                window.frame = keyboard.view.frame
+                window.addSubview(keyboard.view); window.isHidden = false
+                defer { window.isHidden = true; keyboard.view.removeFromSuperview() }
+                keyboard.viewDidLayoutSubviews(); keyboard.view.layoutIfNeeded()
+                let k = try XCTUnwrap(try control("keyboard.key.k", keyboard) as? KeyControl)
+                XCTAssertTrue(k.accessibilityActivate())
+                try await waitUntil { proxy.editor.text == "k" && self.descendants(keyboard.view).contains { $0.accessibilityIdentifier == "candidate.0" } }
+                keyboard.view.setNeedsLayout(); keyboard.view.layoutIfNeeded()
+                let panel = try XCTUnwrap(descendants(keyboard.view).first { $0 is CandidatePanel } as? CandidatePanel)
+                XCTAssertFalse(panel.isHidden, "\(width)")
+                XCTAssertFalse(panel.isOpaque, "\(width)")
+
+                // The panel and every ancestor up to the keyboard root: no paint, radius or blur.
+                var chain: [UIView] = []
+                var node: UIView? = panel
+                while let current = node { chain.append(current); if current === keyboard.view { break }; node = current.superview }
+                XCTAssertTrue(chain.last === keyboard.view, "Panel sits under the keyboard root at \(width)")
+                for view in chain {
+                    for traits in Self.appearances {
+                        XCTAssertLessThan(paintAlpha(view, traits), 0.01, "\(type(of: view)) paints a background at \(width)")
+                    }
+                    XCTAssertEqual(view.layer.cornerRadius, 0, "\(type(of: view)) at \(width)")
+                    XCTAssertFalse(view is UIVisualEffectView, "\(type(of: view)) at \(width)")
+                    XCTAssertFalse(view.subviews.contains { $0 is UIVisualEffectView && !$0.isHidden }, "Blur in \(type(of: view)) at \(width)")
+                }
+                // Inside the strip only the default candidate's small rounded highlight paints.
+                let buttons = visibleDescendants(panel).compactMap { $0 as? CandidateButton }
+                XCTAssertFalse(buttons.isEmpty)
+                let buttonParts = Set(buttons.flatMap { [ObjectIdentifier($0)] + descendants($0).map(ObjectIdentifier.init) })
+                for view in visibleDescendants(panel) where !buttonParts.contains(ObjectIdentifier(view)) {
+                    XCTAssertFalse(view is UIVisualEffectView, "Blur \(type(of: view)) in strip at \(width)")
+                    for traits in Self.appearances {
+                        XCTAssertLessThan(paintAlpha(view, traits), 0.01, "\(type(of: view)) paints inside the strip at \(width)")
+                    }
+                }
+                // No other visible view behind or over the strip paints a fill (no grey band).
+                let stripRect = frame(panel, in: keyboard)
+                for view in visibleDescendants(keyboard.view) where !chain.contains(view) && view.window != nil {
+                    guard !buttonParts.contains(ObjectIdentifier(view)), !descendants(panel).contains(view) else { continue }
+                    guard frame(view, in: keyboard).intersects(stripRect) else { continue }
+                    for traits in Self.appearances {
+                        XCTAssertLessThan(paintAlpha(view, traits), 0.01, "\(type(of: view)) paints behind the strip at \(width)")
+                    }
+                    XCTAssertFalse(view is UIVisualEffectView, "\(type(of: view)) blurs behind the strip at \(width)")
+                }
+                // Text: system primary label colour, regular weight; candidate 0 keeps its highlight.
+                let labels = buttons.flatMap { descendants($0).compactMap { $0 as? UILabel } }
+                XCTAssertEqual(labels.count, buttons.count)
+                for label in labels {
+                    for traits in Self.appearances { XCTAssertTrue(sameColor(label.textColor, .label, traits), "Candidate ink is .label") }
+                    XCTAssertEqual(label.font, CandidateButton.font)
+                }
+                let defaults = buttons.filter { $0.accessibilityTraits.contains(.selected) }
+                XCTAssertEqual(defaults.count, 1, "One default candidate at \(width): \(buttons.map { $0.accessibilityIdentifier ?? "" })")
+                let first = try XCTUnwrap(defaults.first)
+                XCTAssertEqual(frame(first, in: keyboard).minX, buttons.map { frame($0, in: keyboard).minX }.min() ?? -1, accuracy: 0.5)
+                let highlight = try XCTUnwrap(first.subviews.first { !($0 is UILabel) })
+                for traits in Self.appearances {
+                    XCTAssertTrue(sameColor(highlight.backgroundColor, .secondarySystemFill, traits), "Default highlight at \(width)")
+                }
+                XCTAssertEqual(highlight.layer.cornerRadius, 8)
+                for button in buttons where button !== first {
+                    XCTAssertTrue(button.subviews.allSatisfy { $0 is UILabel || paintAlpha($0, Self.appearances[0]) < 0.01 },
+                                  "Only the default candidate is highlighted at \(width): \(button.accessibilityIdentifier ?? "")")
+                }
+                // Scroll edge effects stay hidden (their blur made words look fuzzy).
+                let collection = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
+                XCTAssertTrue(collection.topEdgeEffect.isHidden && collection.bottomEdgeEffect.isHidden
+                              && collection.leftEdgeEffect.isHidden && collection.rightEdgeEffect.isHidden)
+                // The trailing fade is a pure alpha mask on the words, never a coloured overlay.
+                if let mask = collection.layer.mask {
+                    let gradient = try XCTUnwrap(mask as? CAGradientLayer)
+                    XCTAssertEqual(try XCTUnwrap(gradient.colors as? [CGColor]).map(\.alpha), [1, 1, 0])
+                }
+                for layer in [panel.layer, collection.layer] {
+                    XCTAssertFalse((layer.sublayers ?? []).contains { $0 is CAGradientLayer }, "No painted gradient overlay at \(width)")
+                }
             }
         }
-        let collection = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
-        XCTAssertTrue(collection.topEdgeEffect.isHidden && collection.bottomEdgeEffect.isHidden
-                      && collection.leftEdgeEffect.isHidden && collection.rightEdgeEffect.isHidden)
     }
 
     func testCollapsedStripFadesTrailingEdgeBeforeChevron() throws {
@@ -239,6 +316,9 @@ final class PhoneLayoutTests: XCTestCase {
             XCTAssertEqual((1 - stops[1]) * mask.bounds.width, 24, accuracy: 0.01, "24pt fade at \(width)")
             let alphas = try XCTUnwrap(mask.colors as? [CGColor]).map(\.alpha)
             XCTAssertEqual(alphas, [1, 1, 0])
+            // Pure alpha: a mask contributes only its alpha, and it is not also drawn as a layer.
+            XCTAssertFalse((collection.layer.sublayers ?? []).contains { $0 === mask })
+            XCTAssertFalse((panel.layer.sublayers ?? []).contains { $0 === mask })
             // The highlighted first candidate stays fully opaque.
             let first = try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: 0, section: 0))).frame
             XCTAssertLessThanOrEqual(first.maxX, collection.bounds.width - 24, "First candidate clear of the fade at \(width)")
@@ -288,15 +368,11 @@ final class PhoneLayoutTests: XCTestCase {
         window.frame = CGRect(x: 0, y: 0, width: width, height: height)
         window.overrideUserInterfaceStyle = style
         let backdrop = UIView(frame: window.bounds)
-        backdrop.backgroundColor = style == .dark ? UIColor(white: 0.16, alpha: 1) : UIColor(red: 0.82, green: 0.83, blue: 0.86, alpha: 1)
-        // Busy "host content" behind the keyboard: it must not show through the candidate strip.
-        for line in 0..<Int(height / 18) {
-            let text = UILabel(frame: CGRect(x: 0, y: CGFloat(line) * 18, width: width, height: 18))
-            text.text = String(repeating: "背景 Behind 文字 ", count: 8)
-            text.font = .systemFont(ofSize: 15, weight: .bold)
-            text.textColor = [UIColor.systemOrange, .systemTeal, .systemPink][line % 3]
-            backdrop.addSubview(text)
-        }
+        // Plain neutral stand-in for the system keyboard glass (light #D1D3D9,
+        // dark #2B2B2E): the strip must read as continuous with the key area.
+        backdrop.backgroundColor = style == .dark
+            ? UIColor(red: 0x2B / 255.0, green: 0x2B / 255.0, blue: 0x2E / 255.0, alpha: 1)
+            : UIColor(red: 0xD1 / 255.0, green: 0xD3 / 255.0, blue: 0xD9 / 255.0, alpha: 1)
         window.addSubview(backdrop)
         window.addSubview(keyboard.view)
         window.isHidden = false

@@ -4,11 +4,14 @@ import UIKit
 final class CandidateButton: UIControl {
     private let label = UILabel()
     private let selectionFill = UIView()
+    /// Every candidate, including the default one, uses regular weight; the
+    /// default is marked only by its small rounded highlight.
+    static let font = UIFont.systemFont(ofSize: 18, weight: .regular)
 
     init(title: String, identifier: String, isDefault: Bool) {
         super.init(frame: .zero)
         label.text = title
-        label.font = .systemFont(ofSize: 18, weight: isDefault ? .semibold : .regular)
+        label.font = Self.font
         label.textColor = .label
         label.textAlignment = .center
         label.numberOfLines = 1

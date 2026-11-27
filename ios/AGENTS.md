@@ -120,9 +120,14 @@ Regular iPhone portrait (designer spec 2026-11-26): exactly four key rows under 
 candidate strip; no extra accessory row. Bottom row is 123, Language, Emoji, Space,
 Return at letter-row height/gap: 1.25, 1.25, 1, rest, 2.5 letter-key widths. Emoji
 uses the function-key fill/radius. Long Return titles shrink, never wrap. The
-candidate strip is opaque (KeyboardMetrics.candidateFill, >=4.5:1 with `.label`).
+candidate strip (designer 2026-11-27) has no fill, blur or corner radius of its own:
+the system keyboard glass shows through, continuous with the keys, no divider. Keep
+only the imperceptible 0.001-alpha paint that lets remote hosting deliver touches, and
+keep the collection's scroll edge effects hidden. Text is `.label`, regular weight;
+candidate 0 is marked only by its small rounded highlight. Nothing behind the strip
+paints a fill (phone or Duo).
 While collapsed words overflow, the strip's last 24 pt before the chevron fades
-(alpha mask into the strip fill); none at the list's end, when expanded, or on candidate 0.
+(pure alpha mask, to transparent); none at the list's end, when expanded, or on candidate 0.
 Duo arrangements keep their measured widths. PhoneLayoutTests pins this.
 
 Only audio from an explicit dictation hold is sent to Seed. Never log audio,

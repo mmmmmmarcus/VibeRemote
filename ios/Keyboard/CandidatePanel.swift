@@ -14,8 +14,8 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
     private var transitionSnapshot: UIView?
     private let expandWidth: CGFloat = 56
     /// Width of the alpha fade at the collapsed strip's trailing edge, just
-    /// before the chevron (2026-11-26). Words fade into the opaque strip fill
-    /// rather than being hard-cut to a sliver.
+    /// before the chevron (2026-11-26). Words fade to transparent, showing the
+    /// system keyboard glass, rather than being hard-cut to a sliver.
     static let trailingFadeWidth: CGFloat = 24
     private let trailingFade = CAGradientLayer()
     private var candidates: [PinyinCandidates.Candidate] = []
@@ -33,17 +33,18 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
     override init(frame: CGRect) {
         super.init(frame: frame)
         clipsToBounds = true
-        // Opaque strip (2026-11-26): host content must not show through the
-        // candidates. Being painted also keeps remote hosting delivering touches
-        // in the strip gaps and the padding around the chevron.
-        backgroundColor = KeyboardMetrics.candidateFill
-        isOpaque = true
+        // No fill, blur or radius of its own (designer 2026-11-27): the system
+        // keyboard glass shows straight through, continuous with the keys.
+        // Remote keyboard hosting must still receive touches in the strip gaps
+        // and the padding around the chevron, so keep an imperceptible paint.
+        backgroundColor = UIColor.label.withAlphaComponent(0.001)
+        isOpaque = false
         accessibilityIdentifier = "keyboard.candidates"
         collection.backgroundColor = .clear
         // No scroll-edge blur over the words at the strip's edges.
         for effect in [collection.topEdgeEffect, collection.bottomEdgeEffect, collection.leftEdgeEffect, collection.rightEdgeEffect] { effect.isHidden = true }
-        // Alpha-only mask: the collection is clear, so masked words fade into
-        // the panel's own opaque candidateFill in light and dark alike.
+        // Alpha-only mask (black = visible, clear = hidden): masked words fade
+        // to transparent over the system glass in light and dark alike.
         trailingFade.startPoint = CGPoint(x: 0, y: 0.5)
         trailingFade.endPoint = CGPoint(x: 1, y: 0.5)
         trailingFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
@@ -79,9 +80,8 @@ final class CandidatePanel: UIView, UICollectionViewDataSource, UICollectionView
             // layout. Drop their old words immediately when composition ends.
             for cell in collection.subviews.compactMap({ $0 as? CandidateCell }) { cell.clear() }
         }
-        layout.widths = choices.enumerated().map { index, choice in
-            let font = UIFont.systemFont(ofSize: 18, weight: index == 0 ? .semibold : .regular)
-            return ceil((choice.text as NSString).size(withAttributes: [.font: font]).width) + 16
+        layout.widths = choices.map { choice in
+            ceil((choice.text as NSString).size(withAttributes: [.font: CandidateButton.font]).width) + 16
         }
         setNeedsLayout(); layoutIfNeeded()
         let offset = appending ? collection.contentOffset : .zero

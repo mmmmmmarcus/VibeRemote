@@ -82,14 +82,6 @@ struct KeyboardMetrics {
     @MainActor static let actionKeyFill = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
     @MainActor static let actionKeyInk = UIColor { $0.userInterfaceStyle == .dark ? .black : .white }
 
-    /// Opaque candidate strip: nothing behind the keyboard shows through the
-    /// words. With `.label` text this stays well above 4.5:1 in both appearances.
-    @MainActor static let candidateFill = UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.137, green: 0.137, blue: 0.149, alpha: 1)
-            : UIColor(red: 0.835, green: 0.847, blue: 0.867, alpha: 1)
-    }
-
     @MainActor static let keyFill = UIColor { traits in
         let dark = traits.userInterfaceStyle == .dark
         if traits.accessibilityContrast == .high || UIAccessibility.isReduceTransparencyEnabled {
