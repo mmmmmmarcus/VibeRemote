@@ -51,7 +51,7 @@ import UIKit
                     let icon = try XCTUnwrap(descendants(visual).first { $0.accessibilityIdentifier == "keyboard.delete-broom" } as? UIImageView)
                     XCTAssertEqual(icon.image?.isSymbolImage, true)
                     XCTAssertEqual(icon.image?.pngData(), UIImage(systemName: "trash")?.pngData(), "Use the Apple trash symbol, not custom artwork")
-                    XCTAssertEqual(icon.preferredSymbolConfiguration, UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(.preferringMonochrome()))
+                    XCTAssertEqual(icon.preferredSymbolConfiguration, UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(UIImage.SymbolConfiguration.preferringMonochrome()))
                     XCTAssertFalse(visual.isUserInteractionEnabled, "The overlay must never become tap-to-clear")
                     XCTAssertEqual(delete.convert(delete.bounds, to: keyboard.view), original)
                     XCTAssertEqual(visual.frame.maxX, original.maxX, accuracy: 0.01)

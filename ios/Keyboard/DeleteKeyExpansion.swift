@@ -50,7 +50,7 @@ import UIKit
         if let neighborFace { addSubview(neighborFace) }
         addSubview(cap)
         for icon in [broom, deleteIcon] { icon.contentMode = .scaleAspectFit; addSubview(icon) }
-        broom.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(.preferringMonochrome())
+        broom.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular).applying(UIImage.SymbolConfiguration.preferringMonochrome())
         broom.tintColor = .secondaryLabel
         broom.accessibilityIdentifier = "keyboard.delete-broom"
         broom.frame = CGRect(x: geometry.broomCenter.x - 12, y: bounds.midY - 12, width: 24, height: 24)
