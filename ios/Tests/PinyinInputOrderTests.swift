@@ -133,7 +133,10 @@ final class PinyinInputOrderTests: XCTestCase {
             let panel = try XCTUnwrap(descendants(keyboard.view).first { $0 is CandidatePanel } as? CandidatePanel)
             try await waitUntil {
                 keyboard.view.layoutIfNeeded(); panel.layoutIfNeeded()
-                return self.descendants(panel).contains { $0.accessibilityLabel == "我知道了" }
+                // Candidate delivery and the coalescing host's marked-text write
+                // are separate acknowledgments; wait for both, not a partial spelling.
+                return proxy.editor.text.filter(\.isLetter) == "woxhfiaole"
+                    && self.descendants(panel).contains { $0.accessibilityLabel == "我知道了" }
             }
             XCTAssertNotNil(proxy.editor.markedTextRange)
             XCTAssertEqual(proxy.editor.text.filter(\.isLetter), "woxhfiaole")
