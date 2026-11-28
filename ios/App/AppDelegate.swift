@@ -5,6 +5,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         try? VoiceConfiguration.migrateHostConfiguration()
         MobileConfiguration.sync.start()
+        // Recover only diagnostic staging, including files left by a terminated export.
+        Task.detached(priority: .utility) { try? KeyboardDimensionStore.shared.recover() }
         return true
     }
 }
@@ -46,6 +48,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneDidBecomeActive(_ scene: UIScene) {
         setPrivacyCovered(false)
         MobileConfiguration.sync.refresh()
+        // Retry after protected storage becomes available on unlock/foreground.
+        Task.detached(priority: .utility) { try? KeyboardDimensionStore.shared.recover() }
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--verify-cursor") || ProcessInfo.processInfo.arguments.contains("--verify-haptics") || ProcessInfo.processInfo.arguments.contains("--verify-dictation") { return }
         #endif

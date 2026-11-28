@@ -26,6 +26,8 @@ final class KeyboardViewController: UIInputViewController {
     var dictationRecents = DictationRecentStore.shared
     private let dictationTimings = DictationTimingStore.shared
     #endif
+    private var dimensionSamplePending = false
+    private var dimensionFailureShown = false
     private var rows = UIStackView()
     private var modeSourceRows: UIStackView?
     private let touchSurface = KeyboardTouchSurface()
@@ -442,6 +444,57 @@ final class KeyboardViewController: UIInputViewController {
         status.frame = isMiniMode ? CGRect(x: miniSide, y: vertical.topInset, width: width - 2 * metrics.inset - 3 * metrics.miniFunctionWidth - 3 * metrics.keyGap, height: vertical.keyHeight) : CGRect(x: 12, y: 1, width: width - 24, height: 42)
         launchLink?.view.frame = status.frame
         for (content, transform) in zip(modeContentViews, previewTransforms) { content.transform = transform }
+        scheduleDimensionSample()
+    }
+
+    /// Observe after UIKit's layout turn, without requesting layout or touching
+    /// the proxy, key legends, candidates, clipboard or host-app identity.
+    private func scheduleDimensionSample() {
+#if !KEYBOARD_TESTING
+        guard hasFullAccess, !dimensionSamplePending, view.window != nil,
+              !preparingModeTransition, !isModeAnimating else { return }
+        dimensionSamplePending = true
+        let store = KeyboardDimensionStore.shared
+        Task {
+            defer { dimensionSamplePending = false }
+            var optedIn = false
+            do {
+                let consent = try await Task.detached(priority: .utility) { try store.load() }.value
+                optedIn = consent.enabled
+                guard consent.enabled, hasFullAccess, let window = view.window,
+                      !preparingModeTransition, !isModeAnimating else { return }
+                func rect(_ value: CGRect) -> [Double] {
+                    [value.origin.x, value.origin.y, value.width, value.height].map { Double(($0 * 2).rounded() / 2) }
+                }
+                func insets(_ value: UIEdgeInsets) -> [Double] {
+                    [value.top, value.left, value.bottom, value.right].map { Double(($0 * 2).rounded() / 2) }
+                }
+                let frames = rows.arrangedSubviews.map(\.frame)
+                guard (1...5).contains(frames.count) else { return }
+                let gaps = zip(frames, frames.dropFirst()).map { Double((($1.minY - $0.maxY) * 2).rounded() / 2) }
+                let sample = KeyboardDimensionSample(rootBounds: rect(view.bounds), windowBounds: rect(window.bounds),
+                    rootSafeArea: insets(view.safeAreaInsets), windowSafeArea: insets(window.safeAreaInsets),
+                    requestedHeight: Double(keyboardHeight.constant), headerFrame: rect(candidatePanel.frame),
+                    keysFrame: rect(touchSurface.frame), rowHeights: frames.map { Double(($0.height * 2).rounded() / 2) },
+                    rowGaps: gaps, keyGap: Double(metrics.keyGap),
+                    orientation: window.windowScene?.effectiveGeometry.interfaceOrientation.rawValue ?? 0,
+                    mini: isMiniMode ? 1 : 0,
+                    appVersion: KeyboardDimensionSample.numericVersion(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
+                    buildVersion: KeyboardDimensionSample.numericVersion(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String))
+                let fullAccess = hasFullAccess
+                try await Task.detached(priority: .utility) {
+                    try store.append(sample, generation: consent.generation, fullAccess: fullAccess)
+                }.value
+                dimensionFailureShown = false
+            } catch {
+                // A functional error only; never log a provider/file error body.
+                if optedIn && !dimensionFailureShown {
+                    dimensionFailureShown = true
+                    showError("尺寸诊断暂不可用，请解锁设备后在主 App 重试。")
+                }
+            }
+        }
+#endif
     }
 
     func setMiniMode(_ enabled: Bool, animated: Bool = true) {
