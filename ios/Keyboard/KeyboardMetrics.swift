@@ -79,9 +79,9 @@ struct KeyboardMetrics {
         if mini { inset = max(8, inset) }
     }
 
-    /// The design height is a request, not proof of the remote host's bounds.
-    /// Spend vertical whitespace first when the host grants less; keep every row
-    /// and the original fonts. Never feed this fitted height back into negotiation.
+    /// Fit only the granted frame; never feed this result into height negotiation.
+    /// Inner portrait preserves its historical gap while the original font fits.
+    /// All other arrangements retain the whitespace-first fitter below.
     struct VerticalLayout {
         let candidateHeight: CGFloat
         let topInset: CGFloat
@@ -90,11 +90,31 @@ struct KeyboardMetrics {
         let rowGap: CGFloat
         var rowsHeight: CGFloat { rowCount * keyHeight + max(0, rowCount - 1) * rowGap }
         private let rowCount: CGFloat
+        /// Below this boundary the approved 9pt gap + original-font policy is
+        /// impossible. Retain the pre-existing fitter, NOT a new smaller-gap fix.
+        let isBelowInnerPortraitSpacingMinimum: Bool
 
-        init(metrics: KeyboardMetrics, availableHeight: CGFloat) {
+        init(metrics: KeyboardMetrics, availableHeight: CGFloat, displayScale: CGFloat = 1) {
             rowCount = metrics.mini ? 1 : metrics.tablet ? 5 : 4
             candidateHeight = metrics.candidateHeight
             let height = max(0, min(metrics.contentHeight, availableHeight))
+            let innerPortrait = metrics.arrangement == .innerPortrait && !metrics.mini
+            let scale = max(1, displayScale)
+            // KeyControl's original 31pt font and vertical legend offset need
+            // lineHeight + 4. Round UP so even the shortest pixel-rounded row fits.
+            let minimumKeyHeight = ceil((metrics.letterFont.lineHeight + 4) * scale) / scale
+            let minimumHeight = candidateHeight + 4 * minimumKeyHeight + 3 * 9
+            isBelowInnerPortraitSpacingMinimum = innerPortrait && height < minimumHeight
+            if innerPortrait && !isBelowInnerPortraitSpacingMinimum {
+                topInset = metrics.topInset
+                bottomInset = max(0, metrics.bottomInset - (metrics.contentHeight - height))
+                let rowsBudget = height - candidateHeight - topInset - bottomInset
+                // Prefer 14pt, then reduce only as far as 9pt to keep the font.
+                // Quantizing the gap down preserves enough space for every row.
+                rowGap = min(metrics.rowGap, floor((rowsBudget - 4 * minimumKeyHeight) / 3 * scale) / scale)
+                keyHeight = (rowsBudget - 3 * rowGap) / 4
+                return
+            }
             var deficit = max(0, metrics.contentHeight - height)
             let bottomReduction = min(metrics.bottomInset, deficit)
             bottomInset = metrics.bottomInset - bottomReduction; deficit -= bottomReduction

@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import CoreText
 @testable import vvhisper
 
 /// A controller host, not a remote/system keyboard. Its required frame deliberately
@@ -61,7 +62,7 @@ import UIKit
         keyboard.loadViewIfNeeded()
         let host = UIView(); host.clipsToBounds = true
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let window = UIWindow(windowScene: scene)
+        let window = PortraitGapWindow(windowScene: scene)
         window.addSubview(host); window.isHidden = false
         host.addSubview(keyboard.view)
         keyboard.view.translatesAutoresizingMaskIntoConstraints = false
@@ -246,14 +247,15 @@ import UIKit
         let key = try XCTUnwrap(keys(keyboard).compactMap { $0 as? KeyControl }.first { $0.value == value })
         XCTAssertTrue(key.accessibilityActivate())
     }
-    private func capture(_ keyboard: KeyboardViewController, host: UIView, name: String) throws {
+    private func capture(_ keyboard: KeyboardViewController, host: UIView, name: String, style: UIUserInterfaceStyle = .dark) throws {
         // Full granted extension frame, including header and all edges. Neutral
         // backdrop is a stand-in, NOT evidence of the actual system material.
-        host.backgroundColor = UIColor(white: 0.16, alpha: 1)
-        host.overrideUserInterfaceStyle = .dark
+        host.backgroundColor = UIColor(white: style == .dark ? 0.16 : 0.83, alpha: 1)
+        host.overrideUserInterfaceStyle = style
         host.layoutIfNeeded()
         for view in descendants(host) { view.layoutIfNeeded() }
-        let format = UIGraphicsImageRendererFormat(); format.scale = 2
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = name.hasPrefix("portrait-gap-") ? max(1, host.traitCollection.displayScale) : 2
         let image = UIGraphicsImageRenderer(bounds: host.bounds, format: format).image { ctx in host.layer.render(in: ctx.cgContext) }
         let png = try XCTUnwrap(image.pngData())
         let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
@@ -305,4 +307,290 @@ import UIKit
             }
         }
     }
+
+
+    func testInnerPortraitGapPolicyAndLowerHeightBoundary() {
+        for width: CGFloat in [655, 669] {
+            let metrics = KeyboardMetrics(width: width)
+            for scale: CGFloat in [1, 2, 3] {
+                let minimumKey = ceil((metrics.letterFont.lineHeight + 4) * scale) / scale
+                let minimumHeight = 47 + 4 * minimumKey + 27
+                for height in stride(from: minimumHeight, through: metrics.contentHeight, by: 1 / scale) {
+                    let fitted = KeyboardMetrics.VerticalLayout(metrics: metrics, availableHeight: height, displayScale: scale)
+                    XCTAssertFalse(fitted.isBelowInnerPortraitSpacingMinimum)
+                    XCTAssertGreaterThanOrEqual(fitted.rowGap, 9)
+                    XCTAssertLessThanOrEqual(fitted.rowGap, 14)
+                    XCTAssertGreaterThanOrEqual(floor((fitted.keyHeight + 0.0001) * scale) / scale, minimumKey)
+                    XCTAssertEqual(fitted.candidateHeight, 47)
+                    XCTAssertEqual(fitted.rowsHeight + fitted.candidateHeight + fitted.bottomInset, height, accuracy: 0.001)
+                }
+                let short = KeyboardMetrics.VerticalLayout(metrics: metrics, availableHeight: minimumHeight - 1 / scale, displayScale: scale)
+                XCTAssertTrue(short.isBelowInnerPortraitSpacingMinimum, "Explicitly outside the approved policy; no new fallback")
+                let grant = KeyboardMetrics.VerticalLayout(metrics: metrics, availableHeight: 255, displayScale: scale)
+                XCTAssertEqual(grant.rowGap, 14)
+                XCTAssertEqual(grant.keyHeight, 41.5)
+                XCTAssertEqual(grant.rowsHeight, 208)
+                let natural = KeyboardMetrics.VerticalLayout(metrics: metrics, availableHeight: metrics.contentHeight, displayScale: scale)
+                XCTAssertEqual(natural.keyHeight, metrics.keyHeight, accuracy: 0.0001)
+                XCTAssertEqual(natural.rowGap, metrics.rowGap)
+                XCTAssertEqual(natural.bottomInset, metrics.bottomInset)
+                print("Portrait policy width=\(width) scale=\(scale) minimumKey=\(minimumKey) minimumRoot=\(minimumHeight)")
+            }
+        }
+        // Pin the unchanged fitter in every other arrangement, including mini.
+        for (width, landscape): (CGFloat, Bool) in [(375, false), (402, false), (440, false), (452, false), (466, false), (655, true), (801, true)] {
+            for mini in [false, true] {
+                let metrics = KeyboardMetrics(width: width, landscape: landscape, mini: mini)
+                for height: CGFloat in [216, 240, 255, metrics.contentHeight] {
+                    var deficit = max(0, metrics.contentHeight - max(0, min(metrics.contentHeight, height)))
+                    let bottom = min(metrics.bottomInset, deficit); deficit -= bottom
+                    let top = min(metrics.topInset, deficit); deficit -= top
+                    let gaps: CGFloat = mini ? 0 : 3
+                    let reduction = gaps > 0 ? min(max(0, metrics.rowGap - 2), deficit / gaps) : 0
+                    deficit -= reduction * gaps
+                    let fitted = KeyboardMetrics.VerticalLayout(metrics: metrics, availableHeight: height)
+                    XCTAssertFalse(fitted.isBelowInnerPortraitSpacingMinimum)
+                    XCTAssertEqual(fitted.bottomInset, metrics.bottomInset - bottom)
+                    XCTAssertEqual(fitted.topInset, metrics.topInset - top)
+                    XCTAssertEqual(fitted.rowGap, metrics.rowGap - reduction)
+                    XCTAssertEqual(fitted.keyHeight, max(0, metrics.keyHeight - deficit / (mini ? 1 : 4)))
+                }
+            }
+        }
+    }
+
+    func testInnerPortraitHeightOnlyRestorationSafeInsetsAndMini() async throws {
+        try await withHost { keyboard, _, host in
+            let window = try XCTUnwrap(host.window as? PortraitGapWindow)
+            for width: CGFloat in [655, 669] {
+                let natural = KeyboardMetrics(width: width)
+                var reference: [CGRect] = []
+                for safe: CGFloat in [0, 18, 34] {
+                    window.testBottomInset = safe
+                    keyboard.additionalSafeAreaInsets.bottom = safe
+                    window.setNeedsLayout(); window.layoutIfNeeded()
+                    layout(keyboard, host: host, width: width, height: 255, landscape: false)
+                    XCTAssertEqual(window.safeAreaInsets.bottom, safe)
+                    XCTAssertEqual(keyboard.view.safeAreaInsets.bottom, safe)
+                    let actual = keys(keyboard).map { frame($0, keyboard) }
+                    if reference.isEmpty { reference = actual } else { XCTAssertEqual(actual, reference) }
+                    XCTAssertEqual(keyboard.view.bounds.height, 255)
+                    XCTAssertEqual(keyboard.preferredContentSize.height, natural.contentHeight)
+                    let rows = descendants(keyboard.view).compactMap { $0 as? UIStackView }
+                        .first { $0.axis == .vertical && $0.arrangedSubviews.count == 4 }!
+                    let pixel = 1 / max(1, keyboard.view.traitCollection.displayScale)
+                    let rects = rows.arrangedSubviews.map { frame($0, keyboard) }
+                    let heights = rects.map(\.height)
+                    let gaps = zip(rects, rects.dropFirst()).map { $1.minY - $0.maxY }
+                    XCTAssertLessThanOrEqual(heights.max()! - heights.min()!, pixel + 0.001)
+                    XCTAssertLessThanOrEqual(gaps.max()! - gaps.min()!, pixel + 0.001)
+                    for rect in rects { XCTAssertEqual(rect.height, 41.5, accuracy: pixel) }
+                    for gap in gaps { XCTAssertEqual(gap, 14, accuracy: pixel) }
+                    XCTAssertEqual(rects.first!.minY, 47)
+                    XCTAssertEqual(rects.last!.maxY, 255, accuracy: pixel)
+                    print("Portrait safe width=\(width) requestedSafe=\(safe) rootSafe=\(keyboard.view.safeAreaInsets.bottom) windowSafe=\(window.safeAreaInsets.bottom) rows=\(rects)")
+                    // Height-only change must restore all historical values and
+                    // leave every horizontal dimension alone.
+                    layout(keyboard, host: host, width: width, height: natural.contentHeight, landscape: false)
+                    assertHistoricalSpacing(keyboard)
+                    for (a, b) in zip(keys(keyboard).map({ frame($0, keyboard) }), actual) {
+                        XCTAssertEqual(a.minX, b.minX); XCTAssertEqual(a.width, b.width)
+                    }
+                    keyboard.setMiniMode(true, animated: false)
+                    let mini = KeyboardMetrics(width: width, mini: true)
+                    layout(keyboard, host: host, width: width, height: mini.contentHeight, landscape: false)
+                    XCTAssertEqual(keys(keyboard).count, 4)
+                    XCTAssertEqual(keyboard.preferredContentSize.height, mini.contentHeight)
+                    keyboard.setMiniMode(false, animated: false)
+                    layout(keyboard, host: host, width: width, height: 255, landscape: false)
+                    XCTAssertEqual(keys(keyboard).map { frame($0, keyboard) }, reference)
+                }
+            }
+        }
+    }
+
+    /// Identical offscreen fixture on baseline and repair. Not system glass or
+    /// remote-host occlusion evidence; never changes the requested frame budget.
+    func testInnerPortraitGapEvidence() async throws {
+        try await withHost { keyboard, proxy, host in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            keyboard.snippetStore = SnippetStore(directory: directory)
+            let snippet = try keyboard.snippetStore.save(abbreviation: "reply", content: "Synthetic fixture — 谢谢！")
+            layout(keyboard, host: host, width: 655, height: 255, landscape: false)
+            print("Portrait evidence laid out")
+            let original = keys(keyboard).map { frame($0, keyboard) }
+            try portraitShots(keyboard, host: host, original: original, mode: "idle")
+            try tap("k", keyboard)
+            try await wait { self.descendants(keyboard.view).contains { $0.accessibilityIdentifier == "candidate.0" } }
+            keyboard.view.layoutIfNeeded()
+            try portraitShots(keyboard, host: host, original: original, mode: "candidates")
+            let panel = try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? CandidatePanel }.first)
+            panel.setExpanded(true); keyboard.view.layoutIfNeeded()
+            let candidateList = try XCTUnwrap(descendants(panel).compactMap { $0 as? UICollectionView }.first)
+            // Rime pagination arrives asynchronously after willDisplay. Capture
+            // the populated browser, not the first strip's transient empty body.
+            try await wait {
+                keyboard.view.layoutIfNeeded(); panel.layoutIfNeeded(); candidateList.layoutIfNeeded()
+                return candidateList.visibleCells.contains { $0.frame.minY >= panel.headerHeight }
+            }
+            try portraitShots(keyboard, host: host, original: original, mode: "expanded")
+            let enter = try XCTUnwrap(keys(keyboard).first { $0.accessibilityIdentifier == "keyboard.key.return" })
+            XCTAssertLessThanOrEqual(panel.frame.maxY, frame(enter, keyboard).minY)
+            let covered = keys(keyboard).filter { frame($0, keyboard).minY < frame(enter, keyboard).minY }
+            for key in covered {
+                var ancestor = key.superview
+                while ancestor != nil && ancestor?.alpha != 0 { ancestor = ancestor?.superview }
+                XCTAssertNotNil(ancestor)
+                XCTAssertEqual(ancestor?.accessibilityElementsHidden, true)
+                let rect = frame(key, keyboard)
+                XCTAssertFalse(keyboard.view.hitTest(CGPoint(x: rect.midX, y: rect.midY), with: nil) === key)
+            }
+            panel.setExpanded(false); keyboard.view.layoutIfNeeded()
+            try tap("space", keyboard)
+            try await wait { proxy.editor.markedTextRange == nil }
+            keyboard.openSnippets()
+            try await wait { keyboard.snippetStrip.records.first?.id == snippet.id }
+            try await wait {
+                keyboard.view.layoutIfNeeded(); keyboard.snippetStrip.layoutIfNeeded()
+                keyboard.snippetStrip.collection.layoutIfNeeded()
+                return !keyboard.snippetStrip.collection.visibleCells.isEmpty
+            }
+            try portraitShots(keyboard, host: host, original: original, mode: "manual-snippets")
+            keyboard.closeSnippets()
+        }
+    }
+
+    /// Production resolves this from the extension's main bundle. The XCTest
+    /// host is the app, so load the exact built extension asset explicitly.
+    private func loadExtensionArtwork(_ keyboard: KeyboardViewController) throws {
+        let plugins = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
+        let url = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: plugins, includingPropertiesForKeys: nil)
+            .first { $0.pathExtension == "appex" })
+        let bundle = try XCTUnwrap(Bundle(url: url))
+        let image = try XCTUnwrap(UIImage(named: "KeyboardSwitcher", in: bundle, compatibleWith: keyboard.view.traitCollection))
+        for key in keys(keyboard).compactMap({ $0 as? KeyboardSwitcherButton }) {
+            let icon = try XCTUnwrap(key.subviews.compactMap { $0 as? UIImageView }.first)
+            if icon.image == nil { icon.image = image.withRenderingMode(.alwaysTemplate) }
+        }
+    }
+
+    private func portraitShots(_ keyboard: KeyboardViewController, host: UIView, original: [CGRect], mode: String) throws {
+        try loadExtensionArtwork(keyboard)
+        let rows = descendants(keyboard.view).compactMap { $0 as? UIStackView }
+            .first { $0.axis == .vertical && $0.arrangedSubviews.count == 4 }!
+        print("Portrait evidence \(mode) root=\(keyboard.view.bounds) rows=\(rows.arrangedSubviews.map { frame($0, keyboard) })")
+        for style: UIUserInterfaceStyle in [.light, .dark] {
+            print("Portrait evidence capture \(mode) \(style.rawValue)")
+            try capture(keyboard, host: host, name: "portrait-gap-655-255-\(mode)-\(style == .dark ? "dark" : "light")", style: style)
+        }
+        XCTAssertEqual(keys(keyboard).map { frame($0, keyboard) }, original)
+        XCTAssertEqual(keyboard.view.bounds.height, 255)
+    }
+
+    /// Inspect every original legend, including transparent image padding. Raster
+    /// alpha bounds are measured on an unclipped canvas, not a 42pt image box.
+    private func assertOriginalInk(_ keyboard: KeyboardViewController) throws {
+        try loadExtensionArtwork(keyboard)
+        for key in keys(keyboard) {
+            key.layoutIfNeeded()
+            let id = key.accessibilityIdentifier ?? "key"
+            if let control = key as? KeyControl, !control.label.isHidden,
+               let text = control.label.text, !text.isEmpty {
+                let label = control.label
+                if control.value.count == 1 {
+                    let metrics = KeyboardMetrics(width: keyboard.view.bounds.width)
+                    XCTAssertEqual(label.font, metrics.letterFont, id)
+                    XCTAssertGreaterThanOrEqual(key.bounds.height + 0.001, label.font.lineHeight + 4, id)
+                    XCTAssertLessThanOrEqual((text as NSString).size(withAttributes: [.font: label.font!]).width,
+                                             label.bounds.width + 0.5, "No width-driven font shrink: \(id)")
+                }
+                XCTAssertTrue(key.bounds.contains(label.frame), "Original label line box \(id): \(label.frame)")
+                let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [.font: label.font!]))
+                let ink = CTLineGetImageBounds(line, nil)
+                XCTAssertLessThanOrEqual(ink.height, key.bounds.height - 3, "Unscaled glyph ink: \(id)")
+                print("Portrait text \(Int(keyboard.view.bounds.width)) \(id): font=\(label.font.pointSize) line=\(label.font.lineHeight) ink=\(ink)")
+            }
+            for imageView in descendants(key).compactMap({ $0 as? UIImageView }) where !imageView.isHidden {
+                guard let image = imageView.image else { continue }
+                let format = UIGraphicsImageRendererFormat(); format.scale = 3; format.opaque = false
+                let canvas = CGSize(width: image.size.width + 8, height: image.size.height + 8)
+                let raster = UIGraphicsImageRenderer(size: canvas, format: format).image { _ in
+                    image.withTintColor(.black, renderingMode: .alwaysOriginal).draw(at: CGPoint(x: 4, y: 4))
+                }
+                let cg = try XCTUnwrap(raster.cgImage)
+                var bytes = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+                let context = try XCTUnwrap(CGContext(data: &bytes, width: cg.width, height: cg.height,
+                    bitsPerComponent: 8, bytesPerRow: cg.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+                var minX = cg.width, minY = cg.height, maxX = -1, maxY = -1
+                for y in 0..<cg.height { for x in 0..<cg.width where bytes[(y * cg.width + x) * 4 + 3] > 1 {
+                    minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y)
+                } }
+                guard maxX >= minX else { continue }
+                let ink = CGRect(x: CGFloat(minX) / 3 - 4, y: CGFloat(minY) / 3 - 4,
+                                 width: CGFloat(maxX - minX + 1) / 3, height: CGFloat(maxY - minY + 1) / 3)
+                let box = imageView.bounds
+                let factor: CGFloat = imageView.contentMode == .scaleAspectFit
+                    ? min(box.width / image.size.width, box.height / image.size.height) : 1
+                let drawn = CGRect(x: (box.width - image.size.width * factor) / 2 + ink.minX * factor,
+                                   y: (box.height - image.size.height * factor) / 2 + ink.minY * factor,
+                                   width: ink.width * factor, height: ink.height * factor)
+                let inKey = imageView.convert(drawn, to: key)
+                XCTAssertTrue(key.bounds.contains(inKey), "Visible icon ink \(id): \(inKey), container \(imageView.frame)")
+                print("Portrait ink \(Int(keyboard.view.bounds.width)) \(id): visible=\(inKey), container=\(imageView.frame)")
+            }
+        }
+    }
+
+    func testInnerPortraitOriginalLegendsAndHitTargetsAt255() async throws {
+        try await withHost { keyboard, _, host in
+            for width: CGFloat in [655, 669] {
+                layout(keyboard, host: host, width: width, height: 255, landscape: false)
+                for languageIndex in 0..<2 {
+                    if languageIndex == 1 { try tap("language", keyboard) }
+                    for page in 0..<3 {
+                        if page == 1 { try tap("123", keyboard) }
+                        if page == 2 { try tap("#+=", keyboard) }
+                        layout(keyboard, host: host, width: width, height: 255, landscape: false)
+                        assertContained(keyboard)
+                        try assertOriginalInk(keyboard)
+                        let all = keys(keyboard)
+                        for (index, key) in all.enumerated() {
+                            let rect = frame(key, keyboard)
+                            for other in all.dropFirst(index + 1) {
+                                XCTAssertFalse(rect.intersects(frame(other, keyboard)), "No overlapping keycaps")
+                            }
+                            let point = CGPoint(x: rect.midX, y: rect.midY)
+                            let hit = keyboard.view.hitTest(point, with: nil)
+                            let hitsKey = hit === key || hit?.isDescendant(of: key) == true
+                            if (key as? UIControl)?.isEnabled != false {
+                                XCTAssertTrue(hitsKey, "Enabled hit target: \(key.accessibilityIdentifier ?? "key")")
+                            } else {
+                                // The symbols page deliberately contains an empty,
+                                // disabled spacer, not an actionable touch target.
+                                XCTAssertFalse(hitsKey, "Disabled spacer must not own touches")
+                            }
+                            // One owner, even though the touch surface allocates gaps.
+                            let owners = all.filter { $0.point(inside: keyboard.view.convert(point, to: $0), with: nil) }
+                            XCTAssertEqual(owners.count, 1)
+                        }
+                    }
+                    try tap("ABC", keyboard); layout(keyboard, host: host, width: width, height: 255, landscape: false)
+                    try tap("shift", keyboard); keyboard.view.layoutIfNeeded()
+                    try assertOriginalInk(keyboard)
+                    try tap("shift", keyboard)
+                }
+                try tap("language", keyboard)
+                print("Portrait original font width=\(width), lineHeight+4=\(KeyboardMetrics(width: width).letterFont.lineHeight + 4)")
+            }
+        }
+    }
+
+}
+
+@MainActor private final class PortraitGapWindow: UIWindow {
+    var testBottomInset: CGFloat = 0
+    override var safeAreaInsets: UIEdgeInsets { UIEdgeInsets(top: 0, left: 0, bottom: testBottomInset, right: 0) }
 }

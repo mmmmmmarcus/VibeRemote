@@ -417,7 +417,8 @@ final class KeyboardViewController: UIInputViewController {
         // completion. Ordinary layout always fits the granted extension frame,
         // including height-only changes with an unchanged width/orientation.
         let vertical = KeyboardMetrics.VerticalLayout(metrics: metrics,
-            availableHeight: preparingModeTransition || isModeAnimating ? metrics.contentHeight : view.bounds.height)
+            availableHeight: preparingModeTransition || isModeAnimating ? metrics.contentHeight : view.bounds.height,
+            displayScale: view.traitCollection.displayScale)
         rows.spacing = vertical.rowGap
         for row in rows.arrangedSubviews {
             for constraint in row.constraints where constraint.firstAttribute == .height && constraint.secondItem == nil {
