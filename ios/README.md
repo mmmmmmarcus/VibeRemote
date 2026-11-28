@@ -1481,3 +1481,5 @@ stale-field rejection, compact-panel navigation and language-hold tap suppressio
 The signed Debug build is installed on the Duo without removing app data. Native
 input-mode picker behavior on a physical hold remains pending a screen-control
 window; unit tests do not verify UIKit’s system picker.
+
+Dictation now delivers replies without waiting for the polling tick and can overlap polishing with refinement after release. See [Dictation latency](../macos/Design/DictationLatency.md) for exact-match reuse, packet comparison, and timing measurements.

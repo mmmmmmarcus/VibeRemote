@@ -22,8 +22,39 @@ final class SeedStreams {
     private final WebSocket live, polish;
     private volatile boolean liveFailed, polishFailed;
     private String latestLive = "", latestPolish = "";
-    private boolean liveDone;
     private volatile boolean closed;
+    private boolean liveDone, accurateDone, released, delivered, refinementExpired;
+    private final Runnable refinementDeadline = () -> { refinementExpired = true; resolve(true); };
+    private final Runnable recognitionDeadline = this::recognitionExpired;
+    private void recognitionExpired() {
+        if (closed || delivered) return;
+        String best = !latestLive.isEmpty() ? latestLive : latestPolish;
+        if (!best.isEmpty()) deliver(best, liveDone ? "live" : "partial");
+        else { delivered = true; cancel(); listener.error("Recognition timed out. Try again."); }
+    }
+    void released() {
+        main.post(() -> {
+            if (closed || released) return;
+            released = true;
+            main.postDelayed(refinementDeadline, 1500);
+            main.postDelayed(recognitionDeadline, 5000);
+            resolve(false);
+        });
+    }
+    private void resolve(boolean deadline) {
+        if (closed || delivered || !released) return;
+        if (accurateDone) deliver(!latestPolish.isEmpty() ? latestPolish : latestLive, "refined");
+        else if ((deadline || refinementExpired || polishFailed) && !latestLive.isEmpty()) deliver(latestLive, liveDone ? "live" : "partial");
+    }
+    private void deliver(String text, String path) {
+        if (delivered || closed) return;
+        delivered = true;
+        main.removeCallbacks(refinementDeadline); main.removeCallbacks(recognitionDeadline);
+        cancel();
+        listener.route(path);
+        listener.text(text, true);
+    }
+
 
     SeedStreams(WebSocket.Factory client, String key, Dictation.Listener listener) {
         this.listener = listener;
@@ -74,13 +105,11 @@ final class SeedStreams {
     private void unavailable(boolean accurate) {
         main.post(
                 () -> {
-                    if (closed) return;
+                    if (closed || delivered) return;
                     if (accurate) polishFailed = true;
                     else liveFailed = true;
-                    if (polishFailed && liveDone && !latestLive.isEmpty())
-                        listener.text(latestLive, true);
-                    else if (polishFailed && liveFailed)
-                        listener.error("Recognition unavailable. Check your connection or try again later.");
+                    if (released) resolve(false);
+                    else if (polishFailed && liveFailed) listener.error("Recognition unavailable. Check your connection or try again later.");
                 });
     }
 
@@ -133,25 +162,28 @@ final class SeedStreams {
         boolean last = (type & 2) != 0;
         main.post(
                 () -> {
-                    if (closed) return;
+                    if (closed || delivered) return;
                     if (accurate) {
                         if (!text.isEmpty()) latestPolish = text;
-                        if (last)
-                            listener.text(latestPolish.isEmpty() ? latestLive : latestPolish, true);
+                        if (last) { accurateDone = true; listener.timing("refinedFinal"); resolve(false); }
                     } else {
                         if (!text.isEmpty()) latestLive = text;
                         liveDone = last;
-                        listener.text(latestLive, last && polishFailed);
+                        if (last) { listener.timing("liveFinal"); listener.liveFinal(latestLive); }
+                        listener.text(latestLive, false);
+                        resolve(false);
                     }
                 });
     }
 
     boolean audio(byte[] pcm, boolean last) {
+        if (last) released();
         return frame(last ? 0x22 : 0x20, 0, pcm);
     }
 
     void cancel() {
         closed = true;
+        main.removeCallbacks(refinementDeadline); main.removeCallbacks(recognitionDeadline);
         live.cancel();
         polish.cancel();
     }

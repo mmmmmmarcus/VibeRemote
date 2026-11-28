@@ -124,8 +124,13 @@ struct DictationTiming: Codable, Equatable, Sendable {
     var date: Date
     /// Hold start → first audio chunk (microphone live).
     var micLive: Double?
+    var firstText: Double?
+    var speculation: String?
+    var packetMilliseconds: Int?
     /// Hold start → release.
     var hold: Double?
+    /// Release to requesting WebKit stop (not a hardware-stop acknowledgement).
+    var captureStopped: Double?
     /// Release → live (bigmodel_async) final.
     var liveFinal: Double?
     /// Release → refined (bigmodel_nostream) final; nil with refinedTimedOut when it was not awaited.
@@ -191,6 +196,7 @@ struct DictationTimingSummary: Equatable {
     var count: Int
     var median: Double?
     var p90: Double?
+    var p95: Double?
     var slowestStep: DictationTiming.Step?
 
     init(_ records: [DictationTiming]) {
@@ -199,6 +205,7 @@ struct DictationTimingSummary: Equatable {
         let durations = delivered.compactMap(\.releaseToText).sorted()
         median = Self.percentile(durations, 0.5)
         p90 = Self.percentile(durations, 0.9)
+        p95 = Self.percentile(durations, 0.95)
         var counts: [DictationTiming.Step: Int] = [:]
         for step in delivered.compactMap(\.slowestStep) { counts[step, default: 0] += 1 }
         slowestStep = DictationTiming.Step.allCases.max { (counts[$0] ?? 0) < (counts[$1] ?? 0) }
@@ -216,6 +223,7 @@ struct DictationTimingSummary: Equatable {
         if let median, let p90 {
             lines.append(String(format: "Release to text: median %.1f s, p90 %.1f s", median, p90))
         }
+        if let p95 { lines.append(String(format: "Release to text: p95 %.1f s", p95)) }
         if let slowestStep { lines.append("Most common slow step: \(slowestStep.rawValue)") }
         return lines.joined(separator: "\n")
     }

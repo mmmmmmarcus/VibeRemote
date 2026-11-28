@@ -795,6 +795,8 @@ final class DictationController: ObservableObject {
     /// hold's status. Its text is still typed: the user spoke it.
     private var holdCount = 0
     private var editMonitor: DictationEditMonitor?
+    private var latency: DictationLatency?
+    private var captureSettings: DictationSettings?
 
     /// The Computer Use bar, supplied by the app delegate, for Auto Computer Use.
     var computerUse: ComputerUseHandoff?
@@ -879,6 +881,11 @@ final class DictationController: ObservableObject {
             fail("Accessibility permission is required to insert dictation text.")
             return
         }
+        let latency = DictationLatency()
+        self.latency = latency
+        self.captureSettings = settings
+        latency.values["packetMilliseconds"] = Double(SeedStreamFrame.audioPacketBytes) / 32
+        latency.labels["source"] = source == .macMicrophone ? "macMicrophone" : source == .soundcore ? "soundcore" : "siri"
         let live = settings.provider == .seedASR && settings.seedStreaming ? startStream(settings) : nil
         switch target.kind {
         case .editor: break
@@ -892,7 +899,8 @@ final class DictationController: ObservableObject {
             session?.append(samples)
             refinementSession?.append(samples)
             let rms = DictationLevelMeter.rms(samples)
-            Task { @MainActor in self?.indicator.hear(rms: rms) }
+            let capturedAt = ProcessInfo.processInfo.systemUptime
+            Task { @MainActor in latency.firstAudio(capturedAt); self?.indicator.hear(rms: rms) }
         }
         let capture: any DictationAudioSource
         if source == .soundcore {
@@ -1069,6 +1077,7 @@ final class DictationController: ObservableObject {
         editMonitor = nil
         guard let recorder else { return }
         self.recorder = nil
+        latency?.labels["path"] = "cancelled"; latency?.save(); latency = nil; captureSettings = nil
         takeBridgeSessions(from: recorder)
         _ = recorder.stop()
         live?.cancel()
@@ -1082,11 +1091,17 @@ final class DictationController: ObservableObject {
         rmDebug("🗣 Dictation hold cancelled")
     }
 
+    func markPhysicalRelease() { latency?.markRelease() }
+    func resumePhysicalHold() { latency?.released = nil; latency?.values.removeValue(forKey: "hold") }
+
     func end() {
         guard let recorder else { return }
         self.recorder = nil
         takeBridgeSessions(from: recorder)
         let hold = holdCount
+        let latency = self.latency ?? DictationLatency()
+        self.latency = nil
+        if latency.released == nil { latency.markRelease() }
         let live = self.live
         self.live = nil
         let source = self.source
@@ -1095,19 +1110,21 @@ final class DictationController: ObservableObject {
         let refinement = self.refinement
         self.refinement = nil
         let target = self.target
-        let settings = DictationSettings.load()
+        let settings = captureSettings ?? DictationSettings.load()
+        captureSettings = nil
         let monitor = editMonitor
         editMonitor = nil
         let processing = Task { @MainActor in
-            defer { monitor?.stop() }
+            defer { monitor?.stop(); latency.save() }
             // No drain grace: the remote's audio comes from the helper's completed session
             // file, not from the virtual device's loopback, so nothing is still in flight.
             let audio = recorder.stop()
+            latency.mark("captureStopped")
             guard monitor?.cancelled != true else { return }
             live?.session?.finish()
             refinement?.session?.finish()
             await self.finish(audio, settings: settings, hold: hold, live: live, source: source,
-                              editorText: context?.text, refinement: refinement, target: target)
+                              editorText: context?.text, refinement: refinement, target: target, latency: latency)
         }
         monitor?.processingTask = processing
     }
@@ -1121,7 +1138,7 @@ final class DictationController: ObservableObject {
 
     private func finish(_ audio: DictationAudio, settings: DictationSettings, hold: Int,
                         live: DictationLiveHold?, source: Source = .remote, editorText: String? = nil,
-                        refinement: DictationRefinementStream? = nil, target: HoldTarget = HoldTarget()) async {
+                        refinement: DictationRefinementStream? = nil, target: HoldTarget = HoldTarget(), latency: DictationLatency) async {
         // A later hold owns the indicator once it has begun; only the current hold moves it.
         guard audio.duration >= Self.minimumDuration else {
             live?.cancel()
@@ -1144,7 +1161,7 @@ final class DictationController: ObservableObject {
         if hold == holdCount { phase = .transcribing; indicator.recognize() }
         if let live {
             await finishStreaming(live, audio: audio, settings: settings, hold: hold, editorText: editorText,
-                                  refinement: refinement, target: target)
+                                  refinement: refinement, target: target, latency: latency)
             return
         }
         let started = Date()
@@ -1152,8 +1169,12 @@ final class DictationController: ObservableObject {
         do {
             let accurate = try await Self.accurateText(refinement, audio: audio, settings: settings, editorText: editorText)
             guard !Task.isCancelled else { return }
+            latency.mark("recognition"); latency.labels["path"] = accurate.via
+            let polishStart = ProcessInfo.processInfo.systemUptime
             guard let polish = await polishUnlessEdited(Self.finalText(accurate.text, settings: settings),
                                                        settings: settings, hold: hold, live: nil) else { return }
+            latency.values["polishDuration"] = ProcessInfo.processInfo.systemUptime - polishStart
+            latency.mark("textReady")
             let text = DictationSentencePunctuation.apply(polish.text, enabled: settings.sentencePunctuation)
             let elapsed = Date().timeIntervalSince(started)
             rmDebug(String(format: "🗣 Dictation %@%@: %.1f s audio (peak %.0f dBFS) → %d chars in %.2f s%@",
@@ -1183,6 +1204,7 @@ final class DictationController: ObservableObject {
                 return
             }
             await DictationTyper.type(text)
+            latency.mark("committed")
             guard !Task.isCancelled else { return }
             if hold == holdCount {
                 if polish.notice != nil { DictationNoticePresenter.shared.show(.polishing) }
@@ -1201,45 +1223,63 @@ final class DictationController: ObservableObject {
     /// differs.
     private func finishStreaming(_ live: DictationLiveHold, audio: DictationAudio,
                                  settings: DictationSettings, hold: Int, editorText: String?,
-                                 refinement: DictationRefinementStream?, target: HoldTarget) async {
+                                 refinement: DictationRefinementStream?, target: HoldTarget, latency: DictationLatency) async {
         let released = Date()
         // The one refinement, after release: the accurate recognizer's answer for the whole clip
         // replaces what streamed, and the typewriter corrects what differs. Once it is in, the
         // stream's own final no longer matters. A failed or empty refinement keeps the streamed
         // text; if the stream failed too, there is nothing to type.
+        var speculativeSource: String?
+        var speculative: DictationBudgetTask<DictationPolisher.Result>?
+        func speculate() {
+            guard speculative == nil, live.succeeded, let raw = live.latest?.text else { return }
+            let clean = Self.finalText(raw, settings: settings)
+            guard settings.polishDictation, !DictationShortText.skipsPolishing(clean) else { return }
+            speculativeSource = clean
+            speculative = Self.polishTask(clean, settings: settings)
+            latency.labels["speculation"] = "started"
+        }
+        live.onEnd = { speculate() }
+        defer { live.onEnd = nil; speculative?.cancel(); live.cancel(); refinement?.cancel() }
+        speculate()
         var text: String?
-        var route: String
-        do {
-            let accurate = try await Self.accurateText(refinement, audio: audio, settings: settings, editorText: editorText)
-            if accurate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                route = "stream (refinement empty)"
-            } else {
-                text = accurate.text
-                let streamed = live.latest?.text ?? ""
-                route = DictationTyper.normalized(accurate.text) == DictationTyper.normalized(streamed)
-                    ? "stream + refined via \(accurate.via) (unchanged)" : "stream + refined via \(accurate.via)"
-            }
-        } catch {
-            route = "stream (refinement failed: \(error.localizedDescription))"
+        var route = "live"
+        if let refinement {
+            await refinement.waitForEnd(timeout: 1.5)
+            text = refinement.answer
+            if text != nil { route = "nostream" }
         }
         guard !Task.isCancelled else { return }
         if text == nil {
-            await live.waitForEnd(timeout: 4)
-            guard !Task.isCancelled else { return }
-            guard live.succeeded else {
-                let reason = live.failure ?? "unknown"
-                rmDebug("⚠️ Dictation seedASR failed: stream \(reason), \(route)")
-                await live.typewriter.finish(nil)
-                if hold == holdCount { fail("Seed ASR did not answer (\(reason)).") }
-                return
+            text = live.latest?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text?.isEmpty != false {
+                // Only a hold with no usable transcript needs another network recognition.
+                do {
+                    let accurate = try await Self.accurateText(nil, audio: audio, settings: settings, editorText: editorText)
+                    text = accurate.text; route = accurate.via
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    text = live.latest?.text
+                    if text?.isEmpty != false {
+                        await live.typewriter.finish(nil)
+                        if hold == holdCount { fail("Recognition timed out or was unavailable.") }
+                        return
+                    }
+                }
             }
-            text = live.latest?.text ?? ""
-        } else {
-            live.cancel()
         }
-        // Do not finish the typewriter yet: its draft underline stays up throughout this await.
-        guard let polish = await polishUnlessEdited(Self.finalText(text ?? "", settings: settings),
-                                                   settings: settings, hold: hold, live: live) else { return }
+        guard !Task.isCancelled else { return }
+        latency.mark("recognition"); latency.labels["path"] = route
+        if let first = live.firstTextAt { latency.values["firstText"] = first.timeIntervalSince(live.startedAt) }
+        let clean = Self.finalText(text ?? "", settings: settings)
+        let reuse = speculativeSource == clean ? speculative : nil
+        if speculative != nil { latency.labels["speculation"] = reuse == nil ? "discarded" : "reused" }
+        if reuse == nil { speculative?.cancel() }
+        live.cancel()
+        let polishStart = ProcessInfo.processInfo.systemUptime
+        guard let polish = await polishUnlessEdited(clean, settings: settings, hold: hold, live: live, prepared: reuse) else { return }
+        latency.values["polishDuration"] = ProcessInfo.processInfo.systemUptime - polishStart
+        latency.mark("textReady")
         let final = DictationSentencePunctuation.apply(polish.text, enabled: settings.sentencePunctuation)
         Self.settle(target, live: live)
         if target.kind == .computerUse {
@@ -1251,6 +1291,7 @@ final class DictationController: ObservableObject {
         } else {
             await live.typewriter.finish(final)
         }
+        if !Task.isCancelled, live.typewriter.stoppedReason == nil { latency.mark("committed") }
         guard !Task.isCancelled else { return }
         let elapsed = Date().timeIntervalSince(released)
         let firstText = live.firstTextAt.map { String(format: "%.2f s", $0.timeIntervalSince(live.startedAt)) } ?? "none"
@@ -1280,7 +1321,7 @@ final class DictationController: ObservableObject {
     }
 
     private func polishUnlessEdited(_ text: String, settings: DictationSettings, hold: Int,
-                                    live: DictationLiveHold?) async -> DictationPolisher.Result? {
+                                    live: DictationLiveHold?, prepared: DictationBudgetTask<DictationPolisher.Result>? = nil) async -> DictationPolisher.Result? {
         guard !Task.isCancelled else { return nil }
         let wait = DictationPolishWait { [weak self] in
             live?.typewriter.stop("you edited the text while polishing")
@@ -1289,15 +1330,16 @@ final class DictationController: ObservableObject {
             self.phase = .finished("Polishing cancelled because you edited the text.")
         }
         return await wait.run(monitorKeyboard: settings.polishDictation && !text.isEmpty) {
-            await Self.polish(text, settings: settings)
+            let request = prepared ?? Self.polishTask(text, settings: settings)
+            return await request.value()
         }
     }
 
-    private static func polish(_ text: String, settings: DictationSettings) async -> DictationPolisher.Result {
-        let result = await DictationPolisher.polish(text, enabled: settings.polishDictation,
-            key: settings.polishDictation ? DictationKeychain.polishKey() : nil)
-        if let notice = result.notice { rmDebug("🗣 " + notice) }
-        return result
+    private static func polishTask(_ text: String, settings: DictationSettings) -> DictationBudgetTask<DictationPolisher.Result> {
+        DictationBudgetTask(seconds: 3, fallback: .init(text: text, notice: nil)) {
+            await DictationPolisher.polish(text, enabled: settings.polishDictation && !DictationShortText.skipsPolishing(text),
+                key: settings.polishDictation ? DictationKeychain.polishKey() : nil)
+        }
     }
 
     private func fail(_ message: String) {
@@ -1312,17 +1354,23 @@ final class DictationController: ObservableObject {
     /// through the flash API with the same hints. `via` names which, for the log.
     private static func accurateText(_ refinement: DictationRefinementStream?, audio: DictationAudio,
                                      settings: DictationSettings, editorText: String?) async throws -> (text: String, via: String) {
-        var via = "flash"
+        guard settings.provider == .seedASR else {
+            return (try await engine(for: settings, editorText: editorText).transcribe(audio, language: settings.language), "provider")
+        }
+        let via = "flash"
         // Every hold length goes through it (2026-11-12): flash puts a sentence break at each
         // pause longer than ~3 s ("I want is. A way to…"), whatever the grammar, and its
         // `vad_segment_duration` changes nothing, while the streaming-input mode punctuates by
         // meaning across 3–5 s thinking pauses. It may still break once at its 15 s window.
         if let refinement {
-            await refinement.waitForEnd(timeout: 4)
+            await refinement.waitForEnd(timeout: 1.5)
             if let answer = refinement.answer { return (answer, "nostream") }
-            via = "flash (nostream \(refinement.failure ?? "empty"))"
         }
-        let text = try await engine(for: settings, editorText: editorText).transcribe(audio, language: settings.language)
+        let request = DictationBudgetTask<Result<String, Error>>(seconds: 6, fallback: .failure(DictationError("Recognition timed out."))) {
+            do { return .success(try await engine(for: settings, editorText: editorText).transcribe(audio, language: settings.language)) }
+            catch { return .failure(error) }
+        }
+        let text = try await request.value().get()
         return (text, via)
     }
 

@@ -19,8 +19,10 @@ enum SeedStreamFrame {
     /// packet (or every 15 s of audio), with the more accurate non-streaming model.
     static let nostreamEndpoint = URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream")!
     static let defaultResourceID = "volc.bigasr.sauc.duration"
-    /// 200 ms of 16 kHz mono s16le, the packet size the documentation says performs best.
-    static let audioPacketBytes = 6_400
+    /// 100 ms by default. Set dictationAudioPacketMilliseconds=200 for comparison.
+    static var audioPacketBytes: Int {
+        UserDefaults.standard.integer(forKey: "dictationAudioPacketMilliseconds") == 200 ? 6_400 : 3_200
+    }
 
     static func fullClientRequest(json: Data) -> Data { frame(kind: 0b0001, flags: 0, serialization: 1, payload: json) }
     static func audio(_ pcm: Data, last: Bool) -> Data { frame(kind: 0b0010, flags: last ? 0b0010 : 0, serialization: 0, payload: pcm) }
@@ -162,6 +164,7 @@ final class SeedStreamingSession: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.vvhisper.dictation.seed-stream")
     private let onEvent: @Sendable (Event) -> Void
+    private let packetBytes = SeedStreamFrame.audioPacketBytes
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var pending = Data()
@@ -207,9 +210,9 @@ final class SeedStreamingSession: @unchecked Sendable {
     }
 
     private func flushPackets() {
-        while pending.count >= SeedStreamFrame.audioPacketBytes {
-            send(SeedStreamFrame.audio(pending.prefix(SeedStreamFrame.audioPacketBytes), last: false))
-            pending.removeFirst(SeedStreamFrame.audioPacketBytes)
+        while pending.count >= packetBytes {
+            send(SeedStreamFrame.audio(pending.prefix(packetBytes), last: false))
+            pending.removeFirst(packetBytes)
         }
     }
 

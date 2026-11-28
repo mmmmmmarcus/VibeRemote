@@ -305,6 +305,7 @@ final class KeyboardViewController: UIInputViewController {
         refreshKeyboardPreferences()
         tapFeedback.prepare()
         if timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in Task { @MainActor in self?.poll() } } }
+        voiceSession.onReplyAvailable = { [weak self] in self?.poll() }
         poll()
     }
     override func viewWillDisappear(_ animated: Bool) {

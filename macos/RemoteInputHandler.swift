@@ -1080,7 +1080,10 @@ final class RemoteInputHandler {
             // physically held key captured for this button.
             stopRepeat(for: button)
             resolveModifierRelease(for: button)
-            if button == "siri" { siriLastReleaseAt = Date() }
+            if button == "siri" {
+                siriLastReleaseAt = Date()
+                if action == .vvhisperDictation, DictationController.shared.recordingSource == .remote { DictationController.shared.markPhysicalRelease() }
+            }
             if microphoneBridgeManager?.menuStatus().running == true, let timeout = Self.voiceTailReleaseTimeout(
                 action: action,
                 button: button,

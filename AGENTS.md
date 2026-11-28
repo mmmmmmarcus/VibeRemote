@@ -12,6 +12,16 @@ or commit keys or publish these private binaries. See macos/Design/PrivateBuilds
 (relative to repository root) for provisioning and verification limits.
 
 
+## Dictation latency (2026-11-28)
+
+Completion now uses the bounded policy in `macos/Design/DictationLatency.md`.
+This supersedes the historical 4-second refinement/15-second polishing waits.
+All platforms skip ordinary polishing for <=6 weighted short-text units and may
+speculate once on a live final after release, reusing only an exact source match.
+Keep deadline fallback, cancellation and editor ownership guards. Packets default
+to 100 ms with a 200 ms comparison preference. Device release buffers are unchanged.
+Timing files contain only durations and fixed labels, never transcript/audio/keys.
+
 ## Product identity (2026-11-15)
 
 The product is now **vvhisper** (lowercase, intentional double v). New app bundles and

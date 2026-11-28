@@ -10,13 +10,14 @@ import java.util.Arrays;
 /** The capture thread owns the microphone for the duration of one hold. */
 final class SeedSession extends Dictation {
     private static final OkHttpClient CLIENT = new OkHttpClient();
-    private static final int PACKET = 6400;
+    private final int packet;
     private final SeedStreams streams;
     private final Listener listener;
     private long lastLevel;
     private volatile boolean closed, stopping;
 
-    SeedSession(String key, Listener listener) {
+    SeedSession(String key, Listener listener, int packetMilliseconds) {
+        packet = packetMilliseconds == 200 ? 6400 : 3200;
         this.listener = listener;
         streams = new SeedStreams(CLIENT, key, listener);
         new Thread(this::capture, "vvhisper-seed").start();
@@ -34,13 +35,15 @@ final class SeedSession extends Dictation {
                             16000,
                             AudioFormat.CHANNEL_IN_MONO,
                             AudioFormat.ENCODING_PCM_16BIT,
-                            Math.max(min, PACKET * 2));
+                            Math.max(min, packet * 2));
             if (!closed && !stopping) mic.startRecording();
-            byte[] data = new byte[PACKET];
+            byte[] data = new byte[packet];
             int used = 0;
+            boolean first = true;
             while (!closed && !stopping) {
-                int n = mic.read(data, used, Math.min(640, PACKET - used));
+                int n = mic.read(data, used, Math.min(640, packet - used));
                 if (n <= 0) throw new IOException();
+                if (first) { first = false; listener.timing("micLive"); }
                 long now = android.os.SystemClock.uptimeMillis();
                 if (now - lastLevel >= 50) {
                     double sum = 0;
@@ -48,7 +51,7 @@ final class SeedSession extends Dictation {
                     listener.level((float) Math.min(1, Math.sqrt(sum / Math.max(1, n / 2)) * 8)); lastLevel = now;
                 }
                 used += n;
-                if (used == PACKET) {
+                if (used == packet) {
                     if (!streams.audio(data, false)) throw new IOException();
                     used = 0;
                 }
@@ -60,10 +63,12 @@ final class SeedSession extends Dictation {
             streams.fail("Seed could not capture or send audio");
         } finally {
             if (mic != null) mic.release();
+            if (!closed) listener.timing("captureStopped");
         }
     }
 
     void stop() {
+        streams.released();
         stopping = true;
     }
 

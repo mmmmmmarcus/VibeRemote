@@ -14,6 +14,9 @@ abstract class Dictation {
 
         void error(String message);
         default void level(float value) {}
+        default void liveFinal(String text) {}
+        default void timing(String stage) {}
+        default void route(String path) {}
     }
 
     abstract void stop();
@@ -21,7 +24,7 @@ abstract class Dictation {
     abstract void cancel();
 
     static Dictation start(Context context, String seedKey, String language, Listener listener) {
-        if (!seedKey.isEmpty()) return new SeedSession(seedKey, listener);
+        if (!seedKey.isEmpty()) return new SeedSession(seedKey, listener, context.getSharedPreferences("keyboard", 0).getInt("dictationAudioPacketMilliseconds", 100));
         if (!SpeechRecognizer.isRecognitionAvailable(context))
             throw new IllegalStateException("Set up Android speech recognition or add a Seed key");
         SpeechRecognizer recognizer = SpeechRecognizer.createSpeechRecognizer(context);

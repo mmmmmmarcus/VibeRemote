@@ -56,7 +56,7 @@ final class DictationStreamingTests: XCTestCase {
         XCTAssertEqual(request["enable_nonstream"] as? Bool, false, "no second pass while speaking; refined once after release")
         XCTAssertEqual(request["result_type"] as? String, "full")
         XCTAssertEqual((json["user"] as? [String: Any])?["uid"] as? String, "42")
-        XCTAssertEqual(SeedStreamFrame.audioPacketBytes, 16_000 / 5 * 2, "200 ms of 16-bit mono")
+        XCTAssertTrue([3_200, 6_400].contains(SeedStreamFrame.audioPacketBytes), "100/200 ms of 16-bit mono")
     }
 
     func testPCMIsLittleEndianAndClamped() {

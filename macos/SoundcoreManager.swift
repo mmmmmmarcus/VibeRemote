@@ -684,6 +684,7 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
     func releaseDictationKey() {
         guard capture != nil, !stopping else { return }
         handsFree = false
+        DictationController.shared.markPhysicalRelease()
         DictationHotkeyMonitor.shared.resetSoundcoreGesture()
         let delay = releaseBuffer.effectiveDuration
         guard delay > 0 else { endDictation(cancel: false); return }
@@ -705,6 +706,7 @@ final class SoundcoreManager: NSObject, ObservableObject, @preconcurrency CBCent
     func resumeDictationKey() -> Bool {
         guard capture != nil, !stopping, releaseCountdown.token != nil else { return false }
         cancelReleaseBuffer()
+        DictationController.shared.resumePhysicalHold()
         status = "Microphone on"
         rmDebug("🎤 Soundcore release buffer resumed")
         return true

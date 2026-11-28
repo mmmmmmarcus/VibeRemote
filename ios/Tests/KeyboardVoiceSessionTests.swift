@@ -417,6 +417,7 @@ private final class Counter: @unchecked Sendable {
         XCTAssertEqual(record.recognition, 1.0); XCTAssertEqual(record.polish, .polished); XCTAssertEqual(record.polishDuration, 0)
         XCTAssertEqual(record.textReady, 1.0); XCTAssertEqual(record.committed, 1.05)
         XCTAssertEqual(record.path, .refined); XCTAssertNil(record.error)
+        XCTAssertEqual(record.speculation, "reused")
         let json = timings.exportJSON()
         XCTAssertFalse(json.localizedCaseInsensitiveContains("quarterly")); XCTAssertFalse(json.contains("synthetic"))
         // A skipped short utterance and a timed-out refinement are labelled.
@@ -445,5 +446,56 @@ private final class Counter: @unchecked Sendable {
         var failed = DictationTiming(date: Date()); failed.path = .failed; failed.error = .quota
         XCTAssertNil(DictationTimingSummary([failed]).median)
         XCTAssertEqual(DictationTimingSummary.percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.9), 9)
+    }
+}
+
+private actor SpeculationLoader {
+    var pending: [CheckedContinuation<(Data, URLResponse), Error>] = []
+    func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { pending.append($0) }
+    }
+    var count: Int { pending.count }
+    func resolve(_ index: Int, text: String) throws {
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: ["text": text]), as: UTF8.self)
+        let data = try JSONSerialization.data(withJSONObject: ["choices": [["finish_reason": "stop", "message": ["content": content]]]])
+        pending[index].resume(returning: (data, HTTPURLResponse(url: URL(string: "https://example.invalid")!, statusCode: 200, httpVersion: nil, headerFields: nil)!))
+    }
+}
+@MainActor final class DictationSpeculationTests: XCTestCase {
+    private func settle() async { for _ in 0..<60 { await Task.yield() } }
+    func testExactFinalReusesPolishingAndDeliversWithoutPolling() async throws {
+        let capture = TestCapture(); var streams: [TestStream] = []; let loader = SpeculationLoader()
+        let session = KeyboardVoiceSession(capture: capture, configuration: { .init(seedKey: "synthetic", arkKey: "synthetic") },
+            makeStream: { event in let stream = TestStream(event); streams.append(stream); return stream },
+            polishLoad: { try await loader.load($0) })
+        let id = UUID(); var deliveries = 0
+        session.onReplyAvailable = { deliveries += 1 }
+        session.command(.init(id: id, phase: .recording, updatedAt: Date())); capture.audio(id)
+        session.command(.init(id: id, phase: .finish, updatedAt: Date()))
+        let source = "please send the updated document tomorrow"
+        streams[0].event(.final(.init(text: source, definiteUtterances: 1))); await settle()
+        let requests = await loader.count; XCTAssertEqual(requests, 1)
+        try await loader.resolve(0, text: "Please send the updated document tomorrow."); await settle()
+        XCTAssertNotEqual(session.reply?.isFinal, true)
+        streams[1].event(.final(.init(text: source, definiteUtterances: 1))); await settle()
+        XCTAssertEqual(session.reply?.text, "Please send the updated document tomorrow.")
+        XCTAssertEqual(session.reply?.isFinal, true); XCTAssertGreaterThan(deliveries, 0)
+        let after = await loader.count; XCTAssertEqual(after, 1)
+    }
+    func testChangedRefinementDiscardsSpeculativeResult() async throws {
+        let capture = TestCapture(); var streams: [TestStream] = []; let loader = SpeculationLoader()
+        let session = KeyboardVoiceSession(capture: capture, configuration: { .init(seedKey: "synthetic", arkKey: "synthetic") },
+            makeStream: { event in let stream = TestStream(event); streams.append(stream); return stream },
+            polishLoad: { try await loader.load($0) })
+        let id = UUID(); session.command(.init(id: id, phase: .recording, updatedAt: Date())); capture.audio(id)
+        session.command(.init(id: id, phase: .finish, updatedAt: Date()))
+        streams[0].event(.final(.init(text: "please send the updated document tomorrow", definiteUtterances: 1))); await settle()
+        streams[1].event(.final(.init(text: "please send the updated document Monday", definiteUtterances: 1))); await settle()
+        let requests = await loader.count; XCTAssertEqual(requests, 2)
+        try await loader.resolve(0, text: "Wrong old transcript."); await settle()
+        XCTAssertNotEqual(session.reply?.isFinal, true)
+        try await loader.resolve(1, text: "Please send the updated document Monday."); await settle()
+        XCTAssertEqual(session.reply?.text, "Please send the updated document Monday.")
+        XCTAssertEqual(session.reply?.isFinal, true)
     }
 }

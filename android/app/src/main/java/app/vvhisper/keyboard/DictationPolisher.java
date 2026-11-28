@@ -19,7 +19,7 @@ final class DictationPolisher {
             + "add facts, guess intent or invent logical connections. Keep fragments if completion would require guessing. "
             + "Return unchanged text if no edits are needed. Return only a JSON object with one string field named text.";
 
-    interface Completion { void accept(String text); }
+    interface Completion { void accept(String text, String error); }
 
     static Request request(String original, String key) throws JSONException {
         return request(original, key, false);
@@ -44,14 +44,21 @@ final class DictationPolisher {
     static Call start(String original, String key, boolean translate, Completion completion) throws JSONException {
         Call call = client.newCall(request(original, key, translate));
         call.enqueue(new Callback() {
-            public void onFailure(Call call, IOException error) { completion.accept(null); }
+            public void onFailure(Call call, IOException error) { completion.accept(null, error instanceof java.io.InterruptedIOException ? "Request timed out" : "Network unavailable"); }
             public void onResponse(Call call, Response response) {
                 String result = null;
+                String error = "Invalid editing response";
                 try (Response r = response) {
                     if (r.code() == 200 && r.body() != null)
                         result = parse(r.body().string(), original);
+                    else error = switch (r.code()) {
+                        case 401 -> "Authentication failed";
+                        case 403, 404 -> "Model access unavailable";
+                        case 429 -> "Request limit reached";
+                        default -> "Editing service unavailable";
+                    };
                 } catch (IOException ignored) { }
-                completion.accept(call.isCanceled() ? null : result);
+                completion.accept(call.isCanceled() ? null : result, result == null ? error : null);
             }
         });
         return call;

@@ -47,6 +47,16 @@ Only Seed/Ark keys and polishing/punctuation settings transfer. Missing values
 never erase local keys. Conflicts require a choice; offline failures preserve
 local operation. See macos/Design/ConfigurationSync.md for the shared format.
 
+## Dictation latency (2026-11-28)
+
+Preserve the completion budgets below. One speculative Ark request may start on
+an available live final after release; reuse only for the exact selected cleaned
+source and same translation mode. Changed source cancels it. Results notify the
+keyboard on the next main turn; polling remains a watchdog for deadlines/document
+checks/deferred commit acknowledgement. Packets default to 100 ms, with the internal
+200 ms comparison preference. Timing includes firstText, speculation, packet size
+and p95. See `macos/Design/DictationLatency.md` at repository root.
+
 ## Text first, better later (2026-11-25)
 
 User request: dictation commits text quickly and stays robust; this supersedes the

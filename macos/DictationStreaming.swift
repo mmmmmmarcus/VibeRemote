@@ -18,8 +18,10 @@ enum SeedStreamFrame {
     /// packet (or every 15 s of audio), with the more accurate non-streaming model.
     static let nostreamEndpoint = URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream")!
     static let defaultResourceID = "volc.bigasr.sauc.duration"
-    /// 200 ms of 16 kHz mono s16le, the packet size the documentation says performs best.
-    static let audioPacketBytes = 6_400
+    /// 100 ms by default. Set dictationAudioPacketMilliseconds=200 for comparison.
+    static var audioPacketBytes: Int {
+        UserDefaults.standard.integer(forKey: "dictationAudioPacketMilliseconds") == 200 ? 6_400 : 3_200
+    }
 
     static func fullClientRequest(json: Data) -> Data { frame(kind: 0b0001, flags: 0, serialization: 1, payload: json) }
     static func audio(_ pcm: Data, last: Bool) -> Data { frame(kind: 0b0010, flags: last ? 0b0010 : 0, serialization: 0, payload: pcm) }
@@ -151,6 +153,7 @@ final class SeedStreamingSession: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.vvhisper.dictation.seed-stream")
     private let onEvent: @Sendable (Event) -> Void
+    private let packetBytes = SeedStreamFrame.audioPacketBytes
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var pending = Data()
@@ -196,9 +199,9 @@ final class SeedStreamingSession: @unchecked Sendable {
     }
 
     private func flushPackets() {
-        while pending.count >= SeedStreamFrame.audioPacketBytes {
-            send(SeedStreamFrame.audio(pending.prefix(SeedStreamFrame.audioPacketBytes), last: false))
-            pending.removeFirst(SeedStreamFrame.audioPacketBytes)
+        while pending.count >= packetBytes {
+            send(SeedStreamFrame.audio(pending.prefix(packetBytes), last: false))
+            pending.removeFirst(packetBytes)
         }
     }
 
@@ -872,7 +875,7 @@ enum SeedStreamVerifier {
             second?.append(chunk)
             offset += packet
             if offset == 2 * packet { startSecond() }
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: Double(packet) / 16_000)
         }
         let lastSent = ProcessInfo.processInfo.systemUptime - started
         if offset < 2 * packet { startSecond() }
@@ -959,6 +962,7 @@ final class DictationLiveHold {
     private(set) var partials = 0
     private(set) var firstTextAt: Date?
     private(set) var ended = false
+    var onEnd: (() -> Void)?
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     /// Applied to every partial before it reaches the typewriter, so the screen shows the
@@ -1002,7 +1006,7 @@ final class DictationLiveHold {
             latest = result
             deliver(DictationDictionary.apply(dictionary, to: result.text))
         case .final(let result):
-            if let result { latest = result }
+            if let result { latest = result; if firstTextAt == nil, !result.text.isEmpty { firstTextAt = Date() } }
             end()
         case .failed(let reason):
             failure = reason
@@ -1033,6 +1037,7 @@ final class DictationLiveHold {
 
     private func end() {
         ended = true
+        onEnd?()
         let pending = waiters
         waiters = []
         pending.forEach { $0.resume() }

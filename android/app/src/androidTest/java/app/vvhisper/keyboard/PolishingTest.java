@@ -40,7 +40,9 @@ public class PolishingTest {
                     PendingDictation draft = new PendingDictation(connection, 0, "hello");
                     okhttp3.Call call = new okhttp3.OkHttpClient().newCall(
                             new okhttp3.Request.Builder().url("https://example.invalid/polish").build());
-                    set(service, "pending", draft); set(service, "polishCall", call);
+                    DictationPolishPipeline pipeline = new DictationPolishPipeline((text, key, translate, completion) -> call);
+                    pipeline.start("hello", "synthetic", false);
+                    set(service, "pending", draft); set(service, "polishPipeline", pipeline);
                     set(service, "preview", "hello"); set(service, "plainLatin", true);
                     if (delete) {
                         var method = KeyboardService.class.getDeclaredMethod("erase");
@@ -54,8 +56,8 @@ public class PolishingTest {
                     assertEquals(-1, BaseInputConnection.getComposingSpanStart(field.getText()));
                     assertEquals(delete ? "hell" : "hellox", field.getText().toString());
                     var late = KeyboardService.class.getDeclaredMethod(
-                            "finishPolish", PendingDictation.class, String.class, boolean.class);
-                    late.setAccessible(true); late.invoke(service, draft, "Late replacement.", true);
+                            "finishPolish", PendingDictation.class, String.class, boolean.class, String.class);
+                    late.setAccessible(true); late.invoke(service, draft, "Late replacement.", true, null);
                     assertEquals(delete ? "hell" : "hellox", field.getText().toString());
                 }
             } catch (ReflectiveOperationException error) { throw new AssertionError(error); }

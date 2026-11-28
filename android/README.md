@@ -100,7 +100,7 @@ Typing or deleting during polishing cancels the pending request and preserves
 the visible transcript plus your edits. Late responses cannot replace the edited
 text. This applies to touch keys, direct editing actions and hardware key input.
 
-In vvhisper → Dictation, save a Volcengine Ark API Key. Polishing uses Seed 2.0 Mini with thinking disabled. Its key is stored separately from the Seed speech-recognition credential. Polish dictation defaults on. Only the final recognized transcript is sent for editing. The key is encrypted with Android Keystore. Missing credentials, a failed request, or the 15-second timeout leave the recognition result in place. The keyboard keeps the draft in Android’s native composing range while polishing. Each host editor controls its underline appearance. Editors that cannot confirm the draft range keep the recognition result locally.
+The private build supplies its Ark credential. Polishing uses Seed 2.0 Mini with thinking disabled. Its key is stored separately from the Seed speech-recognition credential. Polish dictation defaults on. After release, a live final may start editing while refinement finishes; only an exact matching selected transcript can reuse that result. Ordinary polishing has a 3-second budget (8 seconds for explicit translation), and short ordinary replies skip it. Missing credentials, a failed request, or the budget expiry leave the recognition result in place. The keyboard keeps the draft in Android’s native composing range while polishing. Each host editor controls its underline appearance. Editors that cannot confirm the draft range keep the recognition result locally.
 
 **Sentence Punctuation** defaults on. For a short, single-sentence dictation, it preserves the spoken ending or adds a period (。 for text containing Han characters). Turning it off removes terminal sentence punctuation. The setting applies after optional polishing. Longer passages, multiple sentences and ambiguous dotted text keep their recognized or polished endings.
 
@@ -119,3 +119,5 @@ with a dedicated Android Keystore key in no-backup storage; encryption failures
 retain only the bounded in-memory list, never a plaintext disk fallback. Nothing
 is logged or sent to speech/polishing providers. Selection rechecks the focused
 connection, selection and surrounding context before insertion.
+
+Dictation completion budgets, 100/200 ms packet comparison, and duration-only timing exports are documented in [Dictation latency](../macos/Design/DictationLatency.md).

@@ -75,7 +75,25 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
     private var timing: DictationTiming?
     /// A delivered final's metrics wait for the keyboard's commit acknowledgement.
     private var deliveredTiming: (id: UUID, record: DictationTiming, releasedAt: Date?)?
-    private var pendingReply: VoiceReply?
+    /// Coalesced delivery on the next main turn avoids reentrancy into command/commit.
+    var onReplyAvailable: (() -> Void)?
+    private var notificationPending = false
+    private var pendingReply: VoiceReply? {
+        didSet {
+            guard pendingReply != nil, !notificationPending else { return }
+            notificationPending = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.notificationPending = false
+                if self.pendingReply != nil { self.onReplyAvailable?() }
+            }
+        }
+    }
+    private var speculativeSource: String?
+    private var speculativeResult: DictationPolisher.Result?
+    private var speculativeStartedAt: Date?
+    private var speculativeCompletedAt: Date?
+    private var speculativeAttempted = false
     private(set) var level: VoiceLevel?
 
     init(capture: KeyboardAudioCapture, configuration: @escaping () -> Configuration? = { .load() },
@@ -99,6 +117,7 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
             }
             self.settings = settings; activeID = command.id; startedAt = now
             timing = DictationTiming(date: now)
+            timing?.packetMilliseconds = SeedStreamFrame.audioPacketBytes / 32
             // Connect while WebKit starts the microphone; audio queues until the socket is up.
             openStreams(id: command.id, settings: settings)
             // Request headers now own the in-flight credential; no key enters WebKit.
@@ -108,11 +127,13 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
             guard activeID == command.id, !finishing else { return }
             capture.stop(); level = nil; finishing = true; translate = command.translate == true
             releasedAt = now
+            timing?.captureStopped = Self.seconds(clock(), since: now)
             refinementDeadline = now.addingTimeInterval(Budget.refinement)
             recognitionDeadline = now.addingTimeInterval(Budget.recognition)
             timing?.hold = Self.seconds(now, since: startedAt)
             guard receivedAudio else { finishReply(text: "", empty: true); return }
             stream?.finish(); refinement?.finish()
+            speculate(at: now)
             resolve(at: now)
         case .cancel:
             if activeID == command.id || pendingReply?.id == command.id { cancel() }
@@ -169,18 +190,21 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
         switch event {
         case .partial(let result):
             switch source {
-            case .live: latest = result.text; pendingReply = VoiceReply(id: id, text: result.text, isFinal: false)
+            case .live:
+                if timing?.firstText == nil, !result.text.isEmpty { timing?.firstText = Self.seconds(now, since: startedAt) }
+                latest = result.text; pendingReply = VoiceReply(id: id, text: result.text, isFinal: false)
             case .refined: latestRefined = result.text
             case .retry: latestRetry = result.text
             }
         case .final(let result):
+            if timing?.firstText == nil, let result, !result.text.isEmpty { timing?.firstText = Self.seconds(now, since: startedAt) }
             let elapsed = releasedAt.map { Self.seconds(now, since: $0) }
             switch source {
             case .live: liveFinal = result?.text ?? latest; timing?.liveFinal = elapsed
             case .refined: refinedFinal = result?.text ?? latestRefined; timing?.refinedFinal = elapsed
             case .retry: retry = nil; complete(result?.text ?? latestRetry, path: .retry, at: now); return
             }
-            if finishing { resolve(at: now) }
+            if finishing { speculate(at: now); resolve(at: now) }
         case .failed(let kind):
             // Keep the most specific class; transport noise must not hide a key or quota error.
             if failure == nil || failure == .other { failure = kind }
@@ -189,7 +213,7 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
             case .refined: refinement?.cancel(); refinement = nil
             case .retry: retry = nil; giveUp(kind); return
             }
-            if finishing { resolve(at: now) }
+            if finishing { speculate(at: now); resolve(at: now) }
             else if stream == nil, refinement == nil, let failure, !failure.retryable { fail(id: id, message: failure.recognitionMessage, kind: failure) }
             // Otherwise keep recording: the buffered utterance is retried after release.
         }
@@ -260,16 +284,49 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
         }
         guard let id = activeID else { return }
         pendingReply = VoiceReply(id: id, text: clean, isFinal: false, polishing: true)
-        polishStartedAt = now
-        polishDeadline = now.addingTimeInterval(translate ? Budget.translation : Budget.polish)
-        let translating = translate
-        polisher.start(text: clean, settings: settings.polish, key: settings.arkKey, translate: translate, load: polishLoad) { [weak self] result in
-            guard let self, self.activeID == id, self.finishing, self.polishing else { return }
-            if let polishStartedAt = self.polishStartedAt { self.timing?.polishDuration = Self.seconds(self.clock(), since: polishStartedAt) }
-            self.timing?.polish = result.failure != nil ? .failed : translating ? .translated : .polished
-            if let failure = result.failure, self.timing?.error == nil { self.timing?.error = failure }
-            self.finishReply(text: settings.output.finalize(result.text), notice: result.notice)
+        if speculativeSource == clean {
+            polishStartedAt = speculativeStartedAt
+            polishDeadline = (speculativeStartedAt ?? now).addingTimeInterval(translate ? Budget.translation : Budget.polish)
+            timing?.speculation = "reused"
+            if let result = speculativeResult { acceptPolish(result, completedAt: speculativeCompletedAt) }
+            else { tick(at: now) }
+        } else {
+            if speculativeSource != nil { timing?.speculation = "discarded" }
+            polisher.cancel(); speculativeSource = nil; speculativeResult = nil
+            polishStartedAt = now
+            polishDeadline = now.addingTimeInterval(translate ? Budget.translation : Budget.polish)
+            startPolish(clean, id: id, settings: settings)
         }
+    }
+    /// At most one speculative request, only after release and on a live final.
+    /// The result stays private until recognition selects exactly the same source.
+    private func speculate(at now: Date) {
+        guard finishing, !polishing, !speculativeAttempted, refinedFinal == nil,
+              let id = activeID, let settings, let final = liveFinal else { return }
+        let clean = final.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, translate || (settings.polish.enabled && !DictationShortText.skipsPolishing(clean)),
+              let key = settings.arkKey, !key.isEmpty else { return }
+        speculativeAttempted = true; speculativeSource = clean; speculativeStartedAt = now
+        timing?.speculation = "started"
+        startPolish(clean, id: id, settings: settings)
+    }
+    private func startPolish(_ text: String, id: UUID, settings: Configuration) {
+        polisher.start(text: text, settings: settings.polish, key: settings.arkKey, translate: translate, load: polishLoad) { [weak self] result in
+            guard let self, self.activeID == id, self.finishing else { return }
+            if self.polishing { self.acceptPolish(result) }
+            else { self.speculativeResult = result; self.speculativeCompletedAt = self.clock() }
+        }
+    }
+    private func acceptPolish(_ result: DictationPolisher.Result, completedAt: Date? = nil) {
+        guard polishing, let settings else { return }
+        let now = clock()
+        // A completion queued at the deadline must not beat the budget watchdog.
+        let completed = completedAt ?? now
+        guard completed < polishDeadline else { tick(at: now); return }
+        if let polishStartedAt { timing?.polishDuration = Self.seconds(completed, since: polishStartedAt) }
+        timing?.polish = result.failure != nil ? .failed : translate ? .translated : .polished
+        if let failure = result.failure, timing?.error == nil { timing?.error = failure }
+        finishReply(text: settings.output.finalize(result.text), notice: result.notice)
     }
     private func finishReply(text: String, notice: String? = nil, empty: Bool = false) {
         guard let id = activeID else { return }
@@ -310,6 +367,7 @@ extension SeedStreamingSession: KeyboardSpeechStream {}
         latest = ""; latestRefined = ""; latestRetry = ""; liveFinal = nil; refinedFinal = nil; failure = nil
         audioBuffer = Data(); audioOverflow = false; timing = nil
         releasedAt = nil; polishStartedAt = nil; polishSource = ""
+        speculativeSource = nil; speculativeResult = nil; speculativeStartedAt = nil; speculativeCompletedAt = nil; speculativeAttempted = false
         refinementDeadline = .distantFuture; recognitionDeadline = .distantFuture; polishDeadline = .distantFuture
     }
     private static func seconds(_ now: Date, since start: Date) -> Double {

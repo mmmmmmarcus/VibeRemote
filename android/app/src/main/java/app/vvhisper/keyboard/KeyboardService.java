@@ -50,7 +50,10 @@ public final class KeyboardService extends InputMethodService {
     private final ArrayList<View> autofillChips = new ArrayList<>();
     private Dictation voice;
     private PendingDictation pending;
-    private okhttp3.Call polishCall;
+    private DictationPolishPipeline polishPipeline = new DictationPolishPipeline();
+    private DictationLatency dictationTiming;
+    private String liveFinalCandidate = "";
+    private boolean voiceReleased, speculativeAttempted, polishEnabled;
     private boolean sendAfter, translateAfter, shortcutsExpanded;
     private View languageKey;
     private long lastSpace;
@@ -1335,6 +1338,10 @@ public final class KeyboardService extends InputMethodService {
         int start = Math.min(selectionStart, selectionEnd);
         boolean sentencePunctuation = prefs().getBoolean("sentencePunctuation", true);
         long id = ++voiceId;
+        dictationTiming = new DictationLatency();
+        dictationTiming.put("packetMilliseconds", prefs().getInt("dictationAudioPacketMilliseconds", 100) == 200 ? 200 : 100);
+        voiceReleased = speculativeAttempted = false; liveFinalCandidate = "";
+        polishEnabled = prefs().getBoolean("polish", true);
         try {
             voice =
                     Dictation.start(
@@ -1344,6 +1351,7 @@ public final class KeyboardService extends InputMethodService {
                             new Dictation.Listener() {
                                 public void text(String result, boolean done) {
                                     if (id != voiceId || pending != null || editor() != owner) return;
+                                    if (!result.isEmpty() && dictationTiming != null) dictationTiming.firstText();
                                     if (!result.isEmpty()) preview = result;
                                     if (done) {
                                         finalizeRecognition(owner, start, sentencePunctuation);
@@ -1351,6 +1359,21 @@ public final class KeyboardService extends InputMethodService {
                                         editor().setComposingText(preview, 1);
                                 }
 
+                                public void liveFinal(String text) {
+                                    if (id != voiceId || editor() != owner || pending != null) return;
+                                    liveFinalCandidate = text.trim(); speculatePolish();
+                                }
+                                public void route(String path) {
+                                    if (id == voiceId && dictationTiming != null) dictationTiming.put("path", path);
+                                }
+                                public void timing(String stage) {
+                                    long at = android.os.SystemClock.elapsedRealtime();
+                                    main.post(() -> {
+                                        if (id != voiceId || dictationTiming == null) return;
+                                        long origin = stage.equals("micLive") ? dictationTiming.started : dictationTiming.released;
+                                        if (origin != 0) dictationTiming.put(stage, Math.max(0, at - origin) / 1000.0);
+                                    });
+                                }
                                 public void level(float level) {
                                     main.post(() -> { if (id == voiceId && voice != null && pending == null && notice.isEmpty()) updateVoiceLevel(level); });
                                 }
@@ -1369,7 +1392,29 @@ public final class KeyboardService extends InputMethodService {
         }
     }
 
+    private void speculatePolish() {
+        if (!voiceReleased || speculativeAttempted || liveFinalCandidate.isEmpty() ||
+                (!translateAfter && (!polishEnabled || DictationShortText.skipsPolishing(liveFinalCandidate)))) return;
+        try {
+            String key = ProviderKey.ARK.read(this);
+            if (key.isEmpty()) return;
+            speculativeAttempted = true;
+            polishPipeline.start(liveFinalCandidate, key, translateAfter);
+            if (dictationTiming != null) dictationTiming.put("speculation", "started");
+        } catch (Exception ignored) {}
+    }
+
     private void finalizeRecognition(InputConnection owner, int start, boolean sentencePunctuation) {
+        preview = preview.trim();
+        if (preview.isEmpty()) { closeVoice(); return; }
+        if (dictationTiming != null) dictationTiming.mark("recognition");
+        if (!translateAfter && (!polishEnabled || DictationShortText.skipsPolishing(preview))) {
+            if (dictationTiming != null) { dictationTiming.put("polish", polishEnabled ? "skippedShort" : "disabled"); dictationTiming.mark("textReady"); }
+            boolean committed = owner.commitText(SentencePunctuation.apply(preview, sentencePunctuation), 1);
+            if (committed && dictationTiming != null) dictationTiming.mark("committed");
+            boolean send = committed && sendAfter;
+            closeVoice(); if (send) submitDictation(); return;
+        }
         main.removeCallbacks(timeout);
         main.removeCallbacks(clearNotice);
         if (preview.isEmpty()) {
@@ -1377,13 +1422,14 @@ public final class KeyboardService extends InputMethodService {
             return;
         }
         String key = "";
-        if (translateAfter || prefs().getBoolean("polish", true)) {
+        if (translateAfter || polishEnabled) {
             try { key = ProviderKey.ARK.read(this); } catch (Exception ignored) { }
         }
+        boolean requestedEditing = translateAfter || polishEnabled;
         if (key.isEmpty() || start < 0 || owner.getExtractedText(new ExtractedTextRequest(), 0) == null) {
             boolean send = owner.commitText(SentencePunctuation.apply(preview, sentencePunctuation), 1) && sendAfter;
             closeVoice();
-            if (prefs().getBoolean("polish", true)) message(key.isEmpty()
+            if (requestedEditing) message(key.isEmpty()
                     ? "Polishing is unavailable in this build."
                     : "Polishing unavailable in this editor.");
             if (send) submitDictation();
@@ -1406,19 +1452,20 @@ public final class KeyboardService extends InputMethodService {
         pending = draft;
         notice = "Polishing…";
         refreshStrip();
-        try {
-            polishCall = DictationPolisher.start(preview, key, translateAfter,
-                    text -> main.post(() -> finishPolish(draft, text, sentencePunctuation)));
-        } catch (Exception e) {
-            finishPolish(draft, null, sentencePunctuation);
-        }
+        boolean reused = polishPipeline.matches(preview, translateAfter);
+        if (dictationTiming != null && speculativeAttempted) dictationTiming.put("speculation", reused ? "reused" : "discarded");
+        polishPipeline.select(preview, key, translateAfter,
+                (text, error) -> finishPolish(draft, text, sentencePunctuation, error));
     }
 
-    private void finishPolish(PendingDictation draft, String text, boolean sentencePunctuation) {
+    private void finishPolish(PendingDictation draft, String text, boolean sentencePunctuation, String error) {
         if (pending != draft) return;
-        boolean send = draft.complete(editor(), SentencePunctuation.apply(text == null ? preview : text, sentencePunctuation)) && sendAfter;
+        if (dictationTiming != null) { dictationTiming.put("polishDuration", polishPipeline.duration()); dictationTiming.mark("textReady"); }
+        boolean committed = draft.complete(editor(), SentencePunctuation.apply(text == null ? preview : text, sentencePunctuation));
+        if (committed && dictationTiming != null) dictationTiming.mark("committed");
+        boolean send = committed && sendAfter;
         closeVoice();
-        if (text == null) message("Polishing unavailable. Kept the transcript.");
+        if (error != null) message(error + ". Kept the transcript.");
         if (send) submitDictation();
     }
 
@@ -1445,9 +1492,12 @@ public final class KeyboardService extends InputMethodService {
     }
 
     private void stopVoice(boolean send) {
-        if (voice == null || pending != null) return;
+        if (voice == null || pending != null || voiceReleased) return;
         sendAfter = send;
+        voiceReleased = true;
+        if (dictationTiming != null) { dictationTiming.released = SystemClock.elapsedRealtime(); dictationTiming.duration("hold", dictationTiming.started); }
         voice.stop();
+        speculatePolish();
         notice = "Finishing…"; updateVoiceLevel(0);
         refreshStrip();
         main.removeCallbacks(timeout);
@@ -1456,9 +1506,9 @@ public final class KeyboardService extends InputMethodService {
 
     private void closeVoice() {
         ++voiceId;
+        polishPipeline.cancel();
+        if (dictationTiming != null) { dictationTiming.save(this); dictationTiming = null; }
         pending = null;
-        if (polishCall != null) polishCall.cancel();
-        polishCall = null;
         main.removeCallbacks(timeout);
         if (voice != null) voice.cancel();
         voice = null;
@@ -1470,7 +1520,7 @@ public final class KeyboardService extends InputMethodService {
     }
 
     private void cancelVoice(boolean keep) {
-        if (voice == null && pending == null && polishCall == null) return;
+        if (voice == null && pending == null) return;
         if (pending != null) pending.cancel(editor());
         else if (!preview.isEmpty() && editor() != null) {
             if (keep) editor().finishComposingText();
