@@ -39,7 +39,19 @@ import UIKit
             }
         }
     }
-    private func withHost(_ body: (KeyboardViewController, TextViewProxy, UIView) async throws -> Void) async throws {
+    private func assertHistoricalSpacing(_ keyboard: KeyboardViewController, file: StaticString = #filePath, line: UInt = #line) {
+        let natural = KeyboardMetrics(width: keyboard.view.bounds.width, landscape: keyboard.testingLandscape == true)
+        let rects = keys(keyboard).map { frame($0, keyboard) }.sorted { $0.minY < $1.minY }
+        var rows: [CGRect] = []
+        for rect in rects where rows.last.map({ abs($0.minY - rect.minY) > 0.5 }) ?? true { rows.append(rect) }
+        XCTAssertEqual(rows.count, 4, file: file, line: line)
+        for rect in rows { XCTAssertEqual(rect.height, natural.keyHeight, accuracy: 0.01, file: file, line: line) }
+        for (upper, lower) in zip(rows, rows.dropFirst()) {
+            XCTAssertEqual(lower.minY - upper.maxY, natural.rowGap, accuracy: 0.01,
+                           "Restore the historical gap, not just four visible rows", file: file, line: line)
+        }
+    }
+    private func withHost(constrainHeight: Bool = true, _ body: (KeyboardViewController, TextViewProxy, UIView) async throws -> Void) async throws {
         let oldMode = UserDefaults.standard.object(forKey: KeyboardLayoutMode.preferenceKey)
         let oldLanguage = UserDefaults.standard.object(forKey: KeyboardLanguage.preferenceKey)
         KeyboardLayoutMode.full.save(); KeyboardLanguage.chinese.save()
@@ -56,9 +68,9 @@ import UIKit
         NSLayoutConstraint.activate([
             keyboard.view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
             keyboard.view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-            keyboard.view.topAnchor.constraint(equalTo: host.topAnchor),
-            keyboard.view.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+            keyboard.view.topAnchor.constraint(equalTo: host.topAnchor)
         ])
+        if constrainHeight { keyboard.view.bottomAnchor.constraint(equalTo: host.bottomAnchor).isActive = true }
         defer {
             keyboard.viewWillDisappear(false); keyboard.view.removeFromSuperview()
             window.isHidden = true; host.removeFromSuperview()
@@ -78,6 +90,7 @@ import UIKit
                 for height in [natural, 216, 240, natural] {
                     layout(keyboard, host: host, width: width, height: height, landscape: landscape)
                     assertContained(keyboard)
+                    if height == natural { assertHistoricalSpacing(keyboard) }
                     XCTAssertEqual(keyboard.preferredContentSize.height, natural, accuracy: 0.01,
                                    "A short grant must not ratchet down the requested height")
                     XCTAssertEqual(keyboard.inputView?.allowsSelfSizing, true)
@@ -98,6 +111,132 @@ import UIKit
             }
         }
     }
+    func testSelfSizingMeasurementKeepsNaturalRequestUnderRequiredHostConstraints() async throws {
+        try await withHost { keyboard, _, host in
+            let input = try XCTUnwrap(keyboard.inputView as? KeyboardInputView)
+            XCTAssertTrue(input === keyboard.view)
+            for width: CGFloat in [375, 402, 440, 466, 669, 951, 669, 466] {
+                let landscape = width == 951
+                let natural = KeyboardMetrics(width: width, landscape: landscape).contentHeight
+                for height in [natural, 216, 240, natural] {
+                    layout(keyboard, host: host, width: width, height: height, landscape: landscape)
+                    assertContained(keyboard)
+                    if height == natural { assertHistoricalSpacing(keyboard) }
+                    XCTAssertEqual(input.intrinsicContentSize.width, UIView.noIntrinsicMetric)
+                    XCTAssertEqual(input.intrinsicContentSize.height, natural, accuracy: 0.01)
+                    let hostHeight = input.heightAnchor.constraint(equalToConstant: height)
+                    hostHeight.identifier = "test.host-granted-input-height"
+                    hostHeight.isActive = true
+                    for target in [UIView.layoutFittingCompressedSize, CGSize(width: width, height: 216), CGSize(width: width, height: natural)] {
+                        XCTAssertEqual(input.systemLayoutSizeFitting(target).height, natural, accuracy: 0.01,
+                                       "Self-sizing must not measure the current short host grant as the next request")
+                    }
+                    hostHeight.isActive = false
+                    XCTAssertEqual(input.bounds.height, height, accuracy: 0.01, "Measurement must not resize the granted frame")
+                }
+                keyboard.setMiniMode(true, animated: false)
+                let mini = KeyboardMetrics(width: width, landscape: landscape, mini: true).contentHeight
+                XCTAssertEqual(input.systemLayoutSizeFitting(.zero).height, mini, accuracy: 0.01)
+                XCTAssertEqual(input.intrinsicContentSize.height, mini, accuracy: 0.01)
+                keyboard.setMiniMode(false, animated: false)
+                XCTAssertEqual(input.systemLayoutSizeFitting(.zero).height, natural, accuracy: 0.01)
+            }
+        }
+    }
+
+    func testUnconstrainedHeightUsesHistoricalMetricsAfterResize() async throws {
+        try await withHost(constrainHeight: false) { keyboard, _, host in
+            for width: CGFloat in [375, 402, 440, 466, 669, 951, 669, 466] {
+                let landscape = width == 951
+                let natural = KeyboardMetrics(width: width, landscape: landscape).contentHeight
+                layout(keyboard, host: host, width: width, height: natural, landscape: landscape)
+                // A width change updates the request during the controller's
+                // layout pass. Give its parent the next constraint-layout turn.
+                host.setNeedsLayout(); host.layoutIfNeeded()
+                keyboard.view.setNeedsLayout(); keyboard.view.layoutIfNeeded()
+                XCTAssertEqual(keyboard.view.bounds.height, natural, accuracy: 0.01)
+                assertContained(keyboard); assertHistoricalSpacing(keyboard)
+            }
+        }
+    }
+
+    func testInputViewRequestSurvivesWindowReattachment() {
+        let input = KeyboardInputView(frame: CGRect(x: 0, y: 0, width: 669, height: 216), inputViewStyle: .keyboard)
+        let natural = KeyboardMetrics(width: 669).contentHeight
+        input.requestHeight(natural)
+        let first = UIWindow(frame: CGRect(x: 0, y: 0, width: 669, height: 216))
+        let second = UIWindow(frame: first.frame)
+        for window in [first, second] {
+            input.removeFromSuperview(); window.addSubview(input)
+            XCTAssertEqual(input.intrinsicContentSize.height, natural, accuracy: 0.01)
+            XCTAssertEqual(input.systemLayoutSizeFitting(.zero).height, natural, accuracy: 0.01)
+        }
+        input.removeFromSuperview()
+    }
+
+    /// Synthetic full-frame evidence only: the backing fill is not system glass.
+    /// Run unchanged on the baseline and the repair to distinguish negotiation
+    /// from geometry at identical, explicitly granted heights.
+    func testFullFrameSizingEvidence() async throws {
+        try await withHost { keyboard, proxy, host in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            keyboard.snippetStore = SnippetStore(directory: directory)
+            let snippet = try keyboard.snippetStore.save(abbreviation: "reply", content: "Synthetic fixture — 谢谢！")
+            var measurements: [[String: Any]] = []
+            for width: CGFloat in [375, 402, 440, 466, 669, 951] {
+                let landscape = width == 951
+                let natural = KeyboardMetrics(width: width, landscape: landscape).contentHeight
+                for (pose, height) in [("natural", natural), ("constrained", CGFloat(216))] {
+                    layout(keyboard, host: host, width: width, height: height, landscape: landscape)
+                    assertContained(keyboard)
+                    let measured = keyboard.view.systemLayoutSizeFitting(CGSize(width: width, height: 216))
+                    let compressed = keyboard.view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+                    // Model a host-owned height constraint installed directly on
+                    // the input view, not just the enclosing controller edges.
+                    let hostHeight = keyboard.view.heightAnchor.constraint(equalToConstant: height)
+                    hostHeight.identifier = "test.host-granted-input-height"
+                    hostHeight.isActive = true
+                    let requiredFit = keyboard.view.systemLayoutSizeFitting(CGSize(width: width, height: 216))
+                    hostHeight.isActive = false
+                    let rowFrames = keys(keyboard).map { frame($0, keyboard) }.sorted { $0.minY < $1.minY }
+                    var rowTops: [CGFloat] = [], rowHeights: [CGFloat] = []
+                    for rect in rowFrames where rowTops.last.map({ abs($0 - rect.minY) > 0.5 }) ?? true {
+                        rowTops.append(rect.minY); rowHeights.append(rect.height)
+                    }
+                    measurements.append(["width": width, "pose": pose, "grantedHeight": height,
+                                         "requestedHeight": keyboard.preferredContentSize.height,
+                                         "measuredHeight": measured.height, "compressedFitHeight": compressed.height,
+                                         "requiredHeightConstraintFit": requiredFit.height,
+                                         "intrinsicHeight": keyboard.view.intrinsicContentSize.height,
+                                         "rowTops": rowTops, "rowHeights": rowHeights])
+                    print("Sizing evidence width=\(width) pose=\(pose) granted=\(height) request=\(natural) measured=\(measured.height) compressed=\(compressed.height) requiredFit=\(requiredFit.height) rows=\(rowTops)")
+                    let name = "sizing-\(Int(width))-\(pose)"
+                    try capture(keyboard, host: host, name: "\(name)-idle")
+                    try tap("k", keyboard)
+                    try await wait { self.descendants(keyboard.view).contains { $0.accessibilityIdentifier == "candidate.0" } }
+                    keyboard.view.layoutIfNeeded(); assertContained(keyboard)
+                    try capture(keyboard, host: host, name: "\(name)-candidates")
+                    try tap("space", keyboard)
+                    try await wait { proxy.editor.markedTextRange == nil }
+                    keyboard.openSnippets()
+                    try await wait { keyboard.snippetStrip.records.first?.id == snippet.id }
+                    try await wait {
+                        keyboard.view.layoutIfNeeded(); keyboard.snippetStrip.layoutIfNeeded()
+                        keyboard.snippetStrip.collection.layoutIfNeeded()
+                        return !keyboard.snippetStrip.collection.visibleCells.isEmpty
+                    }
+                    assertContained(keyboard)
+                    try capture(keyboard, host: host, name: "\(name)-snippets")
+                    keyboard.closeSnippets()
+                }
+            }
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let url = root.appendingPathComponent(".airbuild/artifacts/phone-layout/sizing-measurements.json")
+            try JSONSerialization.data(withJSONObject: measurements, options: [.prettyPrinted, .sortedKeys]).write(to: url)
+        }
+    }
+
     private func wait(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }

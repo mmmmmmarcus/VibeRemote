@@ -193,6 +193,10 @@ final class KeyboardViewController: UIInputViewController {
     private var lastShift = Date.distantPast
     private var started = false
 
+    override func loadView() {
+        inputView = KeyboardInputView(frame: .zero, inputViewStyle: .keyboard)
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         isMiniMode = KeyboardLayoutMode.load() == .mini
@@ -213,9 +217,8 @@ final class KeyboardViewController: UIInputViewController {
         keyboardHeight = view.heightAnchor.constraint(equalToConstant: metrics.contentHeight)
         keyboardHeight.priority = .init(999)
         keyboardHeight.isActive = true
-        // Opt into UIInputView's public self-sizing contract. A host can still
-        // impose a smaller required height, so layout must use its actual bounds.
-        inputView?.allowsSelfSizing = true
+        // The input view reports the natural request through public self-sizing;
+        // the host can still impose smaller bounds, which layout fits separately.
         requestKeyboardHeight(metrics.contentHeight)
         status.font = .systemFont(ofSize: 14)
         status.textAlignment = .center; status.textColor = .label; status.numberOfLines = 2
@@ -377,10 +380,10 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func requestKeyboardHeight(_ height: CGFloat) {
         keyboardHeight.constant = height
+        (inputView as? KeyboardInputView)?.requestHeight(height)
         let size = CGSize(width: 0, height: height)
         if preferredContentSize != size {
             preferredContentSize = size
-            view.invalidateIntrinsicContentSize()
         }
     }
 
