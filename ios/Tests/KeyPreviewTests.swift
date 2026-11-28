@@ -4,6 +4,33 @@ import UIKit
 
 @MainActor
 final class KeyPreviewTests: XCTestCase {
+    func testSoftLiftIsContinuousAtEdgesAndHasNoAnimation() throws {
+        let popup = KeyPreviewView()
+        for top: CGFloat in [42, 90] {
+            for x: CGFloat in [2, 170, 338] {
+                let key = CGRect(x: x, y: top, width: 35, height: 44)
+                popup.show("Q", above: key, within: CGRect(x: 0, y: 0, width: 375, height: 250),
+                           font: .systemFont(ofSize: 22))
+                let shape = try XCTUnwrap(popup.layer.sublayers?.compactMap { $0 as? CAShapeLayer }.first)
+                let path = try XCTUnwrap(shape.path)
+                // No gap between the raised head and the actual key, including clamped edge keys.
+                let head = popup.headFrame
+                let base = key.offsetBy(dx: -popup.frame.minX, dy: -popup.frame.minY)
+                for y in stride(from: head.midY, through: base.maxY - 6, by: 1) {
+                    let fraction = min(1, max(0, (y - head.midY) / (base.minY - head.midY)))
+                    let center = head.midX + (base.midX - head.midX) * fraction
+                    XCTAssertTrue(path.contains(CGPoint(x: center, y: y)))
+                }
+                XCTAssertGreaterThanOrEqual(popup.frame.minX, 0)
+                XCTAssertLessThanOrEqual(popup.frame.maxX, 375)
+                XCTAssertTrue(shape.animationKeys()?.isEmpty ?? true)
+                XCTAssertTrue(popup.layer.animationKeys()?.isEmpty ?? true)
+                popup.isHidden = true
+                XCTAssertTrue(popup.isHidden)
+            }
+        }
+    }
+
     private func descendants(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + descendants($0) } }
     private func key(_ value: String, in keyboard: KeyboardViewController) throws -> KeyControl {
         try XCTUnwrap(descendants(keyboard.view).compactMap { $0 as? KeyControl }.first { $0.value == value })

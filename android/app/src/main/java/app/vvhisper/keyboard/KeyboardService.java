@@ -20,7 +20,8 @@ public final class KeyboardService extends InputMethodService {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Candidates dictionary = new Candidates();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private LinearLayout board, strip, row;
+    private KeyboardBoard board;
+    private LinearLayout strip, row;
     private FrameLayout floatingFrame;
     private AlphabetKeys alphabet;
     private View letterDelete, compactDelete;
@@ -183,6 +184,7 @@ public final class KeyboardService extends InputMethodService {
     @Override
     public void onStartInput(EditorInfo info, boolean restarting) {
         super.onStartInput(info, restarting);
+        if (board != null) board.clearPreview();
         closeVoice();
         clearAutofill();
         spelling = "";
@@ -228,6 +230,7 @@ public final class KeyboardService extends InputMethodService {
 
     @Override
     public void onFinishInputView(boolean finishing) {
+        if (board != null) board.clearPreview();
         if (alphabet != null) alphabet.setCompact(mini, false);
         cancelVoice(false);
         clearAutofill();
@@ -239,6 +242,7 @@ public final class KeyboardService extends InputMethodService {
 
     @Override
     public void onFinishInput() {
+        if (board != null) board.clearPreview();
         cancelVoice(false);
         finishSpelling(false);
         super.onFinishInput();
@@ -1549,13 +1553,10 @@ public final class KeyboardService extends InputMethodService {
         int symbolIndex;
         String symbolBefore, symbolAfter;
         InputConnection symbolOwner;
-        void hideBubble() { if (bubble != null) bubble.dismiss(); bubble = null; alternatives = null; symbolsToChoose = null; }
+        void hideBubble() { if (board != null) board.hidePreview(key); if (bubble != null) bubble.dismiss(); bubble = null; alternatives = null; symbolsToChoose = null; }
         void preview() {
             if (!kind.equals("letter") && !kind.equals("symbol")) return;
-            TextView label = tile(key.getText().toString(), key.getContentDescription().toString(), 30);
-            label.setBackgroundColor(keyColor); bubble = new PopupWindow(label, Math.max(dp(48), key.getWidth()+dp(12)), dp(54), false);
-            bubble.setTouchable(false); bubble.setElevation(dp(3)); int[] location = new int[2]; key.getLocationOnScreen(location);
-            bubble.showAtLocation(board, Gravity.TOP|Gravity.LEFT, location[0]-dp(6), Math.max(0,location[1]-dp(50)));
+            board.showPreview(key, keyColor, ink);
         }
         void showSymbols() {
             hideBubble(); symbolsToChoose = MobileSymbols.alternatives(key.getText().toString());
@@ -1670,6 +1671,7 @@ public final class KeyboardService extends InputMethodService {
                                         .indexOf(key.getText().toString().toLowerCase(Locale.ROOT));
                         if (i >= 0) {
                             key.removeCallbacks(holdAction);
+                            hideBubble();
                             type(String.valueOf((i + 1) % 10), false);
                             consumed = true;
                         }

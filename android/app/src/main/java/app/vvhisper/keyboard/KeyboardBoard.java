@@ -13,6 +13,42 @@ final class KeyboardBoard extends LinearLayout {
     private View target;
     private boolean pinching, switched;
     private float span;
+    private View previewOwner;
+    private KeyPreviewDrawable preview;
+
+    void showPreview(android.widget.TextView key, int color, int ink) {
+        clearPreview();
+        if (getWidth() <= 4 || key.getWidth() == 0 || key.getHeight() == 0) return;
+        android.graphics.Rect bounds = new android.graphics.Rect();
+        key.getDrawingRect(bounds);
+        offsetDescendantRectToMyCoords(key, bounds);
+        preview = new KeyPreviewDrawable(new android.graphics.RectF(bounds), getWidth(),
+                getResources().getDisplayMetrics().density, key.getText().toString(), color, ink, key.getTypeface());
+        preview.setBounds(0, 0, getWidth(), getHeight());
+        previewOwner = key;
+        getOverlay().add(preview);
+    }
+
+    void hidePreview(View owner) {
+        if (previewOwner == owner) clearPreview();
+    }
+
+    void clearPreview() {
+        if (preview != null) getOverlay().remove(preview);
+        preview = null;
+        previewOwner = null;
+    }
+
+    @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        clearPreview();
+        super.onLayout(changed, l, t, r, b);
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        clearPreview();
+        super.onDetachedFromWindow();
+    }
+
 
     KeyboardBoard(Context context, Consumer<Boolean> compact) {
         super(context);

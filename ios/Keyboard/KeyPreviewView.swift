@@ -1,6 +1,6 @@
 import UIKit
 
-/// One raised character balloon, drawn inside the extension's existing bounds.
+/// One continuous Soft lift silhouette, drawn inside the extension's existing bounds.
 /// It never participates in hit testing or changes key/candidate geometry.
 final class KeyPreviewView: UIView {
     let label = UILabel()
@@ -29,8 +29,8 @@ final class KeyPreviewView: UIView {
 
     func show(_ text: String, above key: CGRect, within container: CGRect, font: UIFont) {
         updateColors()
-        let width = min(82, max(58, key.width + 22))
-        let desiredHeight = min(58, max(46, key.height + 8))
+        let width = min(container.width - 4, min(82, max(62, key.width + 26)))
+        let desiredHeight: CGFloat = 56
         let y = max(container.minY + 2, key.minY - desiredHeight - 7)
         let height = min(desiredHeight, max(32, key.minY - y - 2))
         let head = CGRect(x: min(max(key.midX - width / 2, container.minX + 2), container.maxX - width - 2),
@@ -38,23 +38,28 @@ final class KeyPreviewView: UIView {
         frame = head.union(key)
         headFrame = head.offsetBy(dx: -frame.minX, dy: -frame.minY)
         let stem = key.offsetBy(dx: -frame.minX, dy: -frame.minY)
-        let h = headFrame, r: CGFloat = 10, s: CGFloat = 7
+        let h = headFrame, r: CGFloat = 14, s = min(6, stem.height / 4)
+        // Vertical tangents at both ends avoid the old horizontal shelf/pinch.
+        // Compress the shoulder with the head when the top row has less room.
+        let shoulderY = h.minY + h.height * (36 / 56)
+        let neckY = max(shoulderY + 1, stem.minY + min(4, stem.height / 5))
+        let bend = (neckY - shoulderY) * 0.52
         let path = UIBezierPath()
         path.move(to: CGPoint(x: h.minX + r, y: h.minY))
         path.addLine(to: CGPoint(x: h.maxX - r, y: h.minY))
         path.addQuadCurve(to: CGPoint(x: h.maxX, y: h.minY + r), controlPoint: CGPoint(x: h.maxX, y: h.minY))
-        path.addLine(to: CGPoint(x: h.maxX, y: h.maxY - r))
-        path.addQuadCurve(to: CGPoint(x: h.maxX - r, y: h.maxY), controlPoint: CGPoint(x: h.maxX, y: h.maxY))
-        path.addCurve(to: CGPoint(x: stem.maxX, y: stem.minY + s),
-                      controlPoint1: CGPoint(x: h.maxX - r, y: h.maxY + 4), controlPoint2: CGPoint(x: stem.maxX, y: stem.minY))
+        path.addLine(to: CGPoint(x: h.maxX, y: shoulderY))
+        path.addCurve(to: CGPoint(x: stem.maxX, y: neckY),
+                      controlPoint1: CGPoint(x: h.maxX, y: shoulderY + bend),
+                      controlPoint2: CGPoint(x: stem.maxX, y: neckY - bend))
         path.addLine(to: CGPoint(x: stem.maxX, y: stem.maxY - s))
         path.addQuadCurve(to: CGPoint(x: stem.maxX - s, y: stem.maxY), controlPoint: CGPoint(x: stem.maxX, y: stem.maxY))
         path.addLine(to: CGPoint(x: stem.minX + s, y: stem.maxY))
         path.addQuadCurve(to: CGPoint(x: stem.minX, y: stem.maxY - s), controlPoint: CGPoint(x: stem.minX, y: stem.maxY))
-        path.addLine(to: CGPoint(x: stem.minX, y: stem.minY + s))
-        path.addCurve(to: CGPoint(x: h.minX + r, y: h.maxY),
-                      controlPoint1: CGPoint(x: stem.minX, y: stem.minY), controlPoint2: CGPoint(x: h.minX + r, y: h.maxY + 4))
-        path.addQuadCurve(to: CGPoint(x: h.minX, y: h.maxY - r), controlPoint: CGPoint(x: h.minX, y: h.maxY))
+        path.addLine(to: CGPoint(x: stem.minX, y: neckY))
+        path.addCurve(to: CGPoint(x: h.minX, y: shoulderY),
+                      controlPoint1: CGPoint(x: stem.minX, y: neckY - bend),
+                      controlPoint2: CGPoint(x: h.minX, y: shoulderY + bend))
         path.addLine(to: CGPoint(x: h.minX, y: h.minY + r))
         path.addQuadCurve(to: CGPoint(x: h.minX + r, y: h.minY), controlPoint: CGPoint(x: h.minX, y: h.minY))
         path.close()
@@ -62,14 +67,16 @@ final class KeyPreviewView: UIView {
         shape.frame = bounds; shape.path = path.cgPath; layer.shadowPath = path.cgPath
         CATransaction.commit()
         label.text = text
-        label.font = font.withSize(min(38, max(30, font.pointSize + 8)))
+        label.font = font.withSize(min(32, h.height - 4))
         label.frame = h.insetBy(dx: 2, dy: 0)
         isHidden = false
     }
 
     private func updateColors() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
         shape.fillColor = Self.fill.resolvedColor(with: traitCollection).cgColor
         shape.strokeColor = UIColor.separator.resolvedColor(with: traitCollection).withAlphaComponent(0.2).cgColor
         shape.lineWidth = 0.5
+        CATransaction.commit()
     }
 }

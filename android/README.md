@@ -8,6 +8,13 @@
 
 vvhisper is a native Android input method and companion settings app for Android 10 and later. Enable it in **vvhisper → Enable vvhisper**, select it with **Choose keyboard**, then open **Try keyboard** or a text field in another app. Dictation runs in the active keyboard and keeps the current editor on screen. If microphone permission is missing, tap the keyboard’s **Settings** action to grant it, then retry. Typing works offline.
 
+### Soft lift character previews — 2026-11-28
+
+Character keys show a single curved outline connected to the pressed key, matching
+iOS. It appears and disappears immediately without animation. The preview is drawn
+inside the keyboard overlay, clamped at the edges, and never intercepts touches or
+changes key layout. Release, cancellation, holds, layout changes and dismissal clear it.
+
 ### Mobile parity update — 2026-11-20
 
 - Compact mode is one row: Expand, Dictate, Delete Word, Enter; mode choice persists.

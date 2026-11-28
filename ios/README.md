@@ -6,6 +6,15 @@
 > `macos/Design/PrivateBuilds.md`. Do not distribute these private app archives.
 
 
+## Soft lift character previews — 2026-11-28
+
+Character previews use one continuous outline, with vertical-tangent curves joining
+the raised head to the pressed key. Show and hide are immediate, with no animation.
+The head shifts inward at the edges and compresses within the keyboard's available
+top space. Preview ownership, typing, hold actions and touch targets are unchanged.
+Android uses the same shape in its keyboard drawing overlay, without a separate
+character popup window.
+
 ## Duo keyboard host sizing — 2026-11-27
 
 The keyboard's design height is a request, not a guarantee from the remote host.
